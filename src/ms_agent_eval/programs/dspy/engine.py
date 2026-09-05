@@ -93,8 +93,10 @@ PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
 }
 
 
-def create_case_builder_program() -> dspy.Predict:
-    return dspy.Predict(CaseBuilder)
+def create_case_builder_program(instructions: str) -> dspy.Predict:
+    if not instructions.strip():
+        raise ConfigurationError("case-builder instructions must not be empty")
+    return dspy.Predict(CaseBuilder.with_instructions(instructions))
 
 
 def create_solver_program() -> dspy.Predict:

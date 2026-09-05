@@ -8,24 +8,25 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
-from ms_agent_eval.programs.dspy.budget import BudgetLedger, BudgetLimits
-from ms_agent_eval.programs.dspy.engine import create_case_builder_program, program_hash
-from ms_agent_eval.providers.ollama import create_observed_lm
+from ms_agent_eval.ui import QuestionaryPromptBackend
 
-from .case_builder import (
-    CaseBuilderService,
-    CaseDraftStore,
-    load_snapshot_context,
-)
 from .errors import AgentEvalError, ConfigurationError, IntegrityError
 from .hashing import json_value
-from .planning import acquire_snapshot, compile_workspace, inspect_workspace
-from .runner import ExperimentRunner
-from .storage import FilesystemArtifactStore
-from .workspace import ExperimentMode, WorkspaceRepository, resolve_role_models
+from .setup import run_guided_setup
+from .workspace import (
+    ExperimentMode,
+    WorkspaceConfiguration,
+    WorkspaceRepository,
+    resolve_role_models,
+)
+from .workspace_templates import build_workspace_template, write_workspace_template
+
+if TYPE_CHECKING:
+    from .case_builder import CaseDraftStore
 
 
 def _workspace_argument(parser: argparse.ArgumentParser) -> None:
@@ -37,9 +38,12 @@ def _parser() -> argparse.ArgumentParser:
         prog="ms-agent-eval",
         description="Build, optimize, and evaluate DSPy repository agents with three LLM roles.",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
 
-    init = commands.add_parser("init", help="Create a schema-v2 DSPy workspace.")
+    setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
+    setup.add_argument("--workspace", type=Path)
+
+    init = commands.add_parser("init", help="Create a schema-v4 DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -49,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
     skills.add_argument("--skill-file", action="append")
     init.add_argument("--cases", type=Path, default=Path("cases"))
     init.add_argument("--workspace", type=Path, default=Path("workspace.yaml"))
+    init.add_argument("--api-base-url", required=True)
+    init.add_argument("--api-key-env")
+    init.add_argument("--case-builder-model", required=True)
+    init.add_argument("--solver-model", required=True)
+    init.add_argument("--judge-model", required=True)
 
     validate = commands.add_parser("validate", help="Validate the complete workspace contract.")
     _workspace_argument(validate)
@@ -78,8 +87,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
     workspace_file = arguments.workspace.resolve()
-    if workspace_file.exists():
-        raise IntegrityError(f"workspace already exists: {workspace_file}")
     root = workspace_file.parent
     cases = arguments.cases
     if cases.is_absolute():
@@ -92,154 +99,33 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         skills_block = {"directory": arguments.skills_directory}
     else:
         skills_block = {"files": arguments.skill_file}
-    payload = {
-        "schema_version": 2,
-        "workspace": {"id": arguments.id},
-        "evaluation": {
-            "repository": {"url": arguments.repo, "ref": arguments.ref},
-            "instructions": {
-                "global": arguments.global_instructions,
-                "skills": skills_block,
-            },
-            "case_builder": {
-                "dspy": {
-                    "module": "Predict",
-                    "signature": {
-                        "inputs": {
-                            "global_context": "str",
-                            "skill_context": "str",
-                            "source_context": "str",
-                            "coverage_request": "str",
-                            "existing_case_summaries": "list[str]",
-                        },
-                        "outputs": {
-                            "case_spec": "dict[str, object]",
-                            "prompt": "str",
-                            "expected_response": "str",
-                            "rubric": "dict[str, object]",
-                            "expected_artifacts": "dict[str, str]",
-                            "source_paths": "list[str]",
-                            "leakage_group": "str",
-                        },
-                    },
-                },
-                "model": {
-                    "provider": "ollama",
-                    "name_env": "MS_AGENT_EVAL_CASE_BUILDER_MODEL",
-                    "endpoint_env": "OLLAMA_BASE_URL",
-                    "parameters": {"temperature": 0.2},
-                },
-                "budget": {"model_calls": 100, "tokens": 500000},
-                "output": {"drafts": "external", "promotion": "explicit"},
-            },
-            "cases": {"directory": cases.as_posix()},
-            "splits": {"file": f"{cases.as_posix()}/splits.yaml"},
-            "judge": {
-                "dspy": {
-                    "module": "Predict",
-                    "signature": {
-                        "inputs": {
-                            "task": "str",
-                            "skill_context": "str",
-                            "rubric": "str",
-                            "expected_response": "str",
-                            "expected_artifacts": "str",
-                            "candidate_response": "str",
-                        },
-                        "outputs": {
-                            "criterion_scores": "dict[str, float]",
-                            "hard_failures": "list[str]",
-                            "feedback": "str",
-                        },
-                    },
-                },
-                "model": {
-                    "provider": "ollama",
-                    "name_env": "MS_AGENT_EVAL_JUDGE_MODEL",
-                    "endpoint_env": "OLLAMA_BASE_URL",
-                    "parameters": {"temperature": 0.0},
-                },
-                "calibration": {"directory": "judge-calibration"},
-                "repetitions": 3,
-            },
-        },
-        "experiments": {
-            "baseline": {
-                "mode": "evaluate",
-                "solver": {
-                    "dspy": {
-                        "module": "Predict",
-                        "signature": {
-                            "inputs": {
-                                "global_context": "str",
-                                "skill_context": "str",
-                                "task": "str",
-                            },
-                            "outputs": {"response": "str"},
-                        },
-                    },
-                    "model": {
-                        "provider": "ollama",
-                        "name_env": "MS_AGENT_EVAL_SOLVER_MODEL",
-                        "endpoint_env": "OLLAMA_BASE_URL",
-                        "parameters": {"temperature": 0.2},
-                    },
-                },
-                "runtime": {"type": "response_only", "python": "3.12"},
-                "repetitions": 1,
-            },
-            "optimize-few-shot": {
-                "mode": "optimize",
-                "based_on": "baseline",
-                "dataset": {
-                    "train": "train",
-                    "development": "development",
-                    "final_evaluation": "test",
-                },
-                "optimizer": {"name": "LabeledFewShot", "parameters": {"k": 2, "seed": 0}},
-                "budget": {
-                    "solver": {"model_calls": 100, "tokens": 250000},
-                    "judge": {"model_calls": 300, "tokens": 500000},
-                    "wall_seconds": 1800,
-                },
-                "output": {"compiled_program": "content_addressed_json"},
-            },
-        },
-    }
-    root.mkdir(parents=True, exist_ok=True)
-    cases_root = root / cases
-    cases_root.mkdir(parents=True, exist_ok=True)
-    calibration = root / "judge-calibration"
-    calibration.mkdir(parents=True, exist_ok=True)
-    _atomic_text(workspace_file, yaml.safe_dump(payload, sort_keys=False))
-    _atomic_text(cases_root / "splits.yaml", "schema_version: 2\ngroups: {}\n")
-    calibration_manifest = {
-        "schema_version": 2,
-        "fixtures": [],
-    }
-    _atomic_text(
-        calibration / "manifest.yaml",
-        yaml.safe_dump(calibration_manifest, sort_keys=False),
+    template = build_workspace_template(
+        workspace_id=arguments.id,
+        repository_url=arguments.repo,
+        repository_ref=arguments.ref,
+        global_instructions=arguments.global_instructions,
+        skills=skills_block,
+        cases_directory=cases.as_posix(),
+        api_base_url=arguments.api_base_url,
+        api_key_env=arguments.api_key_env,
+        case_builder_model=arguments.case_builder_model,
+        solver_model=arguments.solver_model,
+        judge_model=arguments.judge_model,
     )
-    env_example = root / ".env.example"
-    if not env_example.exists():
-        _atomic_text(
-            env_example,
-            "OLLAMA_BASE_URL=http://localhost:11434\n"
-            "MS_AGENT_EVAL_CASE_BUILDER_MODEL=case-builder-model\n"
-            "MS_AGENT_EVAL_SOLVER_MODEL=solver-model\n"
-            "MS_AGENT_EVAL_JUDGE_MODEL=judge-model\n",
-        )
+    WorkspaceConfiguration.from_mapping(template.payload)
+    paths = write_workspace_template(workspace_file, template)
+    repository = WorkspaceRepository.from_file(workspace_file)
     return {
         "status": "initialized",
-        "workspace": workspace_file.as_posix(),
-        "cases": cases_root.as_posix(),
-        "calibration": calibration.as_posix(),
-        "data_root": (Path.home() / "ms_agent_eval" / arguments.id).as_posix(),
+        **paths,
+        "data_root": repository.data_root.as_posix(),
     }
 
 
 def _draft_store(repository: WorkspaceRepository) -> CaseDraftStore:
+    from .case_builder import CaseDraftStore
+    from .storage import FilesystemArtifactStore
+
     artifacts = FilesystemArtifactStore(repository.data_root, workspace_root=repository.root)
     return CaseDraftStore(
         repository.data_root,
@@ -249,6 +135,16 @@ def _draft_store(repository: WorkspaceRepository) -> CaseDraftStore:
 
 
 def _cases(arguments: argparse.Namespace, repository: WorkspaceRepository) -> object:
+    from ms_agent_eval.programs.dspy.budget import BudgetLedger, BudgetLimits
+    from ms_agent_eval.programs.dspy.engine import (
+        create_case_builder_program,
+        program_hash,
+    )
+    from ms_agent_eval.providers.openai_compatible import create_observed_lm
+
+    from .case_builder import CaseBuilderService, load_snapshot_context
+    from .planning import acquire_snapshot
+
     drafts = _draft_store(repository)
     if arguments.case_command == "inspect-drafts":
         return {
@@ -280,7 +176,9 @@ def _cases(arguments: argparse.Namespace, repository: WorkspaceRepository) -> ob
         environment = repository.environment()
         models = resolve_role_models(repository.workspace, _baseline_id(repository), environment)
         snapshot, _ = acquire_snapshot(repository)
-        active_program_hash = program_hash(create_case_builder_program())
+        active_program_hash = program_hash(
+            create_case_builder_program(repository.case_authoring_instructions())
+        )
         for item in candidates:
             if item.source_snapshot_hash != snapshot.content_hash:
                 raise IntegrityError(f"draft {item.id!r} was built from a stale source snapshot")
@@ -332,7 +230,12 @@ def _cases(arguments: argparse.Namespace, repository: WorkspaceRepository) -> ob
             skill=skill,
             coverage_request=arguments.coverage,
             model=model,
-            lm_factory=lambda observer: create_observed_lm(model, observer, budget=ledger),
+            lm_factory=lambda observer: create_observed_lm(
+                model,
+                observer,
+                budget=ledger,
+                api_key=model.api_key(environment),
+            ),
         )
         for skill in selected_skills
     ]
@@ -399,16 +302,24 @@ def _atomic_text(path: Path, value: str) -> None:
 
 
 def _run(arguments: argparse.Namespace) -> object:
+    if arguments.command == "setup":
+        return run_guided_setup(
+            QuestionaryPromptBackend(), workspace_file=arguments.workspace
+        )
     if arguments.command == "init":
         return _init(arguments)
     repository = WorkspaceRepository.from_file(arguments.workspace)
     if arguments.command == "cases":
         return _cases(arguments, repository)
+    from .planning import compile_workspace, inspect_workspace
+
     environment = repository.environment()
     if arguments.command == "validate":
         return inspect_workspace(repository, environment=environment)
     if arguments.command == "inspect":
         return inspect_workspace(repository, environment=environment)
+    from .runner import ExperimentRunner
+
     compiled = compile_workspace(repository)
     return json_value(
         ExperimentRunner(compiled).run(arguments.experiment_id, environment=environment)
@@ -418,8 +329,17 @@ def _run(arguments: argparse.Namespace) -> object:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
+    if arguments.command is None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            arguments = parser.parse_args(["setup"])
+        else:
+            parser.print_help(sys.stderr)
+            return 2
     try:
         payload = _run(arguments)
+    except KeyboardInterrupt:
+        print("cancelled", file=sys.stderr)
+        return 130
     except AgentEvalError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

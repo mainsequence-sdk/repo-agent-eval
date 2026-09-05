@@ -92,7 +92,9 @@ class CompiledWorkspace:
         except KeyError as error:
             raise ResolutionError(f"unknown experiment: {experiment_id}") from error
         models = resolve_role_models(workspace, experiment_id, environment)
-        builder_hash = program_hash(create_case_builder_program())
+        builder_hash = program_hash(
+            create_case_builder_program(self.repository.case_authoring_instructions())
+        )
         solver_hash = program_hash(create_solver_program())
         judge_hash = program_hash(create_judge_program())
         for case in self.case_bank.cases:
@@ -190,7 +192,12 @@ class CompiledWorkspace:
                 "builder_provenance_coverage": len(self.case_bank.cases),
             },
             "case_builder": {
-                "program_hash": program_hash(create_case_builder_program()),
+                "instructions": self.repository.case_authoring_path.as_posix(),
+                "program_hash": program_hash(
+                    create_case_builder_program(
+                        self.repository.case_authoring_instructions()
+                    )
+                ),
                 "model": json_value(next(iter(locks.values())).models["case_builder"]),
                 "draft_count": _draft_count(self.repository.data_root),
             },
@@ -419,7 +426,10 @@ def inspect_workspace(
             "builder_provenance_coverage": len(case_bank.cases),
         },
         "case_builder": {
-            "program_hash": program_hash(create_case_builder_program()),
+            "instructions": repository.case_authoring_path.as_posix(),
+            "program_hash": program_hash(
+                create_case_builder_program(repository.case_authoring_instructions())
+            ),
             "model": case_builder_model,
             "draft_count": _draft_count(repository.data_root),
         },
@@ -464,8 +474,9 @@ def _unresolved_model(configuration: ModelConfiguration) -> Mapping[str, object]
     return {
         "status": "unresolved",
         "provider": configuration.provider,
-        "name_env": configuration.name_env,
-        "endpoint_env": configuration.endpoint_env,
+        "name": configuration.model,
+        "base_url": configuration.base_url,
+        "api_key_env": configuration.api_key_env,
         "parameters": dict(configuration.parameters),
     }
 

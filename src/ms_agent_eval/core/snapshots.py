@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .errors import ConfigurationError, IntegrityError, ResolutionError
@@ -19,6 +20,14 @@ from .sources import ResolvedSource, SourceProvider
 
 
 SNAPSHOT_EXTRACTION_VERSION = "full-repository-v2"
+
+
+@dataclass(frozen=True)
+class SelectedInstructionUnit:
+    bundle_id: str
+    source_id: str
+    unit_id: str
+    source_path: str
 
 
 def extraction_configuration_hash(target: TargetSpecification) -> str:
@@ -79,6 +88,40 @@ def _source_units(checkout: Path, source: UnitSourceSpecification) -> list[tuple
     if not selected:
         raise ResolutionError(f"instruction source {source.id!r} matched no files")
     return selected
+
+
+def validate_instruction_selection(
+    target: TargetSpecification, checkout: Path
+) -> tuple[SelectedInstructionUnit, ...]:
+    """Validate selected instruction paths and derive collision-free unit ids."""
+
+    if not checkout.is_dir():
+        raise ResolutionError(f"materialized checkout does not exist: {checkout}")
+    selected: list[SelectedInstructionUnit] = []
+    unit_keys: set[tuple[str, str]] = set()
+    for bundle in target.instruction_bundles:
+        for context in bundle.global_context:
+            source_file = checkout / context.source_path
+            if not source_file.exists() and not context.required:
+                continue
+            _safe_source_file(checkout, context.source_path)
+        for source in bundle.unit_sources:
+            for unit_id, source_path in _source_units(checkout, source):
+                key = (bundle.id, unit_id)
+                if key in unit_keys:
+                    raise ResolutionError(
+                        f"instruction unit collision for bundle/id {key!r}"
+                    )
+                unit_keys.add(key)
+                selected.append(
+                    SelectedInstructionUnit(
+                        bundle.id,
+                        source.id,
+                        unit_id,
+                        source_path,
+                    )
+                )
+    return tuple(selected)
 
 
 class ExternalSnapshotStore:
@@ -161,41 +204,33 @@ class SnapshotBuilder:
     ) -> SnapshotLock:
         if resolved.requested_ref != target.source.ref:
             raise ResolutionError("resolved source ref does not match the target specification")
-        if not checkout.is_dir():
-            raise ResolutionError(f"materialized checkout does not exist: {checkout}")
+        selected_units = validate_instruction_selection(target, checkout)
 
         staging = Path(tempfile.mkdtemp(prefix="snapshot-", dir=self.store.temporary_root))
         try:
             files: dict[str, LockedFile] = {}
             units: list[LockedInstructionUnit] = []
-            unit_keys: set[tuple[str, str]] = set()
             for bundle in target.instruction_bundles:
                 for context in bundle.global_context:
                     source_file = checkout / context.source_path
                     if not source_file.exists() and not context.required:
                         continue
-                    _safe_source_file(checkout, context.source_path)
                     self._copy_locked(source_file, context.source_path, staging, files)
-                for source in bundle.unit_sources:
-                    for unit_id, source_path in _source_units(checkout, source):
-                        key = (bundle.id, unit_id)
-                        if key in unit_keys:
-                            raise ResolutionError(
-                                f"instruction unit collision for bundle/id {key!r}"
-                            )
-                        unit_keys.add(key)
-                        source_file = _safe_source_file(checkout, source_path)
-                        locked_file = self._copy_locked(source_file, source_path, staging, files)
-                        units.append(
-                            LockedInstructionUnit(
-                                bundle_id=bundle.id,
-                                source_id=source.id,
-                                unit_id=unit_id,
-                                source_path=source_path,
-                                snapshot_path=locked_file.snapshot_path,
-                                content_hash=locked_file.content_hash,
-                            )
-                        )
+            for selected in selected_units:
+                source_file = _safe_source_file(checkout, selected.source_path)
+                locked_file = self._copy_locked(
+                    source_file, selected.source_path, staging, files
+                )
+                units.append(
+                    LockedInstructionUnit(
+                        bundle_id=selected.bundle_id,
+                        source_id=selected.source_id,
+                        unit_id=selected.unit_id,
+                        source_path=selected.source_path,
+                        snapshot_path=locked_file.snapshot_path,
+                        content_hash=locked_file.content_hash,
+                    )
+                )
             # The entire pinned repository is retained externally so the case builder
             # can ground drafts in supporting source files without adding another
             # user-authored source registry. Instruction units remain an explicit,

@@ -17,9 +17,16 @@ from ms_agent_eval.core.sources import ResolvedSource
 from ms_agent_eval.core.workspace import WorkspaceRepository
 
 
+CASE_AUTHORING_INSTRUCTIONS = """# Test case-authoring policy
+
+Build one grounded case from the supplied immutable instruction and source context.
+Return the complete typed output and design the rubric for semantic evaluation by the LLM judge.
+"""
+
+
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 4,
         "workspace": {"id": "synthetic-evaluation"},
         "evaluation": {
             "repository": {
@@ -31,6 +38,7 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "skills": dict({"directory": "skills"} if skills is None else skills),
             },
             "case_builder": {
+                "instructions": "case-authoring.md",
                 "dspy": {
                     "module": "Predict",
                     "signature": {
@@ -53,9 +61,10 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                     },
                 },
                 "model": {
-                    "provider": "ollama",
-                    "name_env": "BUILDER_MODEL",
-                    "endpoint_env": "OLLAMA_ENDPOINT",
+                    "provider": "openai_compatible",
+                    "name": "builder",
+                    "base_url": "http://localhost:8000/v1",
+                    "api_key_env": "TEST_API_KEY",
                     "parameters": {"temperature": 0.0},
                 },
                 "budget": {"model_calls": 20, "tokens": 10000},
@@ -83,9 +92,10 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                     },
                 },
                 "model": {
-                    "provider": "ollama",
-                    "name_env": "JUDGE_MODEL",
-                    "endpoint_env": "OLLAMA_ENDPOINT",
+                    "provider": "openai_compatible",
+                    "name": "judge",
+                    "base_url": "http://localhost:8000/v1",
+                    "api_key_env": "TEST_API_KEY",
                     "parameters": {"temperature": 0.0},
                 },
                 "calibration": {"directory": "judge-calibration"},
@@ -108,9 +118,10 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                         },
                     },
                     "model": {
-                        "provider": "ollama",
-                        "name_env": "SOLVER_MODEL",
-                        "endpoint_env": "OLLAMA_ENDPOINT",
+                        "provider": "openai_compatible",
+                        "name": "solver",
+                        "base_url": "http://localhost:8000/v1",
+                        "api_key_env": "TEST_API_KEY",
                         "parameters": {"temperature": 0.0},
                     },
                 },
@@ -145,6 +156,9 @@ def create_workspace(root: Path) -> WorkspaceRepository:
     payload = workspace_payload()
     payload["workspace"]["data_root"] = (root.parent / "runtime").as_posix()  # type: ignore[index]
     (root / "workspace.yaml").write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    (root / "case-authoring.md").write_text(
+        CASE_AUTHORING_INSTRUCTIONS, encoding="utf-8"
+    )
     (root / "cases").mkdir()
     (root / "judge-calibration").mkdir()
     return WorkspaceRepository.from_file(root / "workspace.yaml")

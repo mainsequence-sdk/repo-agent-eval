@@ -26,12 +26,7 @@ from .helpers import (
 
 
 def _environment() -> Mapping[str, str]:
-    return {
-        "BUILDER_MODEL": "builder",
-        "SOLVER_MODEL": "solver",
-        "JUDGE_MODEL": "judge",
-        "OLLAMA_ENDPOINT": "http://localhost:11434",
-    }
+    return {"TEST_API_KEY": "test-secret"}
 
 
 def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -45,7 +40,9 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     seed_cases_and_calibration(
         repository,
         builder_model_hash=builder_model.content_hash,
-        builder_program_hash=program_hash(create_case_builder_program()),
+        builder_program_hash=program_hash(
+            create_case_builder_program(repository.case_authoring_instructions())
+        ),
         source_snapshot_hash=lock.content_hash,
     )
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
@@ -69,7 +66,9 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
         model: ResolvedRoleModel,
         observer: ModelCallObserver,
         budget: BudgetLedger | None,
+        api_key: str | None,
     ) -> FixedObservedLM:
+        assert api_key == "test-secret"
         del budget
         return FixedObservedLM(observer, responses[model.role], model=model.role)
 
@@ -101,7 +100,9 @@ def test_optimization_publishes_json_state_before_held_out_test(tmp_path: Path) 
         model: ResolvedRoleModel,
         observer: ModelCallObserver,
         budget: BudgetLedger | None,
+        api_key: str | None,
     ) -> FixedObservedLM:
+        assert api_key == "test-secret"
         del budget
         return FixedObservedLM(observer, responses[model.role], model=model.role)
 
@@ -134,8 +135,10 @@ def test_optimization_rejects_calibration_on_held_out_case_before_lm_creation(
         model: ResolvedRoleModel,
         observer: ModelCallObserver,
         budget: BudgetLedger | None,
+        api_key: str | None,
     ) -> FixedObservedLM:
         nonlocal calls
+        assert api_key == "test-secret"
         calls += 1
         return FixedObservedLM(observer, [], model=model.role)
 

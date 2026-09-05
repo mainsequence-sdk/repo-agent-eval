@@ -16,7 +16,7 @@ from ms_agent_eval.programs.dspy.engine import (
     create_solver_program,
     program_hash,
 )
-from ms_agent_eval.providers.ollama import create_observed_lm
+from ms_agent_eval.providers.openai_compatible import create_observed_lm
 
 from .errors import IntegrityError, PreflightError
 from .evaluation import (
@@ -34,15 +34,18 @@ from .storage import FilesystemArtifactStore
 from .workspace import ExperimentMode, ResolvedRoleModel, RoleBudget
 
 
-LmFactory = Callable[[ResolvedRoleModel, ModelCallObserver, BudgetLedger | None], dspy.BaseLM]
+LmFactory = Callable[
+    [ResolvedRoleModel, ModelCallObserver, BudgetLedger | None, str | None], dspy.BaseLM
+]
 
 
 def _default_lm_factory(
     model: ResolvedRoleModel,
     observer: ModelCallObserver,
     budget: BudgetLedger | None,
+    api_key: str | None,
 ) -> dspy.BaseLM:
-    return create_observed_lm(model, observer, budget=budget)
+    return create_observed_lm(model, observer, budget=budget, api_key=api_key)
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,9 @@ class ExperimentRunner:
     ) -> ExperimentRun:
         # CompiledWorkspace construction is the structural/source/provenance preflight.
         lock = self.workspace.experiment_lock(experiment_id, environment=environment)
+        resolved_environment = (
+            environment if environment is not None else self.workspace.repository.environment()
+        )
         self._validate_calibration_split(lock)
         run_id = str(uuid4())
         lock_reference = self.artifacts.put_manifest(
@@ -135,7 +141,13 @@ class ExperimentRunner:
         judge_observer = ModelCallObserver(self.artifacts, role="judge")
         solver_observer = ModelCallObserver(self.artifacts, role="solver")
         solver_budget, judge_budget = self._budgets(lock)
-        judge_lm = self.lm_factory(lock.models["judge"], judge_observer, judge_budget)
+        judge_model = lock.models["judge"]
+        judge_lm = self.lm_factory(
+            judge_model,
+            judge_observer,
+            judge_budget,
+            judge_model.api_key(resolved_environment),
+        )
         judge_program = create_judge_program()
         observed_judge = _ObservedJudgeProgram(
             executor=self.executor,
@@ -161,7 +173,13 @@ class ExperimentRunner:
         )
         if not calibration.passed:
             raise PreflightError("configured LLM judge failed calibration; no solver call was made")
-        solver_lm = self.lm_factory(lock.models["solver"], solver_observer, solver_budget)
+        solver_model = lock.models["solver"]
+        solver_lm = self.lm_factory(
+            solver_model,
+            solver_observer,
+            solver_budget,
+            solver_model.api_key(resolved_environment),
+        )
         if lock.configuration.mode is ExperimentMode.EVALUATE:
             program = create_solver_program()
             cases = self._evaluate_cases(

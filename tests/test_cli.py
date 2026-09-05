@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from ms_agent_eval.core.cli import main
-from ms_agent_eval.core import cli
+from ms_agent_eval.core import planning
 from ms_agent_eval.core.planning import inspect_workspace as inspect_workspace_real
 from ms_agent_eval.core.workspace import WorkspaceRepository
 
@@ -26,6 +27,16 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
             "skills",
             "--cases",
             "cases",
+            "--api-base-url",
+            "http://localhost:8000/v1",
+            "--api-key-env",
+            "OPENAI_API_KEY",
+            "--case-builder-model",
+            "builder",
+            "--solver-model",
+            "solver",
+            "--judge-model",
+            "judge",
             "--workspace",
             str(workspace),
         ]
@@ -34,8 +45,27 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 2
+    assert repository.workspace.schema_version == 4
+    assert repository.case_authoring_path == tmp_path / "case-authoring.md"
+    assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
+    assert "`error_identification`" in repository.case_authoring_instructions()
     assert set(repository.workspace.experiments) == {"baseline", "optimize-few-shot"}
+    assert repository.workspace.evaluation.case_builder.model.model == "builder"
+    assert repository.workspace.evaluation.case_builder.model.base_url.endswith("/v1")
+    assert (tmp_path / ".env.example").read_text(encoding="utf-8").endswith(
+        "OPENAI_API_KEY=\n"
+    )
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".env\n"
+
+
+def test_no_arguments_in_noninteractive_terminal_prints_help(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    assert main([]) == 2
+
+    output = capsys.readouterr()
+    assert "ms-agent-eval" in output.err
+    assert "setup" in output.err
 
 
 def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -54,7 +84,7 @@ def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatc
         "schema_version: 2\nfixtures: []\n", encoding="utf-8"
     )
     monkeypatch.setattr(
-        cli,
+        planning,
         "inspect_workspace",
         lambda repository, environment: inspect_workspace_real(
             repository,
@@ -69,4 +99,5 @@ def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatc
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "incomplete"
-    assert payload["case_builder"]["model"]["status"] == "unresolved"
+    assert payload["case_builder"]["model"]["model"] == "builder"
+    assert payload["case_builder"]["model"]["base_url"] == "http://localhost:8000/v1"

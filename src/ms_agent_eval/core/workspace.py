@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
+from urllib.parse import urlparse
 
 import yaml
 
@@ -25,7 +26,7 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 2
+WORKSPACE_SCHEMA_VERSION = 4
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -142,6 +143,18 @@ def _environment(value: object, field: str) -> str:
     return result
 
 
+def _api_base_url(value: object, field: str) -> str:
+    result = _string(value, field).rstrip("/")
+    parsed = urlparse(result)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConfigurationError(f"{field} must be an HTTP(S) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            f"{field} must not contain credentials, a query, or a fragment"
+        )
+    return result
+
+
 def _relative_path(value: object, field: str) -> str:
     result = _string(value, field)
     path = PurePosixPath(result)
@@ -183,6 +196,26 @@ def load_yaml(path: Path) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ConfigurationError("configuration file must contain a mapping", path=path)
     return {str(key): item for key, item in value.items()}
+
+
+def validate_external_data_root(candidate: Path, workspace_root: Path) -> Path:
+    """Resolve a data root and reject any location inside the workspace's Git repo."""
+
+    root = candidate.expanduser().resolve()
+    workspace = workspace_root.resolve()
+    if root == workspace or workspace in root.parents:
+        raise ConfigurationError("workspace.data_root must be outside the workspace")
+    git_root = next(
+        (
+            ancestor
+            for ancestor in (workspace, *workspace.parents)
+            if (ancestor / ".git").exists()
+        ),
+        None,
+    )
+    if git_root is not None and (root == git_root or git_root in root.parents):
+        raise ConfigurationError("workspace.data_root must be outside the Git repository")
+    return root
 
 
 class ExperimentMode(str, Enum):
@@ -327,8 +360,9 @@ class DspyProgramConfiguration:
 @dataclass(frozen=True)
 class ModelConfiguration:
     provider: str
-    name_env: str
-    endpoint_env: str
+    model: str
+    base_url: str
+    api_key_env: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
 
@@ -338,16 +372,19 @@ class ModelConfiguration:
             payload,
             {
                 "provider",
-                "name_env",
-                "endpoint_env",
+                "name",
+                "base_url",
+                "api_key_env",
                 "parameters",
                 "configured_cost_per_call",
             },
             field,
         )
         provider = _identifier(payload.get("provider"), f"{field}.provider")
-        if provider != "ollama":
-            raise ConfigurationError(f"{field}.provider must currently be ollama")
+        if provider != "openai_compatible":
+            raise ConfigurationError(
+                f"{field}.provider must currently be openai_compatible"
+            )
         parameters = MappingProxyType(
             dict(_mapping(payload.get("parameters", {}), f"{field}.parameters"))
         )
@@ -356,8 +393,13 @@ class ModelConfiguration:
             raise ConfigurationError(f"{field}.configured_cost_per_call must be non-negative")
         return cls(
             provider,
-            _environment(payload.get("name_env"), f"{field}.name_env"),
-            _environment(payload.get("endpoint_env"), f"{field}.endpoint_env"),
+            _string(payload.get("name"), f"{field}.name"),
+            _api_base_url(payload.get("base_url"), f"{field}.base_url"),
+            (
+                _environment(payload.get("api_key_env"), f"{field}.api_key_env")
+                if payload.get("api_key_env") is not None
+                else None
+            ),
             parameters,
             float(cost),
         )
@@ -381,6 +423,7 @@ class RoleBudget:
 
 @dataclass(frozen=True)
 class CaseBuilderConfiguration:
+    instructions: str
     program: DspyProgramConfiguration
     model: ModelConfiguration
     budget: RoleBudget
@@ -389,7 +432,11 @@ class CaseBuilderConfiguration:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> CaseBuilderConfiguration:
-        _reject_unknown(payload, {"dspy", "model", "budget", "output"}, "evaluation.case_builder")
+        _reject_unknown(
+            payload,
+            {"instructions", "dspy", "model", "budget", "output"},
+            "evaluation.case_builder",
+        )
         output = _mapping(payload.get("output"), "evaluation.case_builder.output")
         _reject_unknown(output, {"drafts", "promotion"}, "evaluation.case_builder.output")
         drafts = _string(output.get("drafts"), "case_builder.output.drafts")
@@ -399,6 +446,9 @@ class CaseBuilderConfiguration:
                 "case_builder output must use external drafts and explicit promotion"
             )
         return cls(
+            _relative_path(
+                payload.get("instructions"), "evaluation.case_builder.instructions"
+            ),
             DspyProgramConfiguration.from_mapping(
                 _mapping(payload.get("dspy"), "evaluation.case_builder.dspy"),
                 field="evaluation.case_builder.dspy",
@@ -805,18 +855,23 @@ class WorkspaceConfiguration:
         return experiment.runtime
 
     def _validate_role_configuration(self) -> None:
-        builder = self.evaluation.case_builder.model.name_env
-        judge = self.evaluation.judge.model.name_env
-        if builder == judge:
-            raise ConfigurationError("case-builder and judge model environment names must differ")
+        builder = self.evaluation.case_builder.model
+        judge = self.evaluation.judge.model
+        if (builder.provider, builder.model) == (judge.provider, judge.model):
+            raise ConfigurationError("case-builder and judge model identities must differ")
         for experiment in self.experiments.values():
             if experiment.mode is not ExperimentMode.EVALUATE:
                 continue
             assert experiment.solver is not None
-            solver = experiment.solver.model.name_env
-            if len({builder, solver, judge}) != 3:
+            solver = experiment.solver.model
+            identities = {
+                (builder.provider, builder.model),
+                (solver.provider, solver.model),
+                (judge.provider, judge.model),
+            }
+            if len(identities) != 3:
                 raise ConfigurationError(
-                    f"experiment {experiment.id!r} must configure three distinct LLM role variables"
+                    f"experiment {experiment.id!r} must configure three distinct LLM models"
                 )
 
 
@@ -825,7 +880,8 @@ class ResolvedRoleModel:
     role: str
     provider: str
     model: str
-    endpoint: str
+    base_url: str
+    api_key_env: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
     content_hash: str
@@ -837,22 +893,27 @@ class ResolvedRoleModel:
         configuration: ModelConfiguration,
         environment: Mapping[str, str] | None = None,
     ) -> ResolvedRoleModel:
-        values = environment if environment is not None else os.environ
-        model = values.get(configuration.name_env, "").strip()
-        endpoint = values.get(configuration.endpoint_env, "").strip()
-        if not model:
-            raise ResolutionError(f"{role} model is required in {configuration.name_env}")
-        if not endpoint:
-            raise ResolutionError(f"{role} endpoint is required in {configuration.endpoint_env}")
+        del environment
         identity = {
             "role": role,
             "provider": configuration.provider,
-            "model": model,
-            "endpoint": endpoint,
+            "model": configuration.model,
+            "base_url": configuration.base_url,
+            "api_key_env": configuration.api_key_env,
             "parameters": configuration.parameters,
             "configured_cost_per_call": configuration.configured_cost_per_call,
         }
         return cls(**identity, content_hash=content_hash(identity))
+
+    def api_key(self, environment: Mapping[str, str]) -> str | None:
+        if self.api_key_env is None:
+            return None
+        value = environment.get(self.api_key_env, "").strip()
+        if not value:
+            raise ResolutionError(
+                f"{self.role} API credential is required in {self.api_key_env}"
+            )
+        return value
 
 
 def resolve_role_models(
@@ -911,6 +972,28 @@ class WorkspaceRepository:
             self.workspace.evaluation.judge.calibration_directory,
             field="judge.calibration.directory",
         )
+
+    @property
+    def case_authoring_path(self) -> Path:
+        relative = self.workspace.evaluation.case_builder.instructions
+        source = self.root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ResolutionError(
+                f"case-authoring instructions do not exist or are unsafe: {source}"
+            )
+        return self.path(relative, field="evaluation.case_builder.instructions")
+
+    def case_authoring_instructions(self) -> str:
+        path = self.case_authoring_path
+        try:
+            instructions = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ConfigurationError(
+                "case-authoring instructions must be UTF-8", path=path
+            ) from error
+        if not instructions.strip():
+            raise ConfigurationError("case-authoring instructions must not be empty", path=path)
+        return instructions
 
     def case_paths(self) -> tuple[Path, ...]:
         root = self.cases_root
@@ -990,7 +1073,4 @@ class WorkspaceRepository:
             candidate = Path(configured).expanduser()
             if not candidate.is_absolute():
                 candidate = self.root / candidate
-        root = candidate.resolve()
-        if root == self.root or self.root in root.parents:
-            raise ConfigurationError("workspace.data_root must be outside the Git workspace")
-        return root
+        return validate_external_data_root(candidate, self.root)

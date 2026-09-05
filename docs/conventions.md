@@ -6,6 +6,8 @@
   provenance, LLM judging, optimization governance, isolation, and reporting.
 - `workspace.yaml` owns a repository URL/ref, exact instruction selection,
   three role models, case location, judge calibration, and experiments.
+- `case-authoring.md` owns the durable policy used to generate evaluation cases;
+  `workspace.yaml` points to it explicitly.
 - Promoted case packages and human-labelled calibration inputs are versioned.
 - External storage owns repository snapshots, builder drafts/calls, solver
   calls, judge calls, compiled state, evaluations, and reports.
@@ -26,8 +28,10 @@ An evaluated repository must never become a core dependency or default path.
 
 - `case_builder`, `solver`, and `judge` must resolve to distinct provider/model
   identities.
-- The builder sees locked instructions, source context, the coverage request,
-  and summaries of existing cases. It never sees solver or judge evidence.
+- The builder's DSPy signature uses the exact versioned case-authoring policy as
+  its instructions. The builder sees locked target instructions, source
+  context, the invocation-specific coverage request, and summaries of existing
+  cases. It never sees solver or judge evidence.
 - The solver sees global context, skill context, and task only.
 - The judge sees the rubric, expected response/artifacts, candidate response,
   task, and skill context.
@@ -49,6 +53,20 @@ rubric.yaml
 `case.yaml` declares schema version, id, title, skill, leakage group, local file
 references, immutable source paths, and builder provenance hashes. Direct edits
 that change package identity invalidate provenance.
+
+The builder program hash includes the exact `case-authoring.md` content.
+Changing that policy makes earlier drafts and promoted cases incompatible with
+the active experiment until they are rebuilt and explicitly promoted. This is
+intentional: a changed authoring policy is a changed case-generation program.
+
+Diagnostic cases must reward diagnosis, not blind compliance. If the presented
+evidence contains a real faulty test, false premise, broken configuration,
+contradiction, or misleading symptom, the rubric includes
+`error_identification` at 0.35–0.50 weight. Full credit requires locating the
+actual defect and connecting it to the observed behavior; partial credit may be
+given for recognizing the symptom or questioning the premise. Ordinary cases
+without a grounded error do not include this criterion. All weights still sum
+to exactly 1.0.
 
 The configured DSPy judge LLM is the only semantic scorer. There are no Python
 evaluator plugins, rule/checklist methods, evaluator status modes, keyword

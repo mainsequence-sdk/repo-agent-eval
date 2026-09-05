@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 4
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -14,6 +14,7 @@ evaluation:
     skills:
       directory: agent_scaffold/skills
   case_builder:
+    instructions: case-authoring.md
     dspy:
       module: Predict
       signature:
@@ -32,9 +33,9 @@ evaluation:
           source_paths: list[str]
           leakage_group: str
     model:
-      provider: ollama
-      name_env: MS_AGENT_EVAL_CASE_BUILDER_MODEL
-      endpoint_env: OLLAMA_BASE_URL
+      provider: openai_compatible
+      name: builder-model
+      base_url: http://localhost:11434/v1
       parameters:
         temperature: 0.2
     budget:
@@ -69,9 +70,9 @@ evaluation:
           hard_failures: list[str]
           feedback: str
     model:
-      provider: ollama
-      name_env: MS_AGENT_EVAL_JUDGE_MODEL
-      endpoint_env: OLLAMA_BASE_URL
+      provider: openai_compatible
+      name: judge-model
+      base_url: http://localhost:11434/v1
       parameters:
         temperature: 0.0
     calibration:
@@ -92,9 +93,9 @@ experiments:
           outputs:
             response: str
       model:
-        provider: ollama
-        name_env: MS_AGENT_EVAL_SOLVER_MODEL
-        endpoint_env: OLLAMA_BASE_URL
+        provider: openai_compatible
+        name: solver-model
+        base_url: http://localhost:11434/v1
         parameters:
           temperature: 0.2
     runtime:

@@ -14,6 +14,17 @@ DSPy is installed with the base library; no extra is needed.
 
 ## 2. Create one workspace manifest
 
+For normal use, launch the guided setup. It resolves the repository first and
+then lets you select global instructions and either a complete skills folder or
+an exact list of `SKILL.md` files. It also configures the three models, runtime,
+repetitions, initial case coverage, and optional optimization experiment:
+
+```bash
+uv run --project /path/to/ms-agent-eval ms-agent-eval setup
+```
+
+For automation, provide every choice explicitly:
+
 ```bash
 mkdir my-evaluation
 cd my-evaluation
@@ -24,36 +35,63 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
   --ref v1.2.3 \
   --global-instructions AGENTS.md \
   --skills-directory .agents/skills \
-  --cases cases
+  --cases cases \
+  --api-base-url http://127.0.0.1:8000/v1 \
+  --case-builder-model builder-model \
+  --solver-model solver-model \
+  --judge-model judge-model
 ```
 
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The two forms are mutually exclusive.
 
-`init` creates `workspace.yaml`, an empty case directory, a grouped split file,
-a judge-calibration manifest, and `.env.example`. It does not clone the target
-into the workspace.
+`init` creates a schema-v4 `workspace.yaml`, `case-authoring.md`, an empty case
+directory, a grouped split file, and a judge-calibration manifest. It does not
+clone the target into the workspace. An `.env.example` is created only when
+`--api-key-env` selects an external credential; a new workspace directory also
+gets a `.gitignore` entry for the local `.env` secret file.
 
 ## 3. Configure three distinct models
 
-```bash
-cp .env.example .env
-```
+The `init` command writes each model name and the shared API base URL directly to
+`workspace.yaml`. Review or edit those versioned values there. The API location may
+be shared, but each role must have a different provider/model identity.
 
-Set real, different model names:
+If the API requires a credential, pass `--api-key-env OPENAI_API_KEY` during
+initialization, copy `.env.example` to `.env`, and set only that secret:
 
 ```dotenv
-OLLAMA_BASE_URL=http://localhost:11434
-MS_AGENT_EVAL_CASE_BUILDER_MODEL=builder-model
-MS_AGENT_EVAL_SOLVER_MODEL=solver-model
-MS_AGENT_EVAL_JUDGE_MODEL=judge-model
+OPENAI_API_KEY=your-secret
 ```
 
-The endpoint may be shared, but the resolved model identity for each role must
-differ. `.env` is local and ignored. If `workspace.data_root` is absent, all
+Model selection never comes from environment variables. `.env` is local and ignored.
+If `workspace.data_root` is absent, all
 generated data goes to `~/ms_agent_eval/example-evaluation`.
 
 ## 4. Build and promote cases
+
+First review `case-authoring.md`. It is the durable experiment policy for how
+the builder must ground tasks, avoid leakage, write reference answers, and
+construct rubrics for the LLM judge. Its path is explicit configuration:
+
+```yaml
+evaluation:
+  case_builder:
+    instructions: case-authoring.md
+```
+
+The file's exact content becomes the DSPy case-builder signature instructions
+and therefore changes the builder program hash. The `--coverage` value is not a
+second policy file: it is the narrow, invocation-specific request supplied under
+that durable policy. Changing `case-authoring.md` intentionally invalidates old
+builder provenance, so affected cases must be rebuilt and explicitly promoted.
+
+When a case includes a grounded faulty test, false premise, broken
+configuration, contradiction, or misleading symptom, the generated rubric must
+include `error_identification`. It normally carries 35–50% of the normalized
+score, rewarding the solver for identifying the actual defect, explaining the
+evidence and consequence, and proposing a correction. The criterion is omitted
+when the case contains no real error.
 
 The first validation of a new workspace exits successfully after validating the
 manifest and immutable source, and reports `status: incomplete` plus exact
@@ -67,9 +105,9 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval cases build \
 ```
 
 This resolves the repository tag to a commit, creates/reuses an immutable
-external snapshot, invokes the configured DSPy case builder once per selected
-skill, validates its output, and stores call evidence plus drafts externally.
-It does not modify `cases/`.
+external snapshot, loads `case-authoring.md`, invokes the configured DSPy case
+builder once per selected skill, validates its typed output, and stores call
+evidence plus drafts externally. It does not modify `cases/`.
 
 Inspect and promote accepted drafts:
 
@@ -114,9 +152,9 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval inspect \
 ```
 
 `inspect` shows the resolved commit, snapshot hash, selected instruction files,
-discovered skill ids, case/split coverage, all three DSPy program and model
-identities, calibration identity, runtime, projected calls, and immutable
-experiment lock hashes before a scored run.
+discovered skill ids, case-authoring path and builder hash, case/split coverage,
+all three DSPy program and model identities, calibration identity, runtime,
+projected calls, and immutable experiment lock hashes before a scored run.
 
 ## 7. Evaluate, then optimize separately
 

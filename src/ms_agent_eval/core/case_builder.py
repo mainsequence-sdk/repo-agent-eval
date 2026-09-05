@@ -455,7 +455,9 @@ class CaseBuilderService:
     ) -> CaseDraft:
         if model.role != "case_builder":
             raise IntegrityError("case builder requires the case_builder model role")
-        program = create_case_builder_program()
+        program = create_case_builder_program(
+            self.repository.case_authoring_instructions()
+        )
         existing = []
         existing_ids = []
         if self.repository.cases_root.exists():

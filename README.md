@@ -14,7 +14,7 @@ cases, rubrics, and models.
 |---|---|
 | Python 3.12+ | Framework implementation and `ms-agent-eval` command-line interface. |
 | DSPy 3.2 | The only prompt-programming layer. Typed DSPy signatures define the case builder, solver, and judge; `LabeledFewShot` compiles optimized solver state. |
-| Ollama | Current local LLM provider for all three roles through DSPy's LM interface. Each role must use a different model identity. |
+| OpenAI-compatible APIs | LLM transport for all three roles through DSPy's LM interface, including local Ollama `/v1` endpoints. Each role must use a different configured model identity. |
 | YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-calibration manifests. |
 | Git | Resolves a repository URL plus tag or commit into an immutable source snapshot with recorded provenance. |
 | Docker | Optional digest-pinned sandbox for commands that must execute against the target repository. Response-only evaluations do not require a container. |
@@ -35,8 +35,10 @@ Every scored workflow has three distinct LLM roles and a strict data boundary:
 flowchart TB
     subgraph Definition["Versioned experiment definition"]
         Workspace["workspace.yaml"]
+        AuthoringPolicy["case-authoring.md"]
         Cases["Promoted cases + rubrics"]
         Splits["Grouped train / development / test splits"]
+        Workspace --> AuthoringPolicy
         Workspace --> Cases
         Cases --> Splits
     end
@@ -45,6 +47,7 @@ flowchart TB
         Repo["Repository URL + tag/commit"] --> Snapshot["Immutable external snapshot"]
         Workspace --> Snapshot
         Snapshot --> Builder["1. DSPy case-builder LLM"]
+        AuthoringPolicy -->|"DSPy instructions"| Builder
         Builder --> Drafts["External validated drafts"]
         Drafts -->|"explicit human promotion"| Cases
     end
@@ -70,8 +73,12 @@ flowchart TB
     end
 ```
 
-- The case builder authors grounded prompts, expected results, rubrics, source
-  paths, and leakage groups. It cannot see solver answers or evaluation results.
+- The case builder combines the versioned `case-authoring.md` policy with the
+  locked target context and one invocation-specific coverage request. It authors
+  grounded prompts, expected results, rubrics, source paths, and leakage groups,
+  and cannot see solver answers or evaluation results. Diagnostic cases give
+  substantial rubric weight to correctly identifying a real error instead of
+  blindly following a faulty premise.
 - The solver sees the task and locked instruction context, never the rubric or
   expected result.
 - The LLM judge is the only semantic scorer. Framework code only validates its
@@ -91,6 +98,16 @@ uv run ms-agent-eval --help
 
 ## Create a workspace
 
+Use the guided setup to inspect the repository and select its instructions and
+skills interactively. The same flow configures the direct API/model values,
+runtime, repetitions, initial case coverage, and optional optimization:
+
+```bash
+uv run ms-agent-eval setup
+```
+
+For automation and CI, provide the complete configuration explicitly:
+
 ```bash
 uv run ms-agent-eval init \
   --id example-evaluation \
@@ -98,10 +115,14 @@ uv run ms-agent-eval init \
   --ref v1.2.3 \
   --global-instructions AGENTS.md \
   --skills-directory .agents/skills \
-  --cases cases
+  --cases cases \
+  --api-base-url http://127.0.0.1:8000/v1 \
+  --case-builder-model builder-model \
+  --solver-model solver-model \
+  --judge-model judge-model
 ```
 
-The generated `workspace.yaml` has only two user-facing sections:
+The generated schema-v4 `workspace.yaml` has only two user-facing sections:
 
 1. `evaluation`: repository, global instructions, exactly one skill selection,
    case builder, case directory, split policy, and LLM judge.
@@ -113,17 +134,23 @@ list of `SKILL.md` files. Both-or-neither is rejected.
 
 ## Configure the three models
 
-Copy `.env.example` to `.env` beside `workspace.yaml`, or export the variables:
+Model names and API locations are durable workspace configuration. Each role stores
+its provider, model name, base URL, and parameters directly in `workspace.yaml`:
 
-```dotenv
-OLLAMA_BASE_URL=http://localhost:11434
-MS_AGENT_EVAL_CASE_BUILDER_MODEL=builder-model
-MS_AGENT_EVAL_SOLVER_MODEL=solver-model
-MS_AGENT_EVAL_JUDGE_MODEL=judge-model
+```yaml
+model:
+  provider: openai_compatible
+  name: solver-model
+  base_url: http://127.0.0.1:8000/v1
+  parameters:
+    temperature: 0.2
 ```
 
-The resolved provider/model identities must all differ. Runtime state defaults
-to `~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
+Only credentials remain process-local. When a provider requires a key, add
+`api_key_env: OPENAI_API_KEY` to each applicable model block and define that
+secret in the ignored `.env` file. The configured provider/model identities
+must all differ. Runtime state defaults to
+`~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
 another external path.
 
 ## Full flow
@@ -142,8 +169,8 @@ uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 
 Generated snapshots, builder calls/drafts, solver calls, judge calls, compiled
 state, results, and reports remain outside Git. Only `workspace.yaml`, promoted
-case packages, split assignments, and human-labelled judge calibration inputs
-are versioned.
+case packages, `case-authoring.md`, split assignments, and human-labelled judge
+calibration inputs are versioned.
 
 Start with [Getting started](docs/getting-started.md), then read
 [Repository structure](docs/structure.md) and [Conventions](docs/conventions.md).
@@ -160,7 +187,8 @@ repository/
 ├── experiments/
 │   └── <workspace>/
 │       ├── workspace.yaml      target, instructions, cases, models, runtime
-│       ├── .env.example        credential-free environment template
+│       ├── case-authoring.md   versioned DSPy builder policy
+│       ├── .env.example        optional credential-name template
 │       ├── cases/              promoted cases, rubrics, provenance, splits
 │       └── judge-calibration/  human-labelled judge fixtures
 ├── tests/                      generic framework acceptance tests

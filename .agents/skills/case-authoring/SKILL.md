@@ -14,9 +14,11 @@ belongs in Git.
 
 ## Read First
 
-Read the workspace's `workspace.yaml`, `README.md`, `docs/getting-started.md`,
-`docs/structure.md`, and `docs/conventions.md`. Resolve the configured repository
-ref to its immutable external snapshot before considering case content.
+Read the workspace's `workspace.yaml`, its configured
+`evaluation.case_builder.instructions` file, `README.md`,
+`docs/getting-started.md`, `docs/structure.md`, and `docs/conventions.md`.
+Resolve the configured repository ref to its immutable external snapshot before
+considering case content.
 
 For MainSequence, the only workspace configuration is:
 
@@ -32,12 +34,18 @@ location. If `directory` is configured, use every recursively discovered
 ## Non-negotiable Rules
 
 - Invoke `ms-agent-eval cases build`; do not directly invent a promoted case.
+- Treat the configured authoring file as durable DSPy builder policy and
+  `--coverage` as the narrower request for one invocation.
 - The builder model must be distinct from the solver and judge models.
 - Ground builder inputs in the immutable snapshot, not an installed package or
   an unpinned checkout.
 - Never provide solver responses, judge votes, optimizer traces, test scores, or
   held-out feedback to the builder.
 - Never send a rubric or expected response to the solver.
+- When a case contains a grounded faulty test, false premise, broken
+  configuration, contradiction, or misleading symptom, require an
+  `error_identification` criterion weighted at 0.35–0.50. Do not add it when no
+  real defect is present.
 - Do not add evaluator methods, evaluator status fields, Python judge plugins,
   keyword checks, or checklist scoring code. The configured DSPy judge LLM is
   the only semantic judge.
@@ -61,7 +69,8 @@ calibration corpus.
 
 ### 2. Request builder drafts
 
-Set all three role variables, then invoke the configured builder:
+Confirm that the three role models and any credential references are configured
+in `workspace.yaml`, then invoke the configured builder:
 
 ```bash
 ms-agent-eval cases build \
@@ -82,9 +91,11 @@ ms-agent-eval cases inspect-drafts --workspace path/to/workspace.yaml
 ```
 
 Review grounding, self-containment, expected behavior, rubric usefulness,
-hard-failure semantics, and leakage grouping. Reject weak drafts by leaving them
-external. Do not repair a rejected draft directly in the case directory; issue
-a clearer builder coverage request.
+hard-failure semantics, and leakage grouping. For diagnostic cases, confirm the
+prompt contains enough evidence to discover the error and that identifying the
+actual root cause receives substantial credit. Reject weak drafts by leaving
+them external. Do not repair a rejected draft directly in the case directory;
+issue a clearer builder coverage request.
 
 ### 4. Promote explicitly
 
@@ -108,7 +119,9 @@ cases/<skill-id>/<case-id>/
 
 `case.yaml` records builder model/program, source snapshot, generation request,
 and package hashes. Direct edits invalidate that provenance and require a new
-builder revision.
+builder revision. The builder program hash includes the exact authoring-policy
+content; after that file changes, rebuild and explicitly promote affected cases
+instead of bypassing the mismatch.
 
 ### 5. Validate the whole contract
 

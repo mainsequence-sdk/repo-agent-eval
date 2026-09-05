@@ -129,7 +129,7 @@ The canonical MainSequence template should be one manifest with two sections.
 This example is the target schema, not the current schema:
 
 ```yaml
-schema_version: 2
+schema_version: 4
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -154,6 +154,7 @@ evaluation:
       directory: agent_scaffold/skills
 
   case_builder:
+    instructions: case-authoring.md
     dspy:
       module: Predict
       signature:
@@ -173,9 +174,9 @@ evaluation:
           leakage_group: str
 
     model:
-      provider: ollama
-      name_env: MS_AGENT_EVAL_CASE_BUILDER_MODEL
-      endpoint_env: OLLAMA_BASE_URL
+      provider: openai_compatible
+      name: case-builder-model-name
+      base_url: http://localhost:11434/v1
       parameters:
         temperature: 0.2
 
@@ -210,9 +211,9 @@ evaluation:
           feedback: str
 
     model:
-      provider: ollama
-      name_env: MS_AGENT_EVAL_JUDGE_MODEL
-      endpoint_env: OLLAMA_BASE_URL
+      provider: openai_compatible
+      name: judge-model-name
+      base_url: http://localhost:11434/v1
       parameters:
         temperature: 0.0
 
@@ -241,9 +242,9 @@ experiments:
             response: str
 
       model:
-        provider: ollama
-        name_env: MS_AGENT_EVAL_SOLVER_MODEL
-        endpoint_env: OLLAMA_BASE_URL
+        provider: openai_compatible
+        name: solver-model-name
+        base_url: http://localhost:11434/v1
         parameters:
           temperature: 0.2
 
@@ -377,11 +378,11 @@ ms-agent-eval init \
   --ref v4.4.5 \
   --global-instructions agent_scaffold/AGENTS.md \
   --skills-directory agent_scaffold/skills \
-  --cases ./cases
-
-export MS_AGENT_EVAL_SOLVER_MODEL=solver-model-name
-export MS_AGENT_EVAL_JUDGE_MODEL=judge-model-name
-export MS_AGENT_EVAL_CASE_BUILDER_MODEL=case-builder-model-name
+  --cases ./cases \
+  --api-base-url http://localhost:11434/v1 \
+  --case-builder-model case-builder-model-name \
+  --solver-model solver-model-name \
+  --judge-model judge-model-name
 
 ms-agent-eval validate
 ms-agent-eval cases build --coverage "Create cases for every discovered skill"

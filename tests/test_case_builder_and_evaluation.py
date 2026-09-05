@@ -14,6 +14,7 @@ from ms_agent_eval.core.errors import ConfigurationError, IntegrityError
 from ms_agent_eval.core.evaluation import CaseDefinition, LlmJudge
 from ms_agent_eval.core.storage import FilesystemArtifactStore
 from ms_agent_eval.core.workspace import ResolvedRoleModel
+from ms_agent_eval.programs.dspy.engine import create_case_builder_program, program_hash
 
 from .helpers import (
     FixedObservedLM,
@@ -38,10 +39,7 @@ def test_builder_writes_external_draft_and_only_promotion_writes_case_bank(
     model = ResolvedRoleModel.resolve(
         "case_builder",
         repository.workspace.evaluation.case_builder.model,
-        {
-            "BUILDER_MODEL": "builder",
-            "OLLAMA_ENDPOINT": "http://localhost:11434",
-        },
+        {},
     )
     draft = service.build(
         skill="alpha",
@@ -56,6 +54,9 @@ def test_builder_writes_external_draft_and_only_promotion_writes_case_bank(
     promoted = drafts.promote(draft.id, repository.cases_root)
     assert promoted.id == "built-case"
     assert promoted.provenance.builder_model_hash == model.content_hash
+    assert promoted.provenance.builder_program_hash == program_hash(
+        create_case_builder_program(repository.case_authoring_instructions())
+    )
     assert len(draft.call_ids) == 1
 
 

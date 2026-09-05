@@ -6,7 +6,7 @@
 
 ```text
 core/
-  workspace.py             schema-v2 manifest and three-role identity
+  workspace.py             schema-v4 manifest and three-role identity
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   case_builder.py           external drafts and explicit promotion
@@ -17,7 +17,7 @@ core/
   storage.py               external content-addressed artifacts
   reporting.py             current-schema summaries and regressions
 programs/dspy/              typed builder, solver, and judge programs
-providers/ollama/           observed DSPy LM binding
+providers/openai_compatible/ observed DSPy LM binding
 ```
 
 There is no engine selector, raw program package, target-specific library code,
@@ -30,7 +30,8 @@ An experiment is deliberately small:
 ```text
 experiments/<name>/
 ├── workspace.yaml         the only framework configuration
-├── .env.example           credential-free role variable template
+├── case-authoring.md      durable DSPy case-builder instructions
+├── .env.example           optional credential-name template
 ├── cases/
 │   ├── splits.yaml        group-to-split assignments
 │   └── <skill>/<case>/    promoted prompts, expectations, rubrics, provenance
@@ -39,7 +40,10 @@ experiments/<name>/
     └── *.md               calibration candidate responses
 ```
 
-The manifest has `evaluation` and `experiments` sections. Snapshot ids, skill
+The manifest has `evaluation` and `experiments` sections and explicitly points
+to `case-authoring.md`. The Markdown file is versioned experiment policy, not
+generated data: its exact content becomes the case-builder DSPy signature
+instructions and participates in builder provenance. Snapshot ids, skill
 indexes, case indexes, compatibility maps, normalized program hashes, model
 hashes, calibration hashes, and experiment locks are generated evidence—not
 additional configuration directories.
