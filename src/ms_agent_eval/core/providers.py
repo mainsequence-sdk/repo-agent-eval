@@ -40,7 +40,7 @@ class ModelCallObserver:
         *,
         role: str,
     ) -> None:
-        if role not in {"solver", "judge"}:
+        if role not in {"author", "solver", "judge"}:
             raise ValueError(f"invalid LLM role: {role}")
         self.store = store
         self.role = role

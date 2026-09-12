@@ -1,21 +1,25 @@
-schema_version: 4
+schema_version: 5
 id: a2a-stable-session-followup
 title: Preserve one A2A conversation across follow-ups
 skill: a2a_sdk_execution
 group: a2a-stable-session-identity
 coverage:
   primary: stable-session-identity
-  supporting: [agent-discovery, bounded-message-response]
+  supporting:
+  - agent-discovery
+  - bounded-message-response
   archetype: construction
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/a2a_sdk_execution/SKILL.md
+- agent_scaffold/skills/a2a_sdk_execution/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:451e9cd568f5f2ea7c90f2627f61be3e29f0f96152c1fdedb83892bbe12700eb
+  case_content_hash: sha256:eb41ea03f7e54075de98ccdfc1dbd880a27ffc9d903da4a5cbffe7a205cd0cbb
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

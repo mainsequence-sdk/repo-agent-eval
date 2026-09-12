@@ -1,22 +1,26 @@
-schema_version: 4
+schema_version: 5
 id: updater-output-contract-boundary
 title: Correct an updater output and configuration contract
 skill: data_publishing/time_index_table_updates
 group: updater-output-index-and-hash-contract
 coverage:
   primary: nanosecond-utc-output
-  supporting: [update-configuration, incremental-windows]
+  supporting:
+  - update-configuration
+  - incremental-windows
   archetype: review
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/data_publishing/time_index_table_updates/SKILL.md
-  - references/tutorial/src/mainsequence_sdk_tutorial/market_data.py
+- agent_scaffold/skills/data_publishing/time_index_table_updates/SKILL.md
+- references/tutorial/src/mainsequence_sdk_tutorial/market_data.py
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:1bad5b370662fa8a8eaaeb45f513147b1fcee0ea486f8c70e1516397f851eeea
+  case_content_hash: sha256:22bb50a7588768cd38d78e8683bd6fc26097d07c872e8482ad85b494a7013127
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

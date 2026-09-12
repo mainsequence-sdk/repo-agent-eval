@@ -6,18 +6,22 @@
 
 ```text
 core/
-  workspace.py             schema-v6 manifest and two runtime LLM roles
+  workspace.py             schema-v7 target, executor, model, and stage manifest
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring
   evaluation.py            cases, rubrics, calibration, LLM-judge aggregation
   planning.py              generated indexes and experiment locks
-  runner.py                shared evaluate/optimize DSPy path
+  stages.py                immutable packets/results and append-only lifecycle
+  coordinator.py           resumable staged evaluate/optimize orchestration
+  stage_executors.py       transport-neutral harness rendering contract
+  runner.py                public full-run facade over the coordinator
   execution.py             digest-pinned isolated Docker target execution
   storage.py               external content-addressed artifacts
   reporting.py             current-schema summaries and regressions
 programs/dspy/              typed solver and judge programs
 providers/openai_compatible/ observed DSPy LM binding
+adapters/codex_cli.py       isolated, subscription-backed Codex CLI harness
 ```
 
 There is no engine selector, raw program package, target-specific library code,
@@ -36,9 +40,9 @@ experiments/<name>/
 │   ├── README.md           local explanation of the coverage contract
 │   ├── coverage.yaml      required capabilities and primary-case depth
 │   ├── splits.yaml        group-to-split assignments
-│   └── <skill>/<case>/    promoted prompts, expectations, rubrics, provenance
+│   └── <skill>/<case>/    coordinator metadata plus solver/ and judge/ surfaces
 └── judge-calibration/
-    ├── manifest.yaml      human labels and accepted score ranges
+    ├── manifest.yaml      authored reference labels and accepted score ranges
     └── *.md               calibration candidate responses
 ```
 
@@ -57,6 +61,11 @@ Codex decomposes every selected skill into testable capabilities, gives each
 case one primary capability and at most two supporting capabilities, and
 reviews existing packages to keep a campaign semantically diverse. Numeric
 counts cannot hide a missing semantic capability.
+
+The same Codex authoring campaign populates `judge-calibration/` after cases and
+grouped splits exist. Those controlled candidate responses are versioned
+experiment inputs. Actual calibration executions and judge outputs stay in the
+external data plane.
 
 The complete general contract is documented in
 [Capability coverage](capability-coverage.md). Repository-specific catalogs are

@@ -1,21 +1,25 @@
-schema_version: 4
+schema_version: 5
 id: a2a-task-capability-boundary
 title: Respect advertised A2A response capabilities
 skill: a2a_sdk_execution
 group: a2a-response-kind-negotiation
 coverage:
   primary: response-kind-negotiation
-  supporting: [bounded-message-response, sdk-execution-path]
+  supporting:
+  - bounded-message-response
+  - sdk-execution-path
   archetype: review
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/a2a_sdk_execution/SKILL.md
+- agent_scaffold/skills/a2a_sdk_execution/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:3e8d5aca02fdb74e90fd8821d86f495bbb19ee2bf20cb07062283a5497db3a90
+  case_content_hash: sha256:6eea6a04b61a100726cff1772b8c763be26c381e2e349433266692c88d6dbb4c
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

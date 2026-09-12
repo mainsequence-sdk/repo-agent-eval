@@ -13,12 +13,13 @@ cases, rubrics, and models.
 | Technology | How it is used |
 |---|---|
 | Python 3.12+ | Framework implementation and `ms-agent-eval` command-line interface. |
-| Codex skills | The current Codex session authors grounded cases from the versioned `case-authoring` policy and immutable source snapshots. |
+| Portable stages | Authoring, calibration, solving, judging, optimization, final evaluation, and aggregation use one immutable packet/result lifecycle. |
+| Codex skills / CLI | The configured author model creates grounded cases; the isolated CLI adapter can execute model-driven stages with subscription authentication in disposable containers. |
 | DSPy 3.2 | The runtime prompt-programming layer. Typed DSPy signatures define the solver and judge; `LabeledFewShot` compiles optimized solver state. |
-| OpenAI-compatible APIs | LLM transport for the solver and judge through DSPy's LM interface. The two roles must use different configured model identities. |
+| OpenAI-compatible APIs | Endpoint transport for model-driven DSPy stages. Solver and judge remain separate roles but may use the same model. |
 | YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-calibration manifests. |
 | Git | Resolves the target and optional reference repositories from tags or commits into immutable snapshots with recorded provenance. |
-| Docker | Optional digest-pinned sandbox for commands that must execute against the target repository. Response-only evaluations do not require a container. |
+| Docker | Digest-pinned isolation for automatic Codex CLI stages, with stage-specific read-only views and a restricted control-plane proxy. |
 | SHA-256 + JSON artifacts | Identifies snapshots, programs, inputs, calls, and results so runs are reproducible and auditable. |
 | External filesystem storage | Keeps snapshots, model-call evidence, compiled DSPy programs, runs, and reports under `~/ms_agent_eval/<workspace-id>` instead of committing them. |
 | `uv`, Hatchling, pytest, Ruff | Dependency/environment management, package builds, tests, and linting. |
@@ -30,7 +31,9 @@ both repositories. Codex authors cases directly before runtime evaluation.
 
 ## How an experiment runs
 
-Every scored workflow has Codex authoring plus two distinct runtime LLM roles:
+Every scored workflow separates authoring, solver, and judge roles through
+portable stages. The roles may share a model only when the workspace explicitly
+configures that choice:
 
 ```mermaid
 flowchart TB
@@ -50,16 +53,17 @@ flowchart TB
         Repo["Target + reference repositories"] --> Snapshot["Immutable external snapshots"]
         Workspace --> Snapshot
         Snapshot --> SourceSet["Content-addressed authoring source set"]
-        SourceSet --> Author["Codex + case-authoring skill"]
+        SourceSet --> Author["Configured author stage + case-authoring skill"]
         AuthoringPolicy --> Author
         CapabilityCatalog --> Author
         Author --> Cases
     end
 
     subgraph Baseline["Baseline evaluation"]
-        Cases --> Solver["1. DSPy solver LLM"]
+        Cases --> Calibration["1. Calibrate judge"]
+        Calibration --> Solver["2. DSPy solver LLM"]
         Solver --> Candidate["Candidate response"]
-        Candidate --> Judge["2. DSPy LLM judge"]
+        Candidate --> Judge["3. DSPy LLM judge"]
         Cases -->|"rubric + expected result"| Judge
         Judge --> BaselineResults["External scores + call evidence"]
     end
@@ -128,11 +132,13 @@ uv run ms-agent-eval init \
   --judge-model judge-model
 ```
 
-The generated schema-v6 `workspace.yaml` has only two user-facing sections:
+The generated schema-v7 `workspace.yaml` has these top-level concerns:
 
-1. `evaluation`: repository, global instructions, exactly one skill selection,
+1. `executors` and `models`: reusable transport and model definitions.
+2. `stages`: the executor, model, and budget assigned to each portable stage.
+3. `evaluation`: repository, global instructions, exactly one skill selection,
    case-authoring policy/sources, case directory, split policy, and LLM judge.
-2. `experiments`: solver, runtime, normal evaluation, and optional DSPy
+4. `experiments`: solver program, runtime, normal evaluation, and optional DSPy
    optimization.
 
 Use `skills.files` instead of `skills.directory` when evaluating only an exact
@@ -165,24 +171,40 @@ contract beside the catalog. See the general
 [capability coverage contract](docs/capability-coverage.md) for the complete
 schema, readiness calculation, authoring procedure, and provenance rules.
 
-## Configure the two runtime models
+## Configure executors, models, and stages
 
-Model names and API locations are durable workspace configuration. Each role stores
-its provider, model name, base URL, and parameters directly in `workspace.yaml`:
+API locations and model names are separate durable configuration. Stages bind
+one executor to an optional model:
 
 ```yaml
-model:
-  provider: openai_compatible
-  name: solver-model
-  base_url: http://127.0.0.1:8000/v1
-  parameters:
-    temperature: 0.2
+executors:
+  remote-qwen:
+    type: endpoint
+    adapter: openai_compatible
+    base_url: http://192.168.1.10:11434/v1
+
+models:
+  solver:
+    name: qwen3.6:27b-coding
+    parameters: {temperature: 0.2}
+  judge:
+    name: qwen3.6:27b-coding
+    parameters: {temperature: 0.0}
+
+stages:
+  solve:
+    executor: remote-qwen
+    model: solver
+    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+  judge:
+    executor: remote-qwen
+    model: judge
+    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
 ```
 
 Only credentials remain process-local. When a provider requires a key, add
-`api_key_env: OPENAI_API_KEY` to each applicable model block and define that
-secret in the ignored `.env` file. The solver and judge provider/model
-identities must differ. Runtime state defaults to
+`api_key_env: OPENAI_API_KEY` to the endpoint executor and define that secret
+in the ignored `.env` file. Runtime state defaults to
 `~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
 another external path.
 
@@ -196,10 +218,24 @@ uv run ms-agent-eval run baseline --workspace workspace.yaml
 uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 ```
 
+Every full run is resumable orchestration over the same public stage commands:
+
+```bash
+uv run ms-agent-eval run baseline --through solve --workspace workspace.yaml
+uv run ms-agent-eval stage list --run <run-id> --workspace workspace.yaml
+uv run ms-agent-eval run resume <run-id> --workspace workspace.yaml
+```
+
+For an external harness, prepare or claim a packet and submit a JSON result with
+`stage prepare`, `stage claim`, and `stage submit`. Packet, result, transition,
+model, executor, and usage evidence is append-only under the external data root.
+
 Generated snapshots, solver calls, judge calls, compiled
 state, results, and reports remain outside Git. Only `workspace.yaml`, promoted
-case packages, `case-authoring.md`, split assignments, and human-labelled judge
-calibration inputs are versioned.
+case packages, `case-authoring.md`, split assignments, and reviewed
+reference-labelled judge calibration inputs are versioned. The Codex
+case-authoring campaign creates the cases, grouped splits, and calibration
+fixtures together; calibration is not a later manual phase.
 
 Ask Codex for narrow campaigns covering different capabilities, sources,
 difficulties, and archetypes until `validate` reports that every skill satisfies the configured
@@ -209,6 +245,7 @@ guarantee of enough data for a production fine-tune.
 
 Start with [Getting started](docs/getting-started.md), then read the
 [Capability coverage contract](docs/capability-coverage.md),
+[Codex CLI harness](docs/codex-cli-harness.md),
 [Repository structure](docs/structure.md), and [Conventions](docs/conventions.md).
 
 ## Storage layout
@@ -226,7 +263,7 @@ repository/
 │       ├── case-authoring.md   versioned Codex authoring policy
 │       ├── .env.example        optional credential-name template
 │       ├── cases/              coverage contract, promoted cases, and splits
-│       └── judge-calibration/  human-labelled judge fixtures
+│       └── judge-calibration/  authored and reviewed judge fixtures
 ├── tests/                      generic framework acceptance tests
 └── docs/                       guides and architecture records
 ```

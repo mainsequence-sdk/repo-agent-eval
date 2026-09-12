@@ -5,7 +5,7 @@
 - `src/ms_agent_eval` owns generic DSPy programs, source locking, case
   provenance, LLM judging, optimization governance, isolation, and reporting.
 - `workspace.yaml` owns a target repository URL/ref, optional case-authoring
-  reference repositories, exact instruction selection, two runtime role models, case
+  reference repositories, exact instruction selection, stage executors and models, case
   location, judge calibration, and experiments.
 - `case-authoring.md` owns the durable policy used to generate evaluation cases;
   `workspace.yaml` points to it explicitly.
@@ -13,7 +13,8 @@
   minimum number of primary cases required for every capability.
 - `cases/README.md` explains that general coverage contract inside every newly
   generated experiment workspace.
-- Promoted case packages and human-labelled calibration inputs are versioned.
+- Promoted case packages and reviewed, reference-labelled calibration inputs
+  are versioned.
 - External storage owns repository snapshots, solver
   calls, judge calls, compiled state, evaluations, and reports.
 
@@ -35,13 +36,17 @@ An evaluated repository must never become a core dependency or default path.
 - Bind case provenance to the content-addressed authoring source set, not only
   the primary target snapshot.
 
-## Case authoring and two runtime LLM roles
+## Case authoring and model-driven stage roles
 
-- The active Codex session authors cases through the repository-local
-  `case-authoring` skill. It reads the exact versioned policy, locked target and
+- The configured `author` stage authors cases through the repository-local
+  `case-authoring` skill. For the MainSequence workspace this is a local Codex
+  task using `gpt-5.6-sol`. It reads the exact versioned policy, locked target and
   reference snapshots, the user's campaign request, and existing case packages.
-  It is not configured as an API model and never sees solver or judge evidence.
-- `solver` and `judge` must resolve to distinct provider/model identities.
+  It never sees solver or judge evidence.
+  The same campaign owns the capability catalog, grouped splits, and complete
+  judge-calibration inputs; calibration is not deferred to a manual follow-up.
+- `solve` and `judge` are distinct stage roles; they may resolve to the same
+  model and executor when explicitly configured.
 - The solver sees global context, skill context, and task only.
 - The judge sees the rubric, expected response/artifacts, candidate response,
   task, and skill context.
@@ -54,16 +59,22 @@ A promoted case contains:
 
 ```text
 case.yaml
-prompt.md
-expected/response.md
-expected/artifacts/       optional
-rubric.yaml
+solver/prompt.md
+solver/attachments/       optional solver-visible fixtures
+judge/rubric.yaml
+judge/expected/response.md
+judge/expected/artifacts/ optional judge-only evidence
 ```
 
-Schema-v4 `case.yaml` declares id, title, skill, leakage group, exactly one
+Schema-v5 `case.yaml` declares id, title, skill, leakage group, exactly one
 primary capability, at most two supporting capabilities, archetype, difficulty,
 local file references, immutable source paths, and authoring provenance hashes. Direct edits
 that change package identity invalidate provenance.
+
+The coordinator never mounts this canonical package into a model runtime. It
+projects `solver/` and `judge/` into independent, immutable stage views so a
+solver cannot read judging material and a judge cannot read coordinator-only
+pass thresholds or calibration labels/ranges.
 
 One Codex-authored package is one atomic case so it can be validated and
 reviewed independently. It is not adequate coverage for
@@ -101,9 +112,10 @@ judges, or manual-review scoring alternatives. Deterministic code may only:
 - take the median criterion score across judge votes;
 - apply majority voting to declared hard failures.
 
-Judge calibration uses human-labelled strong, partial, incorrect,
-contradictory, and adversarial candidate responses. Failure blocks every solver
-call.
+Judge calibration uses reviewed, reference-labelled strong, partial, incorrect,
+contradictory, and adversarial candidate responses created with the case bank.
+The candidates are controlled authoring inputs, never real solver or judge
+outputs. Failure blocks every solver call.
 
 ## Dataset governance
 

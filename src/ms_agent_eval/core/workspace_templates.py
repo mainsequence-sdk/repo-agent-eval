@@ -70,22 +70,8 @@ def _program(role: str) -> Mapping[str, object]:
     }
 
 
-def _model(
-    *,
-    name: str,
-    base_url: str,
-    api_key_env: str | None,
-    temperature: float,
-) -> Mapping[str, object]:
-    result: dict[str, object] = {
-        "provider": "openai_compatible",
-        "name": name,
-        "base_url": base_url,
-        "parameters": {"temperature": temperature},
-    }
-    if api_key_env is not None:
-        result["api_key_env"] = api_key_env
-    return result
+def _model(*, name: str, temperature: float) -> Mapping[str, object]:
+    return {"name": name, "parameters": {"temperature": temperature}}
 
 
 def build_workspace_template(
@@ -99,6 +85,7 @@ def build_workspace_template(
     api_base_url: str,
     solver_model: str,
     judge_model: str,
+    author_model: str = "gpt-5.6-sol",
     data_root: str | None = None,
     api_key_env: str | None = None,
     runtime_type: str = "response_only",
@@ -119,8 +106,64 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 6,
+        "schema_version": 7,
         "workspace": workspace,
+        "executors": {
+            "remote-models": {
+                "type": "endpoint",
+                "adapter": "openai_compatible",
+                "base_url": api_base_url,
+                **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+            },
+            "authoring-harness": {
+                "type": "harness",
+                "adapter": "artifact_exchange",
+            },
+            "local-process": {"type": "process", "adapter": "local"},
+        },
+        "models": {
+            "author": _model(name=author_model, temperature=0.0),
+            "solver": _model(name=solver_model, temperature=0.2),
+            "judge": _model(name=judge_model, temperature=0.0),
+        },
+        "stages": {
+            "author": {
+                "executor": "authoring-harness",
+                "model": "author",
+                "budget": {"model_calls": 1, "tokens": 64000, "wall_seconds": 1800},
+            },
+            "calibrate_judge": {
+                "executor": "remote-models",
+                "model": "judge",
+                "budget": {"model_calls": 100, "tokens": 250000, "wall_seconds": 1800},
+            },
+            "solve": {
+                "executor": "remote-models",
+                "model": "solver",
+                "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
+            },
+            "judge": {
+                "executor": "remote-models",
+                "model": "judge",
+                "budget": {
+                    "model_calls": judge_repetitions,
+                    "tokens": 64000,
+                    "wall_seconds": 600,
+                },
+            },
+            "optimize": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 1800},
+            },
+            "final_evaluate": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+            },
+            "aggregate": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+            },
+        },
         "evaluation": {
             "repository": {"url": repository_url, "ref": repository_ref},
             "instructions": {
@@ -141,12 +184,6 @@ def build_workspace_template(
             "splits": {"file": f"{cases_directory}/splits.yaml"},
             "judge": {
                 "dspy": _program("judge"),
-                "model": _model(
-                    name=judge_model,
-                    base_url=api_base_url,
-                    api_key_env=api_key_env,
-                    temperature=0.0,
-                ),
                 "calibration": {"directory": "judge-calibration"},
                 "repetitions": judge_repetitions,
             },
@@ -156,12 +193,6 @@ def build_workspace_template(
                 "mode": "evaluate",
                 "solver": {
                     "dspy": _program("solver"),
-                    "model": _model(
-                        name=solver_model,
-                        base_url=api_base_url,
-                        api_key_env=api_key_env,
-                        temperature=0.2,
-                    ),
                 },
                 "runtime": runtime,
                 "repetitions": baseline_repetitions,

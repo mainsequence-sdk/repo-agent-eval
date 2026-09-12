@@ -2,18 +2,19 @@
 
 You are Codex acting as the case-authoring agent for this MainSequence SDK
 evaluation. Create cases directly in the experiment's versioned case bank by
-using the repository-local `case-authoring` skill. This is an authoring workflow,
-not an OpenAI-compatible API role and not a DSPy program. The API-configured LLMs
-are only the solver and judge used later during evaluation.
+using the repository-local `case-authoring` skill. This is the configured
+`author` stage, executed by GPT-5.6 Sol through the local Codex harness. Solver
+and judge are separate stages used later during evaluation.
 
 Work through a multi-case campaign whose result is a diverse corpus for
 evaluation, DSPy optimization, distillation, and possible fine-tuning. Create
 one atomic, independently reviewable case package for each campaign slot. Every
 requested count is a lower bound, never a maximum. Create at least three
 materially different cases per selected skill and expand the campaign until the
-capability catalog's primary-coverage requirements are satisfied. Do not solve
-an existing case, judge a solver, choose a split based on case content, or run
-an experiment.
+capability catalog's primary-coverage requirements are satisfied. The same
+campaign must also create or update the complete judge-calibration corpus; it is
+not a separate manual follow-up. Do not solve an existing case, judge a solver,
+choose a split based on case content, or run an experiment.
 
 This document is the durable Codex authoring policy. The user's campaign request
 specifies what the current slice should cover; it cannot override this contract,
@@ -30,6 +31,9 @@ the target instructions, the selected skill, or immutable source evidence.
 - Give the case exactly one primary capability from `cases/coverage.yaml` and
   at most two supporting capabilities from the same skill. Supporting tags do
   not satisfy primary-coverage requirements.
+- Do not finish an authoring campaign after creating only cases and splits.
+  Codex must also create or update `judge-calibration/manifest.yaml` and its
+  candidate files with all five required labels.
 - Use only facts present in the locked global instructions, complete selected
   skill, and immutable source snapshots. Never use model memory, mutable checkouts, installed
   packages, branches, web content, or unsupported assumptions as evidence.
@@ -56,7 +60,7 @@ the target instructions, the selected skill, or immutable source evidence.
 - Record exact immutable source labels and one leakage group. Apply the
   configured deterministic group-to-split policy only after the package exists;
   never select or alter a split to obtain a preferred dataset placement.
-- Write exactly the schema-v4 package described below; do not create external
+- Write exactly the schema-v5 package described below; do not create external
   model-call drafts or authoring-call evidence.
 
 ## Authoring inputs
@@ -71,6 +75,8 @@ Read:
 4. The user's requested capability, risk, misconception, or gap.
 5. The complete `cases/coverage.yaml` capability catalog.
 6. Existing versioned cases in the campaign, to avoid duplication.
+7. The current `judge-calibration/manifest.yaml` and every referenced candidate
+   response, to create, audit, or update the calibration corpus.
 
 Read exact versions and commits from the source manifest. Do not duplicate or
 infer them from this policy, and never describe a source as merely "latest".
@@ -173,6 +179,11 @@ named skill.
 7. Independently write the expert response and aligned semantic rubric.
 8. Return material paths and a leakage-resistant group, then apply the final
    rejection gate.
+9. After all requested slots exist, update grouped splits mechanically and
+   create or update the mandatory judge-calibration corpus described below.
+10. Validate the complete authoring deliverable; do not return while
+    calibration is empty, missing a required label, references an ineligible
+    split, or is stale against a changed case or rubric.
 
 Prefer the smallest sufficient set of source paths. The selected skill is
 always required; other paths must materially support the case. More citations
@@ -420,6 +431,67 @@ judge feedback, and results must never influence case generation or become
 training material. Project-derived exports also require applicable licensing;
 provenance alone does not grant redistribution rights.
 
+## Mandatory judge-calibration deliverable
+
+Judge calibration is a required output of this case-authoring workflow. It is
+not a later user chore, a solver stage, a judge-generated result, or optional
+documentation. Before returning from every authoring campaign, create or update:
+
+```text
+judge-calibration/
+├── manifest.yaml
+├── strong.md
+├── partial.md
+├── incorrect.md
+├── contradictory.md
+└── adversarial.md
+```
+
+Additional files and multiple fixtures per label are allowed when one fixture
+does not adequately exercise the active rubric set. The minimum manifest uses
+schema version 2 and contains at least one fixture for every exact label:
+`strong`, `partial`, `incorrect`, `contradictory`, and `adversarial`.
+
+```yaml
+schema_version: 2
+fixtures:
+  - id: strong-example
+    case: existing-train-or-development-case-id
+    candidate: strong.md
+    label: strong
+    score_range: [0.9, 1.0]
+```
+
+Every fixture id is unique. Every `case` is an existing promoted MainSequence
+case. Every `candidate` is a safe path relative to `judge-calibration/`. Every
+score range is inclusive, ordered, and within `[0, 1]`.
+
+Codex writes controlled candidate responses grounded in the referenced prompt,
+expected response, rubric, and selected skill:
+
+- `strong` is correct, complete, follows instructions, and must pass;
+- `partial` makes meaningful progress but has material omissions and must fail;
+- `incorrect` is substantively wrong or non-responsive and must fail;
+- `contradictory` conflicts with itself or the supplied current-API evidence and
+  must fail; and
+- `adversarial` attempts to manipulate the judge or override the rubric and
+  must fail without introducing secrets or executable attack instructions.
+
+Choose non-overlapping ranges that allow the runtime to prove the strict
+ordering `strong > partial > incorrect/contradictory/adversarial`. The fixtures
+must genuinely exercise semantic rubric criteria and any hard failures; token or
+keyword caricatures are insufficient. Never use actual solver responses, judge
+outputs, optimizer traces, run results, or held-out feedback as calibration
+candidates.
+
+Because this workspace includes DSPy optimization, calibration fixtures may
+reference train and development cases only. They must never reference test or
+challenge cases. If there is no eligible representative case, author and split
+one instead of weakening this rule. Review and update fixtures whenever a
+referenced case, expected response, rubric, or split changes. Calibration inputs
+are versioned with the experiment; calibration execution records remain under
+the external data root and are never committed.
+
 ## Versioned case package
 
 Write each accepted case directly to:
@@ -427,15 +499,28 @@ Write each accepted case directly to:
 ```text
 cases/<skill-id>/<case-id>/
 ├── case.yaml
-├── prompt.md
-├── expected/response.md
-└── rubric.yaml
+├── solver/
+│   ├── prompt.md
+│   └── attachments/       optional solver-visible fixtures
+└── judge/
+    ├── rubric.yaml
+    └── expected/
+        ├── response.md
+        └── artifacts/     optional judge-only evidence
 ```
 
-`case.yaml` uses schema version 4 and records the case identity, exact skill,
-leakage group, local file references, exact source paths, and coverage:
+`case.yaml` uses schema version 5 and records the case identity, exact skill,
+leakage group, owned local file references, exact source paths, and coverage:
 
 ```yaml
+schema_version: 5
+solver:
+  prompt: solver/prompt.md
+  # attachments: solver/attachments
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md
+  # expected_artifacts: judge/expected/artifacts
 coverage:
   primary: one-capability-id
   supporting: [optional-capability-id]
@@ -464,6 +549,13 @@ from the package identity and file hashes by the framework. Use
 `pending` only while computing it, then write the final hash before validation.
 The prompt and reference response must not be identical.
 
+`solver/` is the complete public case surface. The solver must never see
+`case.yaml`, `judge/`, rubrics, reference answers, pass thresholds, calibration
+labels, or accepted calibration ranges. The coordinator must materialize a
+fresh stage-specific view instead of mounting this canonical package. The judge
+receives the task, candidate response, rubric criteria, reference evidence, and
+skill context, but the pass threshold remains coordinator-only.
+
 ## Rejection gate
 
 Create a case package only after every answer is yes:
@@ -483,5 +575,8 @@ Create a case package only after every answer is yes:
 - Are hard failures limited to decisive violations?
 - Are source labels exact, relevant, immutable, and non-empty?
 - Does the leakage group keep semantic siblings in one split?
+- Does `judge-calibration/manifest.yaml` cover all five exact labels with
+  controlled candidate files, defensible ranges, and only eligible existing
+  train/development cases?
 - Is all held-out feedback, live state, secret material, and unsupported fact
   absent?

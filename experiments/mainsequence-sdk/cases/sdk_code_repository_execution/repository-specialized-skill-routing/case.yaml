@@ -1,21 +1,25 @@
-schema_version: 4
+schema_version: 5
 id: repository-specialized-skill-routing
 title: Route a mixed repository request to owning skills
 skill: sdk_code_repository_execution
 group: repository-specialized-domain-routing
 coverage:
   primary: specialized-skill-routing
-  supporting: [docs-first-routing, success-definition]
+  supporting:
+  - docs-first-routing
+  - success-definition
   archetype: review
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/sdk_code_repository_execution/SKILL.md
+- agent_scaffold/skills/sdk_code_repository_execution/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:dc33562e43fab01cf1acf14eb5c92102be34cdf9c9caf5b2780864b837adbb6f
+  case_content_hash: sha256:2c52b13fa291d64356330466bb3e1d56c13751e8bdf57b2d049dc91e7bb35f0f
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

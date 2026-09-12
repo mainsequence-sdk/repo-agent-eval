@@ -26,10 +26,12 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 6
+WORKSPACE_SCHEMA_VERSION = 7
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST_PINNED_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
+_DOCKER_NETWORK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SPLITS = {"train", "development", "test", "challenge"}
 _PROGRAM_FIELDS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "solver": {
@@ -155,6 +157,12 @@ def _string_list(value: object, field: str, *, allow_empty: bool = False) -> tup
 def _positive_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ConfigurationError(f"{field} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ConfigurationError(f"{field} must be a non-negative integer")
     return value
 
 
@@ -373,10 +381,7 @@ class DspyProgramConfiguration:
 
 @dataclass(frozen=True)
 class ModelConfiguration:
-    provider: str
     model: str
-    base_url: str
-    api_key_env: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
 
@@ -385,20 +390,12 @@ class ModelConfiguration:
         _reject_unknown(
             payload,
             {
-                "provider",
                 "name",
-                "base_url",
-                "api_key_env",
                 "parameters",
                 "configured_cost_per_call",
             },
             field,
         )
-        provider = _identifier(payload.get("provider"), f"{field}.provider")
-        if provider != "openai_compatible":
-            raise ConfigurationError(
-                f"{field}.provider must currently be openai_compatible"
-            )
         parameters = MappingProxyType(
             dict(_mapping(payload.get("parameters", {}), f"{field}.parameters"))
         )
@@ -406,16 +403,265 @@ class ModelConfiguration:
         if not isinstance(cost, (int, float)) or isinstance(cost, bool) or float(cost) < 0:
             raise ConfigurationError(f"{field}.configured_cost_per_call must be non-negative")
         return cls(
-            provider,
             _string(payload.get("name"), f"{field}.name"),
-            _api_base_url(payload.get("base_url"), f"{field}.base_url"),
-            (
-                _environment(payload.get("api_key_env"), f"{field}.api_key_env")
-                if payload.get("api_key_env") is not None
-                else None
-            ),
             parameters,
             float(cost),
+        )
+
+
+class ExecutorType(str, Enum):
+    ENDPOINT = "endpoint"
+    HARNESS = "harness"
+    PROCESS = "process"
+
+
+@dataclass(frozen=True)
+class CodexControlPlaneConfiguration:
+    docker_network: str
+    https_proxy: str
+    policy_id: str
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object], *, field: str
+    ) -> CodexControlPlaneConfiguration:
+        _reject_unknown(
+            payload,
+            {"docker_network", "https_proxy", "policy_id"},
+            field,
+        )
+        network = _string(payload.get("docker_network"), f"{field}.docker_network")
+        if _DOCKER_NETWORK.fullmatch(network) is None or network in {
+            "bridge",
+            "default",
+            "host",
+            "none",
+        }:
+            raise ConfigurationError(
+                f"{field}.docker_network must name a dedicated internal proxy network"
+            )
+        return cls(
+            network,
+            _api_base_url(payload.get("https_proxy"), f"{field}.https_proxy"),
+            _identifier(payload.get("policy_id"), f"{field}.policy_id"),
+        )
+
+
+@dataclass(frozen=True)
+class CodexResourceConfiguration:
+    cpus: float
+    memory_mb: int
+    pids: int
+    maximum_output_bytes: int
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object], *, field: str
+    ) -> CodexResourceConfiguration:
+        _reject_unknown(
+            payload,
+            {"cpus", "memory_mb", "pids", "maximum_output_bytes"},
+            field,
+        )
+        return cls(
+            _positive_number(payload.get("cpus"), f"{field}.cpus"),
+            _positive_int(payload.get("memory_mb"), f"{field}.memory_mb"),
+            _positive_int(payload.get("pids"), f"{field}.pids"),
+            _positive_int(
+                payload.get("maximum_output_bytes"),
+                f"{field}.maximum_output_bytes",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class CodexCliConfiguration:
+    image: str
+    authentication: str
+    permission_profile: str
+    instruction_policy: str
+    control_plane: CodexControlPlaneConfiguration
+    resources: CodexResourceConfiguration
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object], *, field: str
+    ) -> CodexCliConfiguration:
+        _reject_unknown(
+            payload,
+            {
+                "image",
+                "authentication",
+                "permission_profile",
+                "instruction_policy",
+                "control_plane",
+                "resources",
+            },
+            field,
+        )
+        image = _string(payload.get("image"), f"{field}.image")
+        if _DIGEST_PINNED_IMAGE.fullmatch(image) is None:
+            raise ConfigurationError(f"{field}.image must be pinned by sha256 digest")
+        authentication = _identifier(
+            payload.get("authentication"), f"{field}.authentication"
+        )
+        if authentication != "chatgpt_subscription":
+            raise ConfigurationError(
+                f"{field}.authentication must be chatgpt_subscription; "
+                "API-key consumption is not supported by codex_cli"
+            )
+        instruction_policy = _identifier(
+            payload.get("instruction_policy"), f"{field}.instruction_policy"
+        )
+        if instruction_policy not in {"controlled", "none"}:
+            raise ConfigurationError(
+                f"{field}.instruction_policy must be controlled or none for response-only stages"
+            )
+        return cls(
+            image,
+            authentication,
+            _identifier(
+                payload.get("permission_profile"), f"{field}.permission_profile"
+            ),
+            instruction_policy,
+            CodexControlPlaneConfiguration.from_mapping(
+                _mapping(payload.get("control_plane"), f"{field}.control_plane"),
+                field=f"{field}.control_plane",
+            ),
+            CodexResourceConfiguration.from_mapping(
+                _mapping(payload.get("resources"), f"{field}.resources"),
+                field=f"{field}.resources",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutorConfiguration:
+    id: str
+    type: ExecutorType
+    adapter: str
+    base_url: str | None
+    api_key_env: str | None
+    version: str | None
+    options: Mapping[str, object]
+    codex_cli: CodexCliConfiguration | None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        executor_id: str,
+        payload: Mapping[str, object],
+    ) -> ExecutorConfiguration:
+        field = f"executors.{executor_id}"
+        _reject_unknown(
+            payload,
+            {"type", "adapter", "base_url", "api_key_env", "version", "options"},
+            field,
+        )
+        try:
+            executor_type = ExecutorType(payload.get("type"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                f"{field}.type must be endpoint, harness, or process"
+            ) from error
+        adapter = _identifier(payload.get("adapter"), f"{field}.adapter")
+        allowed = {
+            ExecutorType.ENDPOINT: {"openai_compatible"},
+            ExecutorType.HARNESS: {"artifact_exchange", "codex_cli"},
+            ExecutorType.PROCESS: {"local"},
+        }
+        if adapter not in allowed[executor_type]:
+            raise ConfigurationError(
+                f"{field}.adapter {adapter!r} is invalid for {executor_type.value} executors"
+            )
+        raw_base_url = payload.get("base_url")
+        base_url = (
+            _api_base_url(raw_base_url, f"{field}.base_url")
+            if raw_base_url is not None
+            else None
+        )
+        if executor_type is ExecutorType.ENDPOINT and base_url is None:
+            raise ConfigurationError(f"{field}.base_url is required for endpoint executors")
+        if executor_type is not ExecutorType.ENDPOINT and base_url is not None:
+            raise ConfigurationError(f"{field}.base_url is only valid for endpoint executors")
+        raw_key = payload.get("api_key_env")
+        api_key_env = (
+            _environment(raw_key, f"{field}.api_key_env") if raw_key is not None else None
+        )
+        if executor_type is not ExecutorType.ENDPOINT and api_key_env is not None:
+            raise ConfigurationError(
+                f"{field}.api_key_env is only valid for endpoint executors"
+            )
+        raw_version = payload.get("version")
+        version = (
+            _string(raw_version, f"{field}.version") if raw_version is not None else None
+        )
+        options = _mapping(payload.get("options", {}), f"{field}.options")
+        codex_cli = None
+        if adapter == "codex_cli":
+            if version is None:
+                raise ConfigurationError(f"{field}.version is required for codex_cli")
+            codex_cli = CodexCliConfiguration.from_mapping(options, field=f"{field}.options")
+            options = {}
+        elif options:
+            raise ConfigurationError(f"{field}.options are not supported by adapter {adapter!r}")
+        return cls(
+            _identifier(executor_id, "executor id"),
+            executor_type,
+            adapter,
+            base_url,
+            api_key_env,
+            version,
+            MappingProxyType(dict(options)),
+            codex_cli,
+        )
+
+    def api_key(self, environment: Mapping[str, str]) -> str | None:
+        if self.api_key_env is None:
+            return None
+        value = environment.get(self.api_key_env, "").strip()
+        if not value:
+            raise ResolutionError(
+                f"executor {self.id!r} requires an API credential in {self.api_key_env}"
+            )
+        return value
+
+
+_MODEL_STAGES = {"author", "calibrate_judge", "solve", "judge"}
+_CANONICAL_STAGES = _MODEL_STAGES | {"optimize", "final_evaluate", "aggregate"}
+
+
+@dataclass(frozen=True)
+class StageConfiguration:
+    id: str
+    executor: str
+    model: str | None
+    budget: RoleBudget
+
+    @classmethod
+    def from_mapping(
+        cls,
+        stage_id: str,
+        payload: Mapping[str, object],
+    ) -> StageConfiguration:
+        field = f"stages.{stage_id}"
+        if stage_id not in _CANONICAL_STAGES:
+            raise ConfigurationError(f"unknown canonical stage: {stage_id}")
+        _reject_unknown(payload, {"executor", "model", "budget"}, field)
+        raw_model = payload.get("model")
+        model = _identifier(raw_model, f"{field}.model") if raw_model is not None else None
+        if stage_id in _MODEL_STAGES and model is None:
+            raise ConfigurationError(f"{field}.model is required")
+        if stage_id not in _MODEL_STAGES and model is not None:
+            raise ConfigurationError(f"{field}.model is not valid for a deterministic stage")
+        return cls(
+            stage_id,
+            _identifier(payload.get("executor"), f"{field}.executor"),
+            model,
+            RoleBudget.from_mapping(
+                _mapping(payload.get("budget"), f"{field}.budget"),
+                field=f"{field}.budget",
+            ),
         )
 
 
@@ -429,8 +675,8 @@ class RoleBudget:
     def from_mapping(cls, payload: Mapping[str, object], *, field: str) -> RoleBudget:
         _reject_unknown(payload, {"model_calls", "tokens", "wall_seconds"}, field)
         return cls(
-            _positive_int(payload.get("model_calls"), f"{field}.model_calls"),
-            _positive_int(payload.get("tokens"), f"{field}.tokens"),
+            _non_negative_int(payload.get("model_calls"), f"{field}.model_calls"),
+            _non_negative_int(payload.get("tokens"), f"{field}.tokens"),
             _positive_number(payload.get("wall_seconds", 1800), f"{field}.wall_seconds"),
         )
 
@@ -479,14 +725,13 @@ class CaseAuthoringConfiguration:
 @dataclass(frozen=True)
 class JudgeConfiguration:
     program: DspyProgramConfiguration
-    model: ModelConfiguration
     calibration_directory: str
     repetitions: int
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> JudgeConfiguration:
         _reject_unknown(
-            payload, {"dspy", "model", "calibration", "repetitions"}, "evaluation.judge"
+            payload, {"dspy", "calibration", "repetitions"}, "evaluation.judge"
         )
         calibration = _mapping(payload.get("calibration"), "evaluation.judge.calibration")
         _reject_unknown(calibration, {"directory"}, "evaluation.judge.calibration")
@@ -494,10 +739,6 @@ class JudgeConfiguration:
             DspyProgramConfiguration.from_mapping(
                 _mapping(payload.get("dspy"), "evaluation.judge.dspy"),
                 field="evaluation.judge.dspy",
-            ),
-            ModelConfiguration.from_mapping(
-                _mapping(payload.get("model"), "evaluation.judge.model"),
-                field="evaluation.judge.model",
             ),
             _relative_path(calibration.get("directory"), "evaluation.judge.calibration.directory"),
             _positive_int(payload.get("repetitions", 1), "evaluation.judge.repetitions"),
@@ -639,19 +880,14 @@ class EvaluationConfiguration:
 @dataclass(frozen=True)
 class SolverConfiguration:
     program: DspyProgramConfiguration
-    model: ModelConfiguration
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> SolverConfiguration:
-        _reject_unknown(payload, {"dspy", "model"}, "experiment.solver")
+        _reject_unknown(payload, {"dspy"}, "experiment.solver")
         return cls(
             DspyProgramConfiguration.from_mapping(
                 _mapping(payload.get("dspy"), "experiment.solver.dspy"),
                 field="experiment.solver.dspy",
-            ),
-            ModelConfiguration.from_mapping(
-                _mapping(payload.get("model"), "experiment.solver.model"),
-                field="experiment.solver.model",
             ),
         )
 
@@ -815,13 +1051,26 @@ class WorkspaceConfiguration:
     schema_version: int
     id: str
     data_root: str | None
+    executors: Mapping[str, ExecutorConfiguration]
+    models: Mapping[str, ModelConfiguration]
+    stages: Mapping[str, StageConfiguration]
     evaluation: EvaluationConfiguration
     experiments: Mapping[str, ExperimentConfiguration]
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> WorkspaceConfiguration:
         _reject_unknown(
-            payload, {"schema_version", "workspace", "evaluation", "experiments"}, "workspace"
+            payload,
+            {
+                "schema_version",
+                "workspace",
+                "executors",
+                "models",
+                "stages",
+                "evaluation",
+                "experiments",
+            },
+            "workspace",
         )
         if payload.get("schema_version") != WORKSPACE_SCHEMA_VERSION:
             raise ConfigurationError(
@@ -842,6 +1091,59 @@ class WorkspaceConfiguration:
         }
         if not experiments:
             raise ConfigurationError("workspace requires at least one experiment")
+        executors_payload = _mapping(payload.get("executors"), "executors")
+        executors = {
+            executor_id: ExecutorConfiguration.from_mapping(
+                executor_id, _mapping(item, f"executors.{executor_id}")
+            )
+            for executor_id, item in executors_payload.items()
+        }
+        if not executors:
+            raise ConfigurationError("workspace requires at least one executor")
+        models_payload = _mapping(payload.get("models"), "models")
+        models = {
+            model_id: ModelConfiguration.from_mapping(
+                _mapping(item, f"models.{model_id}"), field=f"models.{model_id}"
+            )
+            for model_id, item in models_payload.items()
+        }
+        if not models:
+            raise ConfigurationError("workspace requires at least one model")
+        stages_payload = _mapping(payload.get("stages"), "stages")
+        if set(stages_payload) != _CANONICAL_STAGES:
+            raise ConfigurationError(
+                "stages must configure exactly the canonical stages: "
+                f"{sorted(_CANONICAL_STAGES)}"
+            )
+        stages = {
+            stage_id: StageConfiguration.from_mapping(
+                stage_id, _mapping(item, f"stages.{stage_id}")
+            )
+            for stage_id, item in stages_payload.items()
+        }
+        for stage in stages.values():
+            if stage.executor not in executors:
+                raise ConfigurationError(
+                    f"stage {stage.id!r} references unknown executor {stage.executor!r}"
+                )
+            if stage.model is not None and stage.model not in models:
+                raise ConfigurationError(
+                    f"stage {stage.id!r} references unknown model {stage.model!r}"
+                )
+            executor = executors[stage.executor]
+            if stage.id in _MODEL_STAGES and executor.type is ExecutorType.PROCESS:
+                raise ConfigurationError(
+                    f"model-driven stage {stage.id!r} cannot use a process executor"
+                )
+            if stage.id not in _MODEL_STAGES and executor.type is ExecutorType.ENDPOINT:
+                raise ConfigurationError(
+                    f"deterministic stage {stage.id!r} cannot use an LLM endpoint executor"
+                )
+            if stage.id not in _MODEL_STAGES and executor.adapter == "codex_cli":
+                raise ConfigurationError(
+                    f"deterministic stage {stage.id!r} cannot use codex_cli; "
+                    "use local or artifact_exchange"
+                )
         for experiment in experiments.values():
             if experiment.mode is ExperimentMode.OPTIMIZE:
                 base = experiments.get(experiment.based_on or "")
@@ -853,6 +1155,9 @@ class WorkspaceConfiguration:
             WORKSPACE_SCHEMA_VERSION,
             _identifier(workspace.get("id"), "workspace.id"),
             data_root,
+            MappingProxyType(executors),
+            MappingProxyType(models),
+            MappingProxyType(stages),
             EvaluationConfiguration.from_mapping(_mapping(payload.get("evaluation"), "evaluation")),
             MappingProxyType(experiments),
         )
@@ -872,6 +1177,9 @@ class WorkspaceConfiguration:
             {
                 "schema_version": self.schema_version,
                 "id": self.id,
+                "executors": self.executors,
+                "models": self.models,
+                "stages": self.stages,
                 "evaluation": self.evaluation,
                 "experiments": self.experiments,
             }
@@ -900,21 +1208,20 @@ class WorkspaceConfiguration:
         return experiment.runtime
 
     def _validate_role_configuration(self) -> None:
-        judge = self.evaluation.judge.model
-        for experiment in self.experiments.values():
-            if experiment.mode is not ExperimentMode.EVALUATE:
-                continue
-            assert experiment.solver is not None
-            solver = experiment.solver.model
-            if (solver.provider, solver.model) == (judge.provider, judge.model):
-                raise ConfigurationError(
-                    f"experiment {experiment.id!r} must configure distinct solver and judge LLMs"
-                )
+        solve = self.stages["solve"]
+        judge = self.stages["judge"]
+        calibration = self.stages["calibrate_judge"]
+        assert solve.model is not None and judge.model is not None
+        if (calibration.executor, calibration.model) != (judge.executor, judge.model):
+            raise ConfigurationError(
+                "calibrate_judge must use the exact executor and model configured for judge"
+            )
 
 
 @dataclass(frozen=True)
 class ResolvedRoleModel:
     role: str
+    executor_id: str
     provider: str
     model: str
     base_url: str
@@ -928,15 +1235,17 @@ class ResolvedRoleModel:
         cls,
         role: str,
         configuration: ModelConfiguration,
+        executor: ExecutorConfiguration,
         environment: Mapping[str, str] | None = None,
     ) -> ResolvedRoleModel:
         del environment
         identity = {
             "role": role,
-            "provider": configuration.provider,
+            "executor_id": executor.id,
+            "provider": executor.adapter,
             "model": configuration.model,
-            "base_url": configuration.base_url,
-            "api_key_env": configuration.api_key_env,
+            "base_url": executor.base_url or "",
+            "api_key_env": executor.api_key_env,
             "parameters": configuration.parameters,
             "configured_cost_per_call": configuration.configured_cost_per_call,
         }
@@ -958,17 +1267,44 @@ def resolve_role_models(
     experiment_id: str,
     environment: Mapping[str, str] | None = None,
 ) -> Mapping[str, ResolvedRoleModel]:
-    solver = workspace.solver(experiment_id)
+    workspace.solver(experiment_id)
+    solve_stage = workspace.stages["solve"]
+    judge_stage = workspace.stages["judge"]
+    assert solve_stage.model is not None and judge_stage.model is not None
     models = {
-        "solver": ResolvedRoleModel.resolve("solver", solver.model, environment),
-        "judge": ResolvedRoleModel.resolve("judge", workspace.evaluation.judge.model, environment),
+        "solver": ResolvedRoleModel.resolve(
+            "solver",
+            workspace.models[solve_stage.model],
+            workspace.executors[solve_stage.executor],
+            environment,
+        ),
+        "judge": ResolvedRoleModel.resolve(
+            "judge",
+            workspace.models[judge_stage.model],
+            workspace.executors[judge_stage.executor],
+            environment,
+        ),
     }
-    identities = {(item.provider, item.model) for item in models.values()}
-    if len(identities) != 2:
-        raise ConfigurationError(
-            "solver and judge must resolve to distinct provider/model identities"
-        )
     return MappingProxyType(models)
+
+
+def resolve_stage_model(
+    workspace: WorkspaceConfiguration,
+    stage_id: str,
+    *,
+    role: str | None = None,
+) -> ResolvedRoleModel | None:
+    try:
+        stage = workspace.stages[stage_id]
+    except KeyError as error:
+        raise ResolutionError(f"unknown stage: {stage_id}") from error
+    if stage.model is None:
+        return None
+    return ResolvedRoleModel.resolve(
+        role or stage_id,
+        workspace.models[stage.model],
+        workspace.executors[stage.executor],
+    )
 
 
 @dataclass(frozen=True)

@@ -47,14 +47,14 @@ container, with browser automation added only when visible behavior matters.
 The same manifest defines:
 
 - `baseline`, which asks the DSPy solver to answer each promoted case and has a
-  distinct DSPy judge LLM score the result semantically; and
+  separate DSPy judge stage score the result semantically; and
 - `optimize-few-shot`, which compiles from train cases, evaluates development
   cases, publishes state-only DSPy JSON, and only then loads the untouched test
   set.
 
-The solver and judge must be distinct provider/model identities. Their model
-names and OpenAI-compatible API address are durable workspace configuration.
-Codex authoring has no API model setting. Only an optional secret belongs in `.env`.
+Solver and judge are distinct roles but may use the same configured model.
+Executor addresses, model names, and stage assignments are durable workspace
+configuration. Only an optional secret belongs in `.env`.
 
 ## Prepare the workspace
 
@@ -87,5 +87,8 @@ difficulty levels until `validate` reports no capability or per-skill coverage
 gaps. The three-primary-case capability depth and 12-case/6-group requirements
 are minimums, not a production fine-tuning target.
 
-No solver run can start until the authored case bank, grouped splits, two
-runtime model identities, and human-labelled judge calibration are complete.
+The same Codex case-authoring campaign must also create or update the controlled
+`strong`, `partial`, `incorrect`, `contradictory`, and `adversarial` candidates
+under `judge-calibration/`; this is not a later manual step. No solver run can
+start until the authored case bank, grouped splits, configured runtime stages,
+and reviewed judge calibration are complete.

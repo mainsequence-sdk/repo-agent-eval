@@ -1,8 +1,58 @@
-schema_version: 6
+schema_version: 7
 
 workspace:
   id: command-center-sdk-evaluation
   # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
+
+executors:
+  remote-models:
+    type: endpoint
+    adapter: openai_compatible
+    base_url: http://localhost:11434/v1
+  authoring-harness:
+    type: harness
+    adapter: artifact_exchange
+  local-process:
+    type: process
+    adapter: local
+
+models:
+  author:
+    name: author-model
+    parameters: {temperature: 0.0}
+  solver:
+    name: solver-model
+    parameters: {temperature: 0.2}
+  judge:
+    name: judge-model
+    parameters: {temperature: 0.0}
+
+stages:
+  author:
+    executor: authoring-harness
+    model: author
+    budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
+  calibrate_judge:
+    executor: remote-models
+    model: judge
+    budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
+  solve:
+    executor: remote-models
+    model: solver
+    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+  judge:
+    executor: remote-models
+    model: judge
+    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+  optimize:
+    executor: local-process
+    budget: {model_calls: 0, tokens: 0, wall_seconds: 1800}
+  final_evaluate:
+    executor: local-process
+    budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
+  aggregate:
+    executor: local-process
+    budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
 
 evaluation:
   repository:
@@ -59,12 +109,6 @@ evaluation:
           criterion_scores: dict[str, float]
           hard_failures: list[str]
           feedback: str
-    model:
-      provider: openai_compatible
-      name: judge-model
-      base_url: http://localhost:11434/v1
-      parameters:
-        temperature: 0.0
     calibration:
       directory: judge-calibration
     repetitions: 3
@@ -82,12 +126,6 @@ experiments:
             task: str
           outputs:
             response: str
-      model:
-        provider: openai_compatible
-        name: solver-model
-        base_url: http://localhost:11434/v1
-        parameters:
-          temperature: 0.2
     runtime:
       type: response_only
       python: "3.12"

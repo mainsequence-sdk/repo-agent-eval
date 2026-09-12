@@ -7,14 +7,15 @@ description: Use when creating, updating, reviewing, or planning evaluation case
 
 ## Purpose
 
-Use the current Codex session as the case-authoring agent. Read the versioned
-experiment policy and immutable repository evidence, then create reviewed case
-packages directly in the experiment case bank. Case authoring is not a DSPy
-program and does not call a configured OpenAI-compatible backend model.
+Use the current Codex session as the executor of the configured `author` stage.
+Read the versioned experiment policy and immutable repository evidence, then
+create reviewed case packages and the judge-calibration corpus directly in the
+experiment workspace. An endpoint executor uses the typed DSPy author program;
+a Codex harness consumes the same portable packet and result contract.
 
-The runtime has exactly two LLM roles: the solver answers cases and the judge
-scores those answers. Keep both roles and all evaluation results isolated from
-authoring.
+The experiment has three model-driven roles: author, solver, and judge. Keep
+their stage inputs and all evaluation results isolated. Solver and judge may use
+the same configured model without collapsing their roles.
 
 ## Read First
 
@@ -24,6 +25,9 @@ Read the workspace's `workspace.yaml`, its configured
 Read the configured `evaluation.cases.coverage.catalog` before selecting any
 case. A draft or incomplete catalog is an authoring blocker, not permission to
 sample an arbitrary subset of a skill.
+Read the existing `evaluation.judge.calibration.directory`, its
+`manifest.yaml`, and every referenced candidate before authoring or replacing
+calibration fixtures.
 Resolve the configured target and every `evaluation.case_authoring.sources`
 repository to immutable external snapshots before considering case content.
 
@@ -34,8 +38,11 @@ location. If `directory` is configured, use every recursively discovered
 
 ## Non-negotiable Rules
 
-- The active Codex session authors the cases; never require a builder endpoint,
-  builder model name, builder credential, or builder DSPy configuration.
+- The active Codex session authors the cases as the configured author-stage
+  harness. Do not silently replace its locked model or executor identity.
+- A case-authoring campaign is incomplete until Codex creates or updates the
+  configured judge-calibration manifest and candidate files. Do not return
+  after creating cases and leave calibration as a later manual task.
 - Treat the configured authoring file as durable policy and the user's request
   as the narrower campaign objective.
 - Treat every requested case count as a lower bound. Author at least three
@@ -107,11 +114,14 @@ Create this shape directly:
 ```text
 cases/<skill-id>/<case-id>/
 ├── case.yaml
-├── prompt.md
-├── expected/
-│   ├── response.md
-│   └── artifacts/       optional
-└── rubric.yaml
+├── solver/
+│   ├── prompt.md
+│   └── attachments/     optional solver-visible fixtures
+└── judge/
+    ├── rubric.yaml
+    └── expected/
+        ├── response.md
+        └── artifacts/   optional judge-only evidence
 ```
 
 The prompt must be self-contained for a response-only solver unless the
@@ -119,9 +129,21 @@ workspace explicitly selects an isolated execution runtime. The expected
 response is judge reference evidence, not an exact-string oracle. The rubric
 defines semantic quality and all weights sum to one.
 
-Use case schema version 4. Classify the case explicitly:
+Use case schema version 5. The `solver/` namespace is the complete public case
+surface. The solver must never receive `case.yaml` or any file under `judge/`.
+The coordinator materializes these namespaces into separate stage views; never
+mount the canonical case package into a model container. Classify the case
+explicitly:
 
 ```yaml
+schema_version: 5
+solver:
+  prompt: solver/prompt.md
+  # attachments: solver/attachments
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md
+  # expected_artifacts: judge/expected/artifacts
 coverage:
   primary: one-capability-id
   supporting: [optional-capability-id]
@@ -152,7 +174,46 @@ For each new leakage group, use the workspace split seed and proportions to
 derive its split with the framework's SHA-256 mapping. Preserve existing group
 assignments. Related variants share one group and therefore one split.
 
-### 6. Validate the complete contract
+### 6. Create or update judge calibration
+
+After case packages and grouped splits exist, create a versioned calibration
+corpus in the configured `evaluation.judge.calibration.directory`. This is a
+mandatory authoring deliverable, not generated run output and not a task for the
+runtime judge.
+
+Write `manifest.yaml` with `schema_version: 2` plus candidate Markdown files.
+Create at least one fixture for every required label: `strong`, `partial`,
+`incorrect`, `contradictory`, and `adversarial`. Every fixture must have a
+unique id, reference an existing promoted case, name a relative candidate file,
+and declare a score range within `[0, 1]`:
+
+```yaml
+schema_version: 2
+fixtures:
+  - id: strong-example
+    case: representative-case-id
+    candidate: strong.md
+    label: strong
+    score_range: [0.9, 1.0]
+```
+
+Write controlled candidate responses that exercise the actual rubric and hard
+failures of their referenced cases. `strong` must pass; all other labels must
+fail. `partial` must deserve a score strictly below every strong fixture but
+strictly above every `incorrect`, `contradictory`, and `adversarial` fixture.
+The adversarial candidate must contain a realistic attempt to manipulate or
+override the judge without exposing secrets or executable instructions. Choose
+non-overlapping score ranges that permit this strict ordering.
+
+Use only train/development cases for calibration whenever the workspace has an
+optimization experiment; never reference test/challenge cases. Do not use
+actual solver responses, judge outputs, or held-out feedback as fixtures.
+Calibration files are reviewed experiment inputs and belong in Git; calibration
+execution outputs belong only in external run storage. If a referenced case or
+rubric changes, review and update its fixtures. If no eligible representative
+case exists, author and split one rather than weakening this requirement.
+
+### 7. Validate the complete contract
 
 ```bash
 ms-agent-eval validate --workspace path/to/workspace.yaml
@@ -162,8 +223,11 @@ Validation must prove that every case skill exists, every source path is locked,
 every group owns exactly one split, every expected result and rubric exists,
 weights sum to one, provenance matches current package bytes and authoring
 policy/catalog, every required capability has enough primary cases, solver and
-judge identities differ, and judge calibration has strong,
-partial, incorrect, contradictory, and adversarial human labels.
+judge identities differ, and judge calibration contains valid `strong`,
+`partial`, `incorrect`, `contradictory`, and `adversarial` reference-labelled
+fixtures. Do not finish the authoring campaign while validation reports a
+missing calibration label, unknown case, unsafe candidate path, invalid score
+range, or held-out split reference.
 
 ## Dataset Governance
 
@@ -180,5 +244,7 @@ Git, and never contain held-out prompts, answers, responses, or judge feedback.
 ## Final Response
 
 Report the workspace, resolved source commits and source-set hash, authored case
-ids by skill, exact source paths, leakage groups and assigned splits, validation
-performed, remaining coverage gaps, and any case rejected during self-review.
+ids by skill, exact source paths, leakage groups and assigned splits,
+calibration fixture ids with labels and referenced case splits, validation
+performed, remaining coverage gaps, and any case or fixture rejected during
+self-review.

@@ -1,21 +1,25 @@
-schema_version: 4
+schema_version: 5
 id: orchestration-manual-automatic-image
 title: Choose exact images for manual and automatic Jobs
 skill: platform_operations/orchestration_and_releases
 group: orchestration-job-image-ownership
 coverage:
   primary: manual-and-automatic-jobs
-  supporting: [exact-job-image, job-schedule-and-run]
+  supporting:
+  - exact-job-image
+  - job-schedule-and-run
   archetype: review
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/platform_operations/orchestration_and_releases/SKILL.md
+- agent_scaffold/skills/platform_operations/orchestration_and_releases/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:38b3316350b8804cbc3a5c2d02ef8cd3a6f3be042d1105d51e327c82be466222
+  case_content_hash: sha256:9cbbc54668db90ee35b2e76b7944733866ce94ae13b0ca0d99937bafaa1f37eb
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

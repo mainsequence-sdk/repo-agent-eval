@@ -1,9 +1,11 @@
 # MainSequence SDK Case Bank
 
 Cases are grouped by the exact configured skill id. Each case package contains
-`case.yaml`, a self-contained solver prompt, a hidden expert response, and an
-LLM-judge rubric. `splits.yaml` assigns whole semantic leakage groups using the
-workspace's deterministic seed.
+coordinator-owned `case.yaml`, a public `solver/` surface, and a private
+`judge/` surface containing the rubric and expected evidence. The coordinator
+materializes only the relevant surface for each stage; it never mounts the
+whole package into a model runtime. `splits.yaml` assigns whole semantic leakage
+groups using the workspace's deterministic seed.
 
 `coverage.yaml` is the complete semantic contract. It decomposes each selected
 skill into current-API capabilities and requires three primary cases per

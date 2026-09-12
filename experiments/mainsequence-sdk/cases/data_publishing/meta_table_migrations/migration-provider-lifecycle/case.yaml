@@ -1,23 +1,27 @@
-schema_version: 4
+schema_version: 5
 id: migration-provider-lifecycle
 title: Plan an owned MetaTable migration lifecycle
 skill: data_publishing/meta_table_migrations
 group: migration-provider-revision-lifecycle
 coverage:
   primary: revision-lifecycle
-  supporting: [lifecycle-axes-and-registry, provider-scaffold]
+  supporting:
+  - lifecycle-axes-and-registry
+  - provider-scaffold
   archetype: construction
   difficulty: complex
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/data_publishing/meta_table_migrations/SKILL.md
-  - references/tutorial/src/mainsequence_sdk_tutorial/migrations/registry.py
-  - references/tutorial/src/mainsequence_sdk_tutorial/migrations/versions/mainsequence_sdk_tutorial/0003_add_tutorial_user_profile.py
+- agent_scaffold/skills/data_publishing/meta_table_migrations/SKILL.md
+- references/tutorial/src/mainsequence_sdk_tutorial/migrations/registry.py
+- references/tutorial/src/mainsequence_sdk_tutorial/migrations/versions/mainsequence_sdk_tutorial/0003_add_tutorial_user_profile.py
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:c415394a785b5630edec7640d7f69c4436c6b735dfc8de097b6afe23c420e286
+  case_content_hash: sha256:9bd0c78d26283a976a3d2e53dab7a0543f2af89bf49b4bdb581ec07460d5fba0
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

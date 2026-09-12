@@ -12,10 +12,14 @@ cases/
 ├── splits.yaml
 └── <skill-id>/<case-id>/
     ├── case.yaml
-    ├── prompt.md
-    ├── expected/response.md
-    ├── expected/artifacts/    optional
-    └── rubric.yaml
+    ├── solver/
+    │   ├── prompt.md
+    │   └── attachments/       optional solver-visible fixtures
+    └── judge/
+        ├── rubric.yaml
+        └── expected/
+            ├── response.md
+            └── artifacts/     optional judge-only evidence
 ```
 
 `coverage.yaml` is mandatory. It is the complete semantic decomposition of the
@@ -38,7 +42,7 @@ skills:
         # minimum_primary_cases: 4  # optional override
 ```
 
-Every schema-v4 case has exactly one cataloged primary capability and at most
+Every schema-v5 case has exactly one cataloged primary capability and at most
 two supporting capabilities:
 
 ```yaml
@@ -58,10 +62,18 @@ Requested case counts are lower bounds. Do not satisfy the catalog with
 paraphrases: variants that share a source example, fixture, defect, solution,
 or expected artifact belong to one leakage group and must remain in one split.
 
-The active Codex session authors cases using the workspace's
-`case-authoring.md` and repository-local `case-authoring` skill. Run
+The configured author stage authors cases using the workspace's
+`case-authoring.md` and repository-local `case-authoring` skill. The same
+campaign must create the sibling `judge-calibration/` manifest and candidates;
+the case bank is not an independently complete authoring deliverable. Run
 `ms-agent-eval inspect --workspace workspace.yaml` to see exact remaining gaps.
 No solver call is allowed while the coverage contract is incomplete.
 
 Every promoted case binds its provenance to the exact catalog hash. After any
 catalog change, review and rehash affected cases before evaluation.
+
+The canonical package is coordinator-owned and is never mounted wholesale into
+a model runtime. A solver view contains only `solver/` material plus locked
+global and skill context. A judge view contains the task, candidate, rubric
+criteria, reference evidence, and skill context; coordinator-only thresholds
+and calibration labels/ranges remain hidden.

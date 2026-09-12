@@ -1,21 +1,28 @@
 # OpenAI-Compatible API
 
-The solver and judge use the same provider-neutral HTTP protocol. Each runtime
-role stores its API base URL and model id directly in `workspace.yaml`. Case
-authoring is performed by the active Codex session and has no endpoint setting:
+Any model-driven stage can use the provider-neutral HTTP executor. API address,
+model identity, and stage assignment are separate values in `workspace.yaml`:
 
 ```yaml
-model:
-  provider: openai_compatible
-  name: solver-model
-  base_url: http://127.0.0.1:8000/v1
-  parameters:
-    temperature: 0.2
+executors:
+  remote-models:
+    type: endpoint
+    adapter: openai_compatible
+    base_url: http://127.0.0.1:8000/v1
+models:
+  solver:
+    name: solver-model
+    parameters: {temperature: 0.2}
+stages:
+  solve:
+    executor: remote-models
+    model: solver
+    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
 ```
 
 The API address and model name are versioned experiment configuration. They do
-not come from environment variables. Both roles may share one API address, but
-their model ids must differ.
+not come from environment variables. Solver and judge are isolated roles but
+may deliberately share an API address and model id.
 
 The base URL must include the path expected by the server; the framework does
 not silently append `/v1`. Ollama, vLLM, LM Studio, and hosted services may be
@@ -30,13 +37,12 @@ environment file.
 For an authenticated server, reference only the credential:
 
 ```yaml
-model:
-  provider: openai_compatible
-  name: solver-model
-  base_url: https://provider.example/v1
-  api_key_env: OPENAI_API_KEY
-  parameters:
-    temperature: 0.2
+executors:
+  hosted-models:
+    type: endpoint
+    adapter: openai_compatible
+    base_url: https://provider.example/v1
+    api_key_env: OPENAI_API_KEY
 ```
 
 Put the value in the ignored `.env` beside `workspace.yaml`:
@@ -60,7 +66,7 @@ uv run ms-agent-eval setup
 ```
 
 The wizard asks for the base URL, optionally tests `GET /models`, lets the user
-select or enter two model ids, and previews the resulting YAML before it
+select or enter model ids, and previews the resulting YAML before it
 writes anything. Model discovery performs no inference call.
 
 Check the resolved non-secret identities afterward:

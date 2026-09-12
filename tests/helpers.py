@@ -20,14 +20,66 @@ from ms_agent_eval.core.workspace import WorkspaceRepository
 CASE_AUTHORING_INSTRUCTIONS = """# Test case-authoring policy
 
 Author grounded cases from immutable instruction and source context.
-Write schema-v4 packages and design rubrics for semantic evaluation by the LLM judge.
+Write schema-v5 packages and design rubrics for semantic evaluation by the LLM judge.
 """
 
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "workspace": {"id": "synthetic-evaluation"},
+        "executors": {
+            "remote-models": {
+                "type": "endpoint",
+                "adapter": "openai_compatible",
+                "base_url": "http://localhost:8000/v1",
+                "api_key_env": "TEST_API_KEY",
+            },
+            "authoring-harness": {
+                "type": "harness",
+                "adapter": "artifact_exchange",
+            },
+            "local-process": {"type": "process", "adapter": "local"},
+        },
+        "models": {
+            "author": {"name": "author", "parameters": {"temperature": 0.0}},
+            "solver": {"name": "solver", "parameters": {"temperature": 0.0}},
+            "judge": {"name": "judge", "parameters": {"temperature": 0.0}},
+        },
+        "stages": {
+            "author": {
+                "executor": "authoring-harness",
+                "model": "author",
+                "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
+            },
+            "calibrate_judge": {
+                "executor": "remote-models",
+                "model": "judge",
+                "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
+            },
+            "solve": {
+                "executor": "remote-models",
+                "model": "solver",
+                "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
+            },
+            "judge": {
+                "executor": "remote-models",
+                "model": "judge",
+                "budget": {"model_calls": 30, "tokens": 10000, "wall_seconds": 300},
+            },
+            "optimize": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+            },
+            "final_evaluate": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+            },
+            "aggregate": {
+                "executor": "local-process",
+                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+            },
+        },
         "evaluation": {
             "repository": {
                 "url": "https://github.com/example/synthetic",
@@ -68,13 +120,6 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                         },
                     },
                 },
-                "model": {
-                    "provider": "openai_compatible",
-                    "name": "judge",
-                    "base_url": "http://localhost:8000/v1",
-                    "api_key_env": "TEST_API_KEY",
-                    "parameters": {"temperature": 0.0},
-                },
                 "calibration": {"directory": "judge-calibration"},
                 "repetitions": 1,
             },
@@ -93,13 +138,6 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                             },
                             "outputs": {"response": "str"},
                         },
-                    },
-                    "model": {
-                        "provider": "openai_compatible",
-                        "name": "solver",
-                        "base_url": "http://localhost:8000/v1",
-                        "api_key_env": "TEST_API_KEY",
-                        "parameters": {"temperature": 0.0},
                     },
                 },
                 "runtime": {"type": "response_only", "python": "3.12"},
@@ -203,11 +241,13 @@ def create_case(
     capability_catalog_hash: str | None = None,
 ) -> CaseDefinition:
     directory = cases_root / skill / case_id
-    expected = directory / "expected"
+    solver = directory / "solver"
+    expected = directory / "judge" / "expected"
     expected.mkdir(parents=True)
-    (directory / "prompt.md").write_text(f"Solve {case_id}.\n", encoding="utf-8")
+    solver.mkdir(parents=True)
+    (solver / "prompt.md").write_text(f"Solve {case_id}.\n", encoding="utf-8")
     (expected / "response.md").write_text(f"Correct {case_id}.\n", encoding="utf-8")
-    (directory / "rubric.yaml").write_text(
+    (directory / "judge" / "rubric.yaml").write_text(
         yaml.safe_dump(
             {
                 "passing_score": 0.8,
@@ -225,7 +265,7 @@ def create_case(
         encoding="utf-8",
     )
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "id": case_id,
         "title": f"Case {case_id}",
         "skill": skill,
@@ -236,9 +276,11 @@ def create_case(
             "archetype": "construction",
             "difficulty": "easy",
         },
-        "prompt": "prompt.md",
-        "expected": "expected/response.md",
-        "rubric": "rubric.yaml",
+        "solver": {"prompt": "solver/prompt.md"},
+        "judge": {
+            "expected_response": "judge/expected/response.md",
+            "rubric": "judge/rubric.yaml",
+        },
         "source_paths": [source_path],
         "provenance": {
             "authoring_agent": "codex",

@@ -25,6 +25,13 @@ class InstructionResponse(dspy.Signature):
     response: str = dspy.OutputField()
 
 
+class CaseAuthoring(dspy.Signature):
+    """Create candidate evaluation case packages from locked authoring context."""
+
+    authoring_context: str = dspy.InputField()
+    candidate_packages: list[dict[str, object]] = dspy.OutputField()
+
+
 class RubricJudge(dspy.Signature):
     """Judge a candidate against the locked rubric and expected result."""
 
@@ -40,6 +47,10 @@ class RubricJudge(dspy.Signature):
 
 
 PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
+    "author": {
+        "inputs": ("authoring_context",),
+        "outputs": ("candidate_packages",),
+    },
     "solver": {
         "inputs": ("global_context", "skill_context", "task"),
         "outputs": ("response",),
@@ -60,6 +71,10 @@ PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
 
 def create_solver_program() -> dspy.Predict:
     return dspy.Predict(InstructionResponse)
+
+
+def create_author_program() -> dspy.Predict:
+    return dspy.Predict(CaseAuthoring)
 
 
 def create_judge_program() -> dspy.Predict:

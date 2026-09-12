@@ -27,6 +27,7 @@ class _Response(BytesIO):
 def _model() -> ResolvedRoleModel:
     return ResolvedRoleModel(
         role="solver",
+        executor_id="remote-models",
         provider="openai_compatible",
         model="solver-model",
         base_url="http://localhost:8000/v1",

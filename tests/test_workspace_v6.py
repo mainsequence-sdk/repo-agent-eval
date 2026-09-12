@@ -1,4 +1,4 @@
-"""Workspace schema-v6 configuration and readiness tests."""
+"""Workspace schema-v7 configuration and readiness tests."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from .helpers import (
 )
 
 
-def test_schema_v6_rejects_case_authoring_model_configuration() -> None:
+def test_schema_v7_rejects_case_authoring_model_configuration() -> None:
     payload = workspace_payload()
     payload["evaluation"]["case_authoring"]["model"] = {"name": "builder"}  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="unknown fields"):
@@ -100,7 +100,7 @@ def test_case_coverage_and_catalog_are_required() -> None:
         WorkspaceConfiguration.from_mapping(payload)
 
 
-def test_configured_llm_roles_must_be_distinct() -> None:
+def test_configured_llm_roles_may_share_a_model_but_keep_distinct_stage_roles() -> None:
     workspace = WorkspaceConfiguration.from_mapping(workspace_payload())
     models = resolve_role_models(
         workspace,
@@ -113,15 +113,16 @@ def test_configured_llm_roles_must_be_distinct() -> None:
         "judge": "judge",
     }
     payload = workspace_payload()
-    payload["evaluation"]["judge"]["model"]["name"] = "solver"  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="distinct solver and judge"):
-        WorkspaceConfiguration.from_mapping(payload)
+    payload["models"]["judge"]["name"] = "solver"  # type: ignore[index]
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+    shared = resolve_role_models(workspace, "baseline")
+    assert shared["solver"].model == shared["judge"].model == "solver"
 
 
 def test_configured_api_key_reference_is_required_only_at_request_time() -> None:
     payload = workspace_payload()
-    model = payload["experiments"]["baseline"]["solver"]["model"]  # type: ignore[index]
-    model["api_key_env"] = "OPENAI_API_KEY"  # type: ignore[index]
+    executor = payload["executors"]["remote-models"]  # type: ignore[index]
+    executor["api_key_env"] = "OPENAI_API_KEY"  # type: ignore[index]
     workspace = WorkspaceConfiguration.from_mapping(payload)
     resolved = resolve_role_models(workspace, "baseline", {})["solver"]
 
@@ -130,12 +131,10 @@ def test_configured_api_key_reference_is_required_only_at_request_time() -> None
     assert resolved.api_key({"OPENAI_API_KEY": "secret"}) == "secret"
 
 
-def test_role_reuse_is_rejected_even_when_endpoints_differ() -> None:
+def test_calibration_must_use_the_exact_judge_executor_and_model() -> None:
     payload = workspace_payload()
-    payload["experiments"]["baseline"]["solver"]["model"]["name"] = "shared"  # type: ignore[index]
-    payload["evaluation"]["judge"]["model"]["name"] = "shared"  # type: ignore[index]
-    payload["evaluation"]["judge"]["model"]["base_url"] = "http://remote.example/v1"  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="distinct solver and judge"):
+    payload["stages"]["calibrate_judge"]["model"] = "solver"  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="exact executor and model"):
         WorkspaceConfiguration.from_mapping(payload)
 
 
@@ -157,7 +156,7 @@ def test_unknown_legacy_workspace_surface_is_rejected() -> None:
 
 def test_model_name_and_base_url_must_be_stored_directly() -> None:
     payload = workspace_payload()
-    model = payload["experiments"]["baseline"]["solver"]["model"]  # type: ignore[index]
+    model = payload["models"]["solver"]  # type: ignore[index]
     del model["name"]  # type: ignore[index]
     model["name_env"] = "LEGACY_MODEL_SETTING"  # type: ignore[index]
 
@@ -165,7 +164,7 @@ def test_model_name_and_base_url_must_be_stored_directly() -> None:
         WorkspaceConfiguration.from_mapping(payload)
 
 
-def test_schema_v6_requires_case_authoring_instructions() -> None:
+def test_schema_v7_requires_case_authoring_instructions() -> None:
     payload = workspace_payload()
     del payload["evaluation"]["case_authoring"]["instructions"]  # type: ignore[index]
 

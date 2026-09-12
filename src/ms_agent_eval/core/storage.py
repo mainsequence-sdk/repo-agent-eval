@@ -88,6 +88,28 @@ class FilesystemArtifactStore:
             raise IntegrityError(f"artifact failed verification: {reference.content_id}")
         return (self.data_root / reference.relative_path).open("rb")
 
+    def reference(self, content_id: str, media_type: str) -> ArtifactReference:
+        """Resolve a content id without trusting a caller-provided mutable path."""
+
+        prefix = "sha256:"
+        digest = content_id.removeprefix(prefix)
+        if not content_id.startswith(prefix) or len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ConfigurationError("artifact content id must be a sha256 digest")
+        path = self.blob_root / digest
+        if not path.is_file() or path.is_symlink():
+            raise IntegrityError(f"content-addressed artifact does not exist: {content_id}")
+        reference = ArtifactReference(
+            content_id,
+            media_type,
+            path.stat().st_size,
+            path.relative_to(self.data_root).as_posix(),
+        )
+        if not self.verify(reference):
+            raise IntegrityError(f"artifact failed verification: {content_id}")
+        return reference
+
     def put_manifest(self, key: str, document: Mapping[str, object]) -> ArtifactReference:
         safe_key = _safe_manifest_key(key)
         payload = canonical_json_bytes(document)

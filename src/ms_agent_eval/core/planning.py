@@ -118,7 +118,7 @@ class CompiledWorkspace:
             for case in self.case_bank.cases
         )
         identity = {
-            "schema_version": 3,
+            "schema_version": 4,
             "id": f"{workspace.id}-{experiment.id}",
             "workspace_id": workspace.id,
             "workspace_hash": workspace.identity_hash,
@@ -150,7 +150,7 @@ class CompiledWorkspace:
         }
         counts = Counter(self.splits.split_for(case) for case in self.case_bank.cases)
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "workspace": {
                 "id": workspace.id,
                 "manifest": self.repository.workspace_file.as_posix(),
@@ -212,7 +212,7 @@ class CompiledWorkspace:
             "case_authoring": {
                 "instructions": self.repository.case_authoring_path.as_posix(),
                 "instructions_hash": sha256_file(self.repository.case_authoring_path),
-                "agent": "codex",
+                "stage": json_value(workspace.stages["author"]),
                 "authoring_source_set_hash": self.context.snapshot_hash,
                 "authoring_sources": _authoring_sources(self.context),
             },
@@ -237,6 +237,8 @@ class CompiledWorkspace:
                 }
                 for key, lock in locks.items()
             },
+            "executors": json_value(workspace.executors),
+            "stages": json_value(workspace.stages),
         }
 
 
@@ -485,14 +487,19 @@ def inspect_workspace(
 
     workspace = repository.workspace
     first_experiment = next(iter(workspace.experiments))
+    judge_stage = workspace.stages["judge"]
+    solve_stage = workspace.stages["solve"]
+    assert judge_stage.model is not None and solve_stage.model is not None
     judge_model = (
         json_value(resolved[first_experiment]["judge"])
         if first_experiment in resolved
-        else _unresolved_model(workspace.evaluation.judge.model)
+        else _unresolved_model(
+            workspace.models[judge_stage.model], workspace.executors[judge_stage.executor]
+        )
     )
     split_counts = Counter(splits.split_for(case) for case in case_bank.cases)
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "ready" if not blockers else "incomplete",
         "ready_for_scored_run": not blockers,
         "blockers": blockers,
@@ -553,7 +560,7 @@ def inspect_workspace(
         "case_authoring": {
             "instructions": repository.case_authoring_path.as_posix(),
             "instructions_hash": sha256_file(repository.case_authoring_path),
-            "agent": "codex",
+            "stage": json_value(workspace.stages["author"]),
             "authoring_source_set_hash": context.snapshot_hash,
             "authoring_sources": _authoring_sources(context),
         },
@@ -579,7 +586,10 @@ def inspect_workspace(
                 "solver_model": (
                     json_value(resolved[experiment_id]["solver"])
                     if experiment_id in resolved
-                    else _unresolved_model(workspace.solver(experiment_id).model)
+                    else _unresolved_model(
+                        workspace.models[solve_stage.model],
+                        workspace.executors[solve_stage.executor],
+                    )
                 ),
                 "model_resolution_error": unresolved_models.get(experiment_id),
                 "runtime": json_value(workspace.runtime(experiment_id)),
@@ -591,16 +601,21 @@ def inspect_workspace(
             }
             for experiment_id, experiment in workspace.experiments.items()
         },
+        "executors": json_value(workspace.executors),
+        "stages": json_value(workspace.stages),
     }
 
 
-def _unresolved_model(configuration: ModelConfiguration) -> Mapping[str, object]:
+def _unresolved_model(
+    configuration: ModelConfiguration, executor
+) -> Mapping[str, object]:  # type: ignore[no-untyped-def]
     return {
         "status": "unresolved",
-        "provider": configuration.provider,
+        "executor": executor.id,
+        "provider": executor.adapter,
         "name": configuration.model,
-        "base_url": configuration.base_url,
-        "api_key_env": configuration.api_key_env,
+        "base_url": executor.base_url,
+        "api_key_env": executor.api_key_env,
         "parameters": dict(configuration.parameters),
     }
 

@@ -1,22 +1,26 @@
-schema_version: 4
+schema_version: 5
 id: updater-producer-reference-graph
 title: Model executable and read-only updater dependencies
 skill: data_publishing/time_index_table_updates
 group: updater-producer-vs-reference-dependencies
 coverage:
   primary: producer-and-reference-dependencies
-  supporting: [updater-storage-separation, storage-contract]
+  supporting:
+  - updater-storage-separation
+  - storage-contract
   archetype: construction
   difficulty: complex
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/data_publishing/time_index_table_updates/SKILL.md
-  - references/tutorial/src/mainsequence_sdk_tutorial/market_metrics.py
+- agent_scaffold/skills/data_publishing/time_index_table_updates/SKILL.md
+- references/tutorial/src/mainsequence_sdk_tutorial/market_metrics.py
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:5a2ac3fa033697f91fc8a6c7c8a442e744484e2b7f0266a32f4be3cad9f3ec5c
+  case_content_hash: sha256:c54c9222af91799d1937c8acd55162afeb0a4609bfda9f178d833f0310daca0e
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

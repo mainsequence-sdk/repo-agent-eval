@@ -75,8 +75,9 @@ finding the real defect instead of blindly accepting an incorrect test or
 premise. A user request defines one campaign slice and the desired number of
 atomic, independently reviewable cases per skill. That count is a lower bound:
 Codex writes at least three cases per selected skill and continues until every
-capability in `cases/coverage.yaml` has three primary examples. Schema-v4 cases
-record the authoring-policy, capability-catalog, source-set, and package hashes.
+capability in `cases/coverage.yaml` has three primary examples. Schema-v5 cases
+separate the public `solver/` surface from private `judge/` evidence and record
+the authoring-policy, capability-catalog, source-set, and package hashes.
 
 Reviewed train/development cases may later feed DSPy demonstrations,
 distillation, or fine-tuning exports. Those exports stay outside Git and must
@@ -93,16 +94,22 @@ The same manifest defines:
   measures development cases, publishes state-only JSON, and only then scores
   the untouched test split.
 
-The solver and judge model names are stored directly in `workspace.yaml` and
-must identify two different provider/model pairs. They may share one
-OpenAI-compatible endpoint. Case authoring has no backend model setting.
+Executor definitions, model names, and stage assignments are stored directly in
+`workspace.yaml`. Solver and judge are separate roles and may intentionally use
+the same provider/model pair.
 
 ## Bootstrap and run
 
-From the repository root, replace the two placeholder `name` values in
-`workspace.yaml` with available, distinct runtime models. No environment variables are required by the included
-unauthenticated local API configuration. For an authenticated provider, configure `api_key_env` in
-the applicable model blocks and keep only the credential value in `.env`.
+The included `workspace.yaml` uses `gpt-5.6-sol` for case authoring and
+`qwen3.6:27b-coding` for both the solver and judge stages. No environment
+variables are required by its unauthenticated local API configuration. For an
+authenticated provider, configure `api_key_env` on the applicable executor and
+keep only the credential value in `.env`.
+The author stage is intentionally `artifact_exchange`: the active Codex session
+authors and reviews files in Git. To automate it or any other model-driven stage
+with subscription-backed Codex, configure the isolated `codex_cli` executor in
+the [harness guide](../../docs/codex-cli-harness.md); it never uses API-billed
+inference.
 Review `case-authoring.md` before authoring cases; changing it invalidates the
 authoring provenance of affected cases. Then:
 
@@ -126,11 +133,12 @@ but explicit source and capability slices produce better evidence selection.
 
 Every package remains one atomic case for validation and provenance. Repeat
 Codex authoring requests with materially different coverage goals until
-`validate` reports no per-skill coverage gaps.
-
-Add human-labelled `strong`, `partial`, `incorrect`, `contradictory`, and
-`adversarial` responses under `judge-calibration/`, each referencing a promoted
-train/development case. Validate until `ready_for_scored_run` is `true`, then:
+`validate` reports no per-skill coverage gaps. The same Codex authoring campaign
+must create or update the controlled `strong`, `partial`, `incorrect`,
+`contradictory`, and `adversarial` candidates under `judge-calibration/`, each
+referencing a promoted train/development case. Do not leave calibration as a
+manual follow-up. Review the complete authoring deliverable, then validate until
+`ready_for_scored_run` is `true`:
 
 ```bash
 uv run ms-agent-eval inspect \
@@ -141,8 +149,10 @@ uv run ms-agent-eval run optimize-few-shot \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-`validate` and `inspect` make no LLM requests. They currently report the ten
-remaining cases and four remaining leakage groups per skill, plus the empty
-calibration corpus, as explicit blockers. `run` remains strict and cannot start
-the solver until source, authoring provenance, coverage, splits, two runtime
-model identities, and judge calibration are complete.
+`validate` and `inspect` make no LLM requests. The five-fixture calibration
+corpus is configured and uses the train-split
+`metatable-related-model-graph` case. The workspace still reports ten remaining
+cases and four remaining leakage groups per skill, plus capability-depth gaps,
+as explicit blockers. `run` remains strict and cannot start the solver until
+source, authoring provenance, coverage, splits, configured runtime stages,
+and judge calibration are complete.

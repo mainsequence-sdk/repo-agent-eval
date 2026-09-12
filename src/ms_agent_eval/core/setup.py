@@ -92,7 +92,7 @@ def _models(
     roles = ("solver", "judge")
     selected: list[str] = []
     for role in roles:
-        available = tuple(item for item in discovered if item not in selected)
+        available = discovered
         if available:
             value = prompt.select(
                 f"Select the {role} model",
@@ -100,10 +100,8 @@ def _models(
             )
         else:
             value = prompt.text(f"Enter the {role} model id")
-        while not value or value in selected:
-            prompt.write(
-                f"The {role} model must be non-empty and different from earlier roles."
-            )
+        while not value:
+            prompt.write(f"The {role} model must be non-empty.")
             value = prompt.text(f"Enter the {role} model id")
         selected.append(value)
     return selected[0], selected[1]
@@ -115,14 +113,32 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
     calibration = False
     if calibration_manifest.is_file():
         payload = yaml.safe_load(calibration_manifest.read_text(encoding="utf-8"))
-        calibration = isinstance(payload, dict) and bool(payload.get("fixtures"))
+        fixtures = payload.get("fixtures", []) if isinstance(payload, dict) else []
+        if not isinstance(fixtures, list):
+            fixtures = []
+        labels = {
+            fixture.get("label")
+            for fixture in fixtures
+            if isinstance(fixture, dict) and isinstance(fixture.get("label"), str)
+        }
+        calibration = {
+            "strong",
+            "partial",
+            "incorrect",
+            "contradictory",
+            "adversarial",
+        } <= labels
     if cases == 0:
         next_command = (
             "ask Codex to use the case-authoring skill with "
-            f"{repository.workspace_file} and create the required case campaign"
+            f"{repository.workspace_file} and create the required cases, splits, "
+            "and judge calibration"
         )
     elif not calibration:
-        next_command = f"edit {calibration_manifest} and add human-labelled judge fixtures"
+        next_command = (
+            "ask Codex to continue the case-authoring campaign for "
+            f"{repository.workspace_file} and create the mandatory judge calibration"
+        )
     else:
         next_command = f"ms-agent-eval validate --workspace {repository.workspace_file}"
     inputs_ready = cases > 0 and calibration
@@ -319,6 +335,7 @@ def run_guided_setup(
             api_key_env=api_key_env,
             solver_model=solver_model,
             judge_model=judge_model,
+            author_model="gpt-5.6-sol",
             runtime_type=runtime_type,
             runtime_python=runtime_python,
             runtime_image=runtime_image,
@@ -354,8 +371,11 @@ def run_guided_setup(
         for unit in validated_units:
             prompt.write(f"  - {unit.unit_id}: {unit.source_path}")
         prompt.write(f"API base URL: {api_base_url}")
-        prompt.write(f"Runtime models: solver={solver_model}, judge={judge_model}")
-        prompt.write("Case authoring agent: Codex (uses the versioned case-authoring skill)")
+        prompt.write(
+            "Stage models: "
+            f"author=gpt-5.6-sol, solver={solver_model}, judge={judge_model}"
+        )
+        prompt.write("Case authoring executor: artifact-exchange harness")
         runtime_detail = runtime_type
         if runtime_image is not None:
             runtime_detail += f", image={runtime_image}, network={runtime_network}"

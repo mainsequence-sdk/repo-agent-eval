@@ -16,7 +16,7 @@ DSPy is installed with the base library.
 
 The guided setup resolves the repository first, then lets you select global
 instructions and either a complete skills directory or an exact list of
-`SKILL.md` files. It configures only the runtime solver and judge models.
+`SKILL.md` files. It configures author, solver, and judge stage assignments.
 
 ```bash
 uv run --project /path/to/ms-agent-eval ms-agent-eval setup
@@ -43,7 +43,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v6 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v7 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-calibration manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -75,14 +75,18 @@ Reference paths are exposed as
 `references/<source-id>/<repository-path>`. Their combined source-set hash and
 the exact authoring-policy and capability-catalog hashes become case provenance.
 
-There is no case-builder API model. The active Codex session is the authoring
-agent. Ask it to use the repository's `case-authoring` skill, specify the
+The `author` stage is the case-building model. For the MainSequence experiment
+it is GPT-5.6 Sol through the artifact-exchange harness. Ask it to use the repository's
+`case-authoring` skill, specify the
 workspace, and state the campaign objective and number of cases per skill.
 Codex first decomposes each complete selected skill into independently testable
-capabilities in `cases/coverage.yaml`, then writes schema-v4 packages directly
+capabilities in `cases/coverage.yaml`, then writes schema-v5 packages directly
 under `cases/<skill>/<case>/`. A requested number is a lower bound. The campaign
 must create at least three distinct cases per selected skill and expand until
-every catalog capability has its configured number of primary cases.
+every catalog capability has its configured number of primary cases. Before it
+returns, the same authoring campaign also updates grouped splits and creates the
+complete `judge-calibration/` corpus. Calibration is not a manual phase left to
+the user after case creation.
 
 Read the [capability coverage contract](capability-coverage.md) before marking
 the catalog complete. It defines the catalog schema, per-case classification,
@@ -93,22 +97,33 @@ configuration, contradiction, or misleading symptom, the rubric includes
 `error_identification` at 35–50% of the normalized score. Ordinary cases do not
 receive artificial diagnostic points.
 
-## 4. Configure two runtime LLMs
+To execute a model-driven stage automatically through a subscription-backed
+Codex CLI container, provision and configure the separate
+[Codex CLI harness](codex-cli-harness.md). That adapter accepts no OpenAI API
+key and never falls back to API-billed inference.
 
-The solver and judge model names and OpenAI-compatible API location are durable
-workspace configuration. They must be different provider/model identities:
+## 4. Configure stage executors and models
+
+Model names, OpenAI-compatible API locations, and stage bindings are durable
+workspace configuration. Solver and judge remain separate roles even when they
+use the same configured model:
 
 ```yaml
-model:
-  provider: openai_compatible
-  name: solver-model
-  base_url: http://127.0.0.1:8000/v1
-  parameters:
-    temperature: 0.2
+executors:
+  remote-models:
+    type: endpoint
+    adapter: openai_compatible
+    base_url: http://127.0.0.1:8000/v1
+models:
+  shared-runtime:
+    name: qwen3.6:27b-coding
+stages:
+  solve: {executor: remote-models, model: shared-runtime, budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}}
+  judge: {executor: remote-models, model: shared-runtime, budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}}
 ```
 
-If the API requires a credential, set `api_key_env: OPENAI_API_KEY` in the model
-block and put only the secret in the ignored local `.env` file:
+If the API requires a credential, set `api_key_env: OPENAI_API_KEY` on the
+endpoint executor and put only the secret in the ignored local `.env` file:
 
 ```dotenv
 OPENAI_API_KEY=your-secret
@@ -117,12 +132,16 @@ OPENAI_API_KEY=your-secret
 Model selection and API URLs belong in `workspace.yaml`, not environment
 variables.
 
-## 5. Add judge calibration
+## 5. Review the authored judge calibration
 
-`judge-calibration/manifest.yaml` contains human-labelled candidate responses
-covering `strong`, `partial`, `incorrect`, `contradictory`, and `adversarial`.
-Every fixture references an authored case and declares its accepted score range.
-The LLM judge must pass calibration before any solver request.
+As part of case authoring, Codex must populate
+`judge-calibration/manifest.yaml` and its candidate files with controlled,
+reference-labelled responses covering `strong`, `partial`, `incorrect`,
+`contradictory`, and `adversarial`. Every fixture references an existing
+promoted train/development case and declares its accepted score range. Review
+the fixtures with the cases and rubrics; do not replace them with real solver
+outputs or judge feedback. The LLM judge must pass calibration before any solver
+request.
 
 ```yaml
 schema_version: 2

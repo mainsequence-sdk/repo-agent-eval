@@ -12,7 +12,7 @@ from ms_agent_eval.core.discovery import InspectedRepository, inspect_checkout
 from ms_agent_eval.core.errors import ResolutionError
 from ms_agent_eval.core.model_catalog import ModelCatalog
 from ms_agent_eval.core.models import SourceRef, SourceRefKind
-from ms_agent_eval.core.setup import SetupDependencies, run_guided_setup
+from ms_agent_eval.core.setup import SetupDependencies, _checklist, run_guided_setup
 from ms_agent_eval.core.sources import ResolvedSource
 from ms_agent_eval.core.workspace import WorkspaceRepository
 from ms_agent_eval.ui import Choice
@@ -135,7 +135,7 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 6
+    assert repository.workspace.schema_version == 7
     assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"
     assert repository.case_authoring_path == workspace.parent / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
@@ -148,6 +148,31 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
     assert not (workspace.parent / ".env.example").exists()
     assert result["resolved_commit"] == "a" * 40
     assert result["skill_count"] == 2
+    assert "cases, splits, and judge calibration" in str(result["readiness"]["next"])
+
+
+def test_setup_checklist_requires_every_calibration_label(tmp_path: Path) -> None:
+    from .helpers import create_workspace
+
+    repository = create_workspace(tmp_path / "workspace")
+    case = repository.cases_root / "alpha" / "one" / "case.yaml"
+    case.parent.mkdir(parents=True)
+    case.write_text("schema_version: 4\n", encoding="utf-8")
+    (repository.calibration_root / "manifest.yaml").write_text(
+        "schema_version: 2\n"
+        "fixtures:\n"
+        "  - id: only-strong\n"
+        "    case: one\n"
+        "    candidate: strong.md\n"
+        "    label: strong\n"
+        "    score_range: [0.9, 1.0]\n",
+        encoding="utf-8",
+    )
+
+    readiness = _checklist(repository)
+
+    assert readiness["judge_calibration"] == "missing"
+    assert "mandatory judge calibration" in str(readiness["next"])
 
 
 def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:

@@ -43,13 +43,32 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 6
+    assert repository.workspace.schema_version == 7
+    assert set(repository.workspace.executors) == {
+        "remote-models",
+        "authoring-harness",
+        "local-process",
+    }
+    assert repository.workspace.stages["author"].model == "author"
     assert repository.case_authoring_path == tmp_path / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
     assert "`error_identification`" in repository.case_authoring_instructions()
+    assert "Mandatory judge-calibration deliverable" in (
+        repository.case_authoring_instructions()
+    )
+    assert "Author, solver, and judge responsibilities" in (
+        repository.case_authoring_instructions()
+    )
+    assert "If any calibration condition fails" in (
+        repository.case_authoring_instructions()
+    )
+    assert "Do not stop after writing cases" in repository.case_authoring_instructions()
+    for label in ("strong", "partial", "incorrect", "contradictory", "adversarial"):
+        assert f"`{label}`" in repository.case_authoring_instructions()
     case_bank_readme = (tmp_path / "cases" / "README.md").read_text(encoding="utf-8")
     assert "Case Bank and Coverage Contract" in case_bank_readme
     assert "Only primary cases count" in case_bank_readme
+    assert "sibling `judge-calibration/`" in case_bank_readme
     assert payload["case_bank_readme"].endswith("cases/README.md")
     assert "Mandatory semantic coverage contract" in (
         tmp_path / "cases" / "coverage.yaml"
@@ -112,5 +131,5 @@ def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatc
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "incomplete"
-    assert payload["case_authoring"]["agent"] == "codex"
+    assert payload["case_authoring"]["stage"]["executor"] == "authoring-harness"
     assert payload["case_authoring"]["instructions"].endswith("case-authoring.md")

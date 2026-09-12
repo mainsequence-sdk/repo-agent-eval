@@ -332,9 +332,10 @@ class Rubric:
         return content_hash(self)
 
     def prompt_text(self) -> str:
+        """Render semantic judging guidance without the coordinator's pass threshold."""
+
         return json.dumps(
             {
-                "passing_score": self.passing_score,
                 "criteria": [
                     {
                         "id": item.id,
@@ -425,9 +426,10 @@ class CaseDefinition:
     skill: str
     group: str
     path: Path
-    prompt_path: Path
-    expected_path: Path
-    rubric_path: Path
+    solver_prompt_path: Path
+    solver_attachments_directory: Path | None
+    judge_expected_path: Path
+    judge_rubric_path: Path
     expected_artifacts_directory: Path | None
     prompt: str
     expected_response: str
@@ -451,44 +453,79 @@ class CaseDefinition:
                 "skill",
                 "group",
                 "coverage",
-                "prompt",
-                "expected",
-                "rubric",
-                "expected_artifacts",
+                "solver",
+                "judge",
                 "source_paths",
                 "provenance",
             },
             "case",
             path=case_file,
         )
-        if payload.get("schema_version") != 4:
+        if payload.get("schema_version") != 5:
             raise ConfigurationError(
-                "case schema_version must be 4; legacy cases are not supported", path=case_file
+                "case schema_version must be 5; legacy cases are not supported", path=case_file
             )
-        prompt_path = _relative_file(
-            directory, payload.get("prompt"), "case.prompt", path=case_file
+        solver = _mapping(payload.get("solver"), "case.solver", path=case_file)
+        _reject_unknown(
+            solver,
+            {"prompt", "attachments"},
+            "case.solver",
+            path=case_file,
         )
-        expected_path = _relative_file(
-            directory, payload.get("expected"), "case.expected", path=case_file
+        judge = _mapping(payload.get("judge"), "case.judge", path=case_file)
+        _reject_unknown(
+            judge,
+            {"rubric", "expected_response", "expected_artifacts"},
+            "case.judge",
+            path=case_file,
         )
-        rubric_path = _relative_file(
-            directory, payload.get("rubric"), "case.rubric", path=case_file
+        prompt_path = _owned_relative_file(
+            directory,
+            solver.get("prompt"),
+            "case.solver.prompt",
+            owner="solver",
+            path=case_file,
         )
-        raw_artifacts = payload.get("expected_artifacts")
+        solver_attachments = _optional_owned_directory(
+            directory,
+            solver.get("attachments"),
+            "case.solver.attachments",
+            owner="solver",
+            path=case_file,
+        )
+        expected_path = _owned_relative_file(
+            directory,
+            judge.get("expected_response"),
+            "case.judge.expected_response",
+            owner="judge",
+            path=case_file,
+        )
+        rubric_path = _owned_relative_file(
+            directory,
+            judge.get("rubric"),
+            "case.judge.rubric",
+            owner="judge",
+            path=case_file,
+        )
+        raw_artifacts = judge.get("expected_artifacts")
         artifacts_directory: Path | None = None
         if raw_artifacts is not None:
-            relative = Path(_string(raw_artifacts, "case.expected_artifacts", path=case_file))
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ConfigurationError(
-                    "case.expected_artifacts must be a safe relative path", path=case_file
-                )
-            artifacts_directory = (directory / relative).resolve()
-            if (
-                directory not in artifacts_directory.parents
-                or artifacts_directory.is_symlink()
-                or not artifacts_directory.is_dir()
-            ):
-                raise ResolutionError(f"case.expected_artifacts is missing or unsafe: {relative}")
+            artifacts_directory = _optional_owned_directory(
+                directory,
+                raw_artifacts,
+                "case.judge.expected_artifacts",
+                owner="judge",
+                path=case_file,
+            )
+        _validate_case_package_files(
+            directory,
+            case_file=case_file,
+            prompt_path=prompt_path,
+            solver_attachments=solver_attachments,
+            rubric_path=rubric_path,
+            expected_path=expected_path,
+            expected_artifacts=artifacts_directory,
+        )
         raw_sources = payload.get("source_paths", [])
         source_paths = tuple(
             _safe_source_path(item, path=case_file)
@@ -506,16 +543,21 @@ class CaseDefinition:
             path=case_file,
         )
         identity = {
-            "schema_version": 4,
+            "schema_version": 5,
             "id": _identifier(payload.get("id"), "case.id", path=case_file),
             "title": _string(payload.get("title"), "case.title", path=case_file),
             "skill": _skill_id(payload.get("skill"), "case.skill", path=case_file),
             "group": _identifier(payload.get("group"), "case.group", path=case_file),
             "coverage": coverage,
-            "prompt_hash": sha256_file(prompt_path),
-            "expected_hash": sha256_file(expected_path),
-            "rubric_hash": sha256_file(rubric_path),
-            "expected_artifacts": _artifact_inventory(artifacts_directory),
+            "solver": {
+                "prompt_hash": sha256_file(prompt_path),
+                "attachments": _artifact_inventory(solver_attachments),
+            },
+            "judge": {
+                "expected_response_hash": sha256_file(expected_path),
+                "rubric_hash": sha256_file(rubric_path),
+                "expected_artifacts": _artifact_inventory(artifacts_directory),
+            },
             "source_paths": source_paths,
         }
         package_hash = content_hash(identity)
@@ -530,9 +572,10 @@ class CaseDefinition:
             skill=identity["skill"],
             group=identity["group"],
             path=directory,
-            prompt_path=prompt_path,
-            expected_path=expected_path,
-            rubric_path=rubric_path,
+            solver_prompt_path=prompt_path,
+            solver_attachments_directory=solver_attachments,
+            judge_expected_path=expected_path,
+            judge_rubric_path=rubric_path,
             expected_artifacts_directory=artifacts_directory,
             prompt=prompt_path.read_text(encoding="utf-8"),
             expected_response=expected_path.read_text(encoding="utf-8"),
@@ -543,15 +586,62 @@ class CaseDefinition:
             content_hash=package_hash,
         )
 
+    def solver_attachments(self) -> Mapping[str, str]:
+        return _text_artifacts(self.solver_attachments_directory)
+
     def expected_artifacts(self) -> Mapping[str, str]:
-        root = self.expected_artifacts_directory
-        if root is None:
-            return {}
-        return {
-            path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
-            for path in sorted(root.rglob("*"))
-            if path.is_file() and not path.is_symlink()
-        }
+        return _text_artifacts(self.expected_artifacts_directory)
+
+
+def _owned_relative_file(
+    directory: Path,
+    value: object,
+    field: str,
+    *,
+    owner: str,
+    path: Path,
+) -> Path:
+    relative = PurePosixPath(_string(value, field, path=path))
+    if not relative.parts or relative.parts[0] != owner:
+        raise ConfigurationError(f"{field} must be owned by {owner}/", path=path)
+    return _relative_file(directory, relative.as_posix(), field, path=path)
+
+
+def _optional_owned_directory(
+    directory: Path,
+    value: object | None,
+    field: str,
+    *,
+    owner: str,
+    path: Path,
+) -> Path | None:
+    if value is None:
+        return None
+    relative = PurePosixPath(_string(value, field, path=path))
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ConfigurationError(f"{field} must be a safe relative path", path=path)
+    if relative.parts[0] != owner:
+        raise ConfigurationError(f"{field} must be owned by {owner}/", path=path)
+    result = (directory / relative.as_posix()).resolve()
+    if directory.resolve() not in result.parents or result.is_symlink() or not result.is_dir():
+        raise ResolutionError(f"{field} is missing or unsafe: {relative}")
+    return result
+
+
+def _text_artifacts(root: Path | None) -> Mapping[str, str]:
+    if root is None:
+        return {}
+    result: dict[str, str] = {}
+    for artifact in sorted(root.rglob("*")):
+        if not artifact.is_file() or artifact.is_symlink():
+            continue
+        try:
+            result[artifact.relative_to(root).as_posix()] = artifact.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise ConfigurationError(
+                f"case text artifact must be UTF-8: {artifact}"
+            ) from error
+    return result
 
 
 def _artifact_inventory(root: Path | None) -> tuple[tuple[str, str], ...]:
@@ -562,6 +652,42 @@ def _artifact_inventory(root: Path | None) -> tuple[tuple[str, str], ...]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and not path.is_symlink()
     )
+
+
+def _validate_case_package_files(
+    directory: Path,
+    *,
+    case_file: Path,
+    prompt_path: Path,
+    solver_attachments: Path | None,
+    rubric_path: Path,
+    expected_path: Path,
+    expected_artifacts: Path | None,
+) -> None:
+    allowed = {
+        case_file.resolve(),
+        prompt_path.resolve(),
+        rubric_path.resolve(),
+        expected_path.resolve(),
+        *(
+            path.resolve()
+            for root in (solver_attachments, expected_artifacts)
+            if root is not None
+            for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ),
+    }
+    unexpected: list[str] = []
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise IntegrityError(f"case package contains a symlink: {path}")
+        if path.is_file() and path.resolve() not in allowed:
+            unexpected.append(path.relative_to(directory).as_posix())
+    if unexpected:
+        raise ConfigurationError(
+            f"case package contains undeclared files: {sorted(unexpected)}",
+            path=case_file,
+        )
 
 
 def _safe_source_path(value: object, *, path: Path) -> str:
@@ -947,6 +1073,7 @@ class CalibrationCorpus:
 class CalibrationResult:
     passed: bool
     fixture_scores: Mapping[str, float]
+    fixture_passes: Mapping[str, bool]
     corpus_hash: str
     content_hash: str
 
@@ -959,7 +1086,7 @@ def calibrate_judge(
 ) -> CalibrationResult:
     cases = {case.id: case for case in case_bank.cases}
     scores: dict[str, float] = {}
-    scores_by_label: dict[str, list[float]] = {}
+    passes: dict[str, bool] = {}
     for fixture in corpus.fixtures:
         case = cases[fixture.case_id]
         result = judge.evaluate(
@@ -968,18 +1095,44 @@ def calibrate_judge(
             skill_context=skill_context(case.skill),
         )
         scores[fixture.id] = result.score
-        scores_by_label.setdefault(fixture.label, []).append(result.score)
+        passes[fixture.id] = result.passed
+    return calibration_result_from_scores(corpus, scores, fixture_passes=passes)
+
+
+def calibration_result_from_scores(
+    corpus: CalibrationCorpus,
+    fixture_scores: Mapping[str, float],
+    *,
+    fixture_passes: Mapping[str, bool] | None = None,
+) -> CalibrationResult:
+    """Apply private calibration labels and ranges outside the judge model's view."""
+
+    expected_ids = {fixture.id for fixture in corpus.fixtures}
+    actual_ids = set(fixture_scores)
+    if actual_ids != expected_ids:
+        raise IntegrityError(
+            "calibration scores must cover every fixture exactly: "
+            f"{sorted(actual_ids)} != {sorted(expected_ids)}"
+        )
+    scores = {fixture_id: float(score) for fixture_id, score in fixture_scores.items()}
+    if any(not 0 <= score <= 1 for score in scores.values()):
+        raise IntegrityError("calibration scores must be in [0, 1]")
+    if fixture_passes is None:
+        fixture_passes = {
+            fixture.id: scores[fixture.id] >= 0.5 for fixture in corpus.fixtures
+        }
+    if set(fixture_passes) != expected_ids:
+        raise IntegrityError("calibration pass decisions must cover every fixture exactly")
+    scores_by_label: dict[str, list[float]] = {}
+    passed = True
+    for fixture in corpus.fixtures:
+        score = scores[fixture.id]
+        scores_by_label.setdefault(fixture.label, []).append(score)
+        if not fixture.minimum_score <= score <= fixture.maximum_score:
+            passed = False
         expected_pass = fixture.label == "strong"
-        if (
-            not fixture.minimum_score <= result.score <= fixture.maximum_score
-            or result.passed is not expected_pass
-        ):
-            identity = {
-                "passed": False,
-                "fixture_scores": scores,
-                "corpus_hash": corpus.content_hash,
-            }
-            return CalibrationResult(**identity, content_hash=content_hash(identity))
+        if fixture_passes[fixture.id] is not expected_pass:
+            passed = False
     strong_floor = min(scores_by_label["strong"])
     partial_ceiling = max(scores_by_label["partial"])
     negative_ceiling = max(
@@ -987,16 +1140,11 @@ def calibrate_judge(
         for label in ("incorrect", "contradictory", "adversarial")
         for score in scores_by_label[label]
     )
-    if not strong_floor > partial_ceiling > negative_ceiling:
-        identity = {
-            "passed": False,
-            "fixture_scores": scores,
-            "corpus_hash": corpus.content_hash,
-        }
-        return CalibrationResult(**identity, content_hash=content_hash(identity))
+    passed = passed and strong_floor > partial_ceiling > negative_ceiling
     identity = {
-        "passed": True,
+        "passed": passed,
         "fixture_scores": scores,
+        "fixture_passes": dict(fixture_passes),
         "corpus_hash": corpus.content_hash,
     }
     return CalibrationResult(**identity, content_hash=content_hash(identity))

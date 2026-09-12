@@ -40,7 +40,7 @@ independent from the evaluated SDK.
    Never fabricate builder provenance or edit hashes to make old cases pass.
    If the authoring policy changes, treat its new builder-program hash as an
    intentional case-provenance invalidation and rebuild affected cases.
-6. Review group split assignments and human-labelled judge calibration when
+6. Review group split assignments and reference-labelled judge calibration when
    case ids, prompts, expected responses, or rubrics change. Test and challenge
    data must remain held out from optimization and calibration.
 7. Run `validate`, `inspect`, Ruff, pytest, lock verification, and a package

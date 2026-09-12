@@ -1,21 +1,25 @@
-schema_version: 4
+schema_version: 5
 id: api-trusted-request-identity
 title: Correct FastAPI caller identity handling
 skill: application_surfaces/api_surfaces
 group: api-platform-injected-human-identity
 coverage:
   primary: trusted-request-identity
-  supporting: [thin-service-boundary, endpoint-classification]
+  supporting:
+  - thin-service-boundary
+  - endpoint-classification
   archetype: review
   difficulty: easy
-prompt: prompt.md
-expected: expected/response.md
-rubric: rubric.yaml
 source_paths:
-  - agent_scaffold/skills/application_surfaces/api_surfaces/SKILL.md
+- agent_scaffold/skills/application_surfaces/api_surfaces/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
   capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
   source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:c6d1ae7eaa1dc72a47e5a9c49fed544bb3dc3b63125e318d92da03c74f09af76
+  case_content_hash: sha256:30ebdd910167c9ec8bc262edb75fde1d630a015d9c4fdddc8b091d1daab44843
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

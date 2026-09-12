@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import yaml
 
 from ms_agent_eval.core.errors import ConfigurationError, IntegrityError
 from ms_agent_eval.core.evaluation import (
+    CalibrationCorpus,
     CapabilityCatalog,
     CaseBank,
     CaseDefinition,
@@ -152,6 +154,45 @@ def test_mainsequence_capability_catalog_uses_only_current_time_index_api() -> N
     assert "TimeIndexTableUpdateConfig" in text
     assert "TimeIndexTableUpdate" in text
     assert "TimeIndexTableRef" in text
+
+
+def test_experiment_authoring_policies_make_calibration_a_campaign_output() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for experiment_id in ("mainsequence-sdk", "command-center-sdk"):
+        policy = (
+            root / "experiments" / experiment_id / "case-authoring.md"
+        ).read_text(encoding="utf-8")
+        assert "Mandatory judge-calibration deliverable" in policy
+        assert re.search(r"not a separate\s+manual follow-up", policy)
+        assert "judge-calibration/manifest.yaml" in policy
+        for label in ("strong", "partial", "incorrect", "contradictory", "adversarial"):
+            assert f"`{label}`" in policy
+
+
+def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None:
+    root = Path(__file__).resolve().parents[1]
+    experiment = root / "experiments/mainsequence-sdk"
+    bank = CaseBank.discover(experiment / "cases")
+    corpus = CalibrationCorpus.load(experiment / "judge-calibration", bank)
+    splits = SplitManifest.load(experiment / "cases/splits.yaml", bank)
+    cases = {case.id: case for case in bank.cases}
+    fixtures = {fixture.label: fixture for fixture in corpus.fixtures}
+
+    assert set(fixtures) == {
+        "strong",
+        "partial",
+        "incorrect",
+        "contradictory",
+        "adversarial",
+    }
+    assert all(
+        splits.split_for(cases[fixture.case_id]) in {"train", "development"}
+        for fixture in corpus.fixtures
+    )
+    assert fixtures["adversarial"].maximum_score < fixtures["contradictory"].minimum_score
+    assert fixtures["contradictory"].maximum_score < fixtures["incorrect"].minimum_score
+    assert fixtures["incorrect"].maximum_score < fixtures["partial"].minimum_score
+    assert fixtures["partial"].maximum_score < fixtures["strong"].minimum_score
 
 
 def test_llm_judge_validates_exact_criterion_ids(tmp_path: Path) -> None:

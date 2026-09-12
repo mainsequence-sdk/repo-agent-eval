@@ -90,7 +90,7 @@ that cite capabilities outside their exact skill.
 
 ### 3. Per-case coverage classification
 
-Every schema-v4 `case.yaml` connects one case to the catalog:
+Every schema-v5 `case.yaml` connects one case to the catalog:
 
 ```yaml
 coverage:
