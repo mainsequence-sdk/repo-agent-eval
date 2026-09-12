@@ -6,10 +6,12 @@ two distinct DSPy LLM roles solve and judge them.
 ## Start here
 
 1. [Getting started](getting-started.md) — complete repository-to-result flow.
-2. [Repository structure](structure.md) — what is versioned and what remains external.
-3. [Framework conventions](conventions.md) — identities, provenance, judging, and splits.
-4. [OpenAI-compatible API](openai-compatible-api.md) — configure the solver and judge.
-5. [Target source workflow](target-source-workflow.md) — immutable target and
+2. [Capability coverage](capability-coverage.md) — the mandatory catalog,
+   per-case classification, and exact readiness gates.
+3. [Repository structure](structure.md) — what is versioned and what remains external.
+4. [Framework conventions](conventions.md) — identities, provenance, judging, and splits.
+5. [OpenAI-compatible API](openai-compatible-api.md) — configure the solver and judge.
+6. [Target source workflow](target-source-workflow.md) — immutable target and
    case-authoring reference snapshots.
 
 ## Architecture

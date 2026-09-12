@@ -43,9 +43,9 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v6 `workspace.yaml`, `case-authoring.md`, a draft
-`cases/coverage.yaml` capability catalog, an empty case bank, grouped split
-manifest, and judge-calibration manifest. It does not
+The command creates a schema-v6 `workspace.yaml`, `case-authoring.md`, a local
+`cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
+case bank, grouped split manifest, and judge-calibration manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
 absent, generated data defaults to `~/ms_agent_eval/<workspace-id>`.
 
@@ -83,6 +83,10 @@ capabilities in `cases/coverage.yaml`, then writes schema-v4 packages directly
 under `cases/<skill>/<case>/`. A requested number is a lower bound. The campaign
 must create at least three distinct cases per selected skill and expand until
 every catalog capability has its configured number of primary cases.
+
+Read the [capability coverage contract](capability-coverage.md) before marking
+the catalog complete. It defines the catalog schema, per-case classification,
+readiness calculation, diversity requirements, and revalidation rules.
 
 For diagnostic cases containing a real faulty test, false premise, broken
 configuration, contradiction, or misleading symptom, the rubric includes

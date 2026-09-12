@@ -46,6 +46,7 @@ class WorkspaceTemplate:
     api_key_env: str | None
     case_authoring_instructions: str
     capability_catalog: str
+    case_bank_readme: str
 
     @property
     def workspace_yaml(self) -> str:
@@ -191,18 +192,26 @@ def build_workspace_template(
         .joinpath("templates/case-authoring.md")
         .read_text(encoding="utf-8")
     )
+    case_bank_readme = (
+        files("ms_agent_eval")
+        .joinpath("templates/cases-readme.md")
+        .read_text(encoding="utf-8")
+    )
     capability_catalog = (
+        "# Mandatory semantic coverage contract. Read README.md before editing.\n"
+        "# Keep status draft until every exact selected skill is fully decomposed.\n"
         "schema_version: 1\n"
         "status: draft\n"
         "default_minimum_primary_cases: 3\n"
         "skills: {}\n"
     )
     return WorkspaceTemplate(
-        payload,
-        cases_directory,
-        api_key_env,
-        authoring,
-        capability_catalog,
+        payload=payload,
+        cases_directory=cases_directory,
+        api_key_env=api_key_env,
+        case_authoring_instructions=authoring,
+        capability_catalog=capability_catalog,
+        case_bank_readme=case_bank_readme,
     )
 
 
@@ -216,6 +225,7 @@ def planned_workspace_paths(
     paths = [
         workspace_file.resolve(),
         root / "case-authoring.md",
+        root / template.cases_directory / "README.md",
         root / template.cases_directory / "coverage.yaml",
         root / template.cases_directory / "splits.yaml",
         root / "judge-calibration" / "manifest.yaml",
@@ -266,6 +276,7 @@ def write_workspace_template(
     files: dict[Path, str] = {
         workspace_file: template.workspace_yaml,
         root / "case-authoring.md": template.case_authoring_instructions,
+        cases_root / "README.md": template.case_bank_readme,
         cases_root / "coverage.yaml": template.capability_catalog,
         cases_root / "splits.yaml": "schema_version: 2\ngroups: {}\n",
         calibration / "manifest.yaml": "schema_version: 2\nfixtures: []\n",
@@ -309,6 +320,7 @@ def write_workspace_template(
     result = {
         "workspace": workspace_file.as_posix(),
         "case_authoring": (root / "case-authoring.md").as_posix(),
+        "case_bank_readme": (cases_root / "README.md").as_posix(),
         "capability_catalog": (cases_root / "coverage.yaml").as_posix(),
         "cases": cases_root.as_posix(),
         "calibration": (root / "judge-calibration").as_posix(),

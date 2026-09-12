@@ -33,6 +33,7 @@ experiments/<name>/
 ├── case-authoring.md      durable Codex authoring instructions
 ├── .env.example           optional credential-name template
 ├── cases/
+│   ├── README.md           local explanation of the coverage contract
 │   ├── coverage.yaml      required capabilities and primary-case depth
 │   ├── splits.yaml        group-to-split assignments
 │   └── <skill>/<case>/    promoted prompts, expectations, rubrics, provenance
@@ -56,6 +57,10 @@ Codex decomposes every selected skill into testable capabilities, gives each
 case one primary capability and at most two supporting capabilities, and
 reviews existing packages to keep a campaign semantically diverse. Numeric
 counts cannot hide a missing semantic capability.
+
+The complete general contract is documented in
+[Capability coverage](capability-coverage.md). Repository-specific catalogs are
+instances of that blueprint, not alternate schemas.
 
 The evaluated repository owns the solver instruction inventory. Authoring-only
 reference repositories supply tutorials, real-project examples, or external

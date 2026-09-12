@@ -47,6 +47,13 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     assert repository.case_authoring_path == tmp_path / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
     assert "`error_identification`" in repository.case_authoring_instructions()
+    case_bank_readme = (tmp_path / "cases" / "README.md").read_text(encoding="utf-8")
+    assert "Case Bank and Coverage Contract" in case_bank_readme
+    assert "Only primary cases count" in case_bank_readme
+    assert payload["case_bank_readme"].endswith("cases/README.md")
+    assert "Mandatory semantic coverage contract" in (
+        tmp_path / "cases" / "coverage.yaml"
+    ).read_text(encoding="utf-8")
     assert set(repository.workspace.experiments) == {"baseline", "optimize-few-shot"}
     assert repository.workspace.evaluation.case_authoring.instructions == "case-authoring.md"
     assert repository.workspace.evaluation.cases.coverage.minimum_cases_per_skill == 8

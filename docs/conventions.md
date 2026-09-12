@@ -11,6 +11,8 @@
   `workspace.yaml` points to it explicitly.
 - `cases/coverage.yaml` owns the complete skill-to-capability decomposition and
   minimum number of primary cases required for every capability.
+- `cases/README.md` explains that general coverage contract inside every newly
+  generated experiment workspace.
 - Promoted case packages and human-labelled calibration inputs are versioned.
 - External storage owns repository snapshots, solver
   calls, judge calls, compiled state, evaluations, and reports.
@@ -71,6 +73,9 @@ catalog plus minimum promoted cases and distinct leakage groups required per
 skill. Scored-run preflight blocks until the catalog is complete, every
 capability has its required primary-case depth, and both numeric thresholds are
 met. Supporting tags do not satisfy primary coverage.
+
+See [Capability coverage](capability-coverage.md) for the authoritative field
+definitions, decomposition workflow, readiness formula, and change rules.
 
 The authoring-instructions and capability-catalog hashes cover the exact policy
 and semantic coverage contract bytes. Changing either makes earlier cases

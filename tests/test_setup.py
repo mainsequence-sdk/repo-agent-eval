@@ -139,6 +139,9 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
     assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"
     assert repository.case_authoring_path == workspace.parent / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
+    assert "Case Bank and Coverage Contract" in (
+        workspace.parent / "cases" / "README.md"
+    ).read_text(encoding="utf-8")
     assert repository.workspace.evaluation.instructions.skills.directory == "skills"
     assert repository.workspace.evaluation.case_authoring.instructions == "case-authoring.md"
     assert not (workspace.parent / ".env").exists()
@@ -219,6 +222,7 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
     assert result["status"] == "cancelled"
     assert not workspace.exists()
     assert not (workspace.parent / "case-authoring.md").exists()
+    assert not (workspace.parent / "cases" / "README.md").exists()
     assert not (workspace.parent / "cases" / "splits.yaml").exists()
     assert not (workspace.parent / "judge-calibration" / "manifest.yaml").exists()
 

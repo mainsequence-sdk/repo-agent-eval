@@ -160,6 +160,10 @@ The generated catalog starts as `draft`. Codex must read every selected skill,
 record all independently testable capabilities, and mark it `complete` before
 scored-run readiness. Requested case counts are lower bounds; the authoring
 campaign expands until every capability has its required primary examples.
+Every new workspace also includes `cases/README.md`, which explains this
+contract beside the catalog. See the general
+[capability coverage contract](docs/capability-coverage.md) for the complete
+schema, readiness calculation, authoring procedure, and provenance rules.
 
 ## Configure the two runtime models
 
@@ -203,8 +207,9 @@ case and leakage-group minima. Those minima prevent a one-case-per-skill bank
 from being treated as evaluation- or training-ready; they remain a floor, not a
 guarantee of enough data for a production fine-tune.
 
-Start with [Getting started](docs/getting-started.md), then read
-[Repository structure](docs/structure.md) and [Conventions](docs/conventions.md).
+Start with [Getting started](docs/getting-started.md), then read the
+[Capability coverage contract](docs/capability-coverage.md),
+[Repository structure](docs/structure.md), and [Conventions](docs/conventions.md).
 
 ## Storage layout
 
@@ -220,7 +225,7 @@ repository/
 │       ├── workspace.yaml      target, instructions, cases, models, runtime
 │       ├── case-authoring.md   versioned Codex authoring policy
 │       ├── .env.example        optional credential-name template
-│       ├── cases/              promoted cases, rubrics, provenance, splits
+│       ├── cases/              coverage contract, promoted cases, and splits
 │       └── judge-calibration/  human-labelled judge fixtures
 ├── tests/                      generic framework acceptance tests
 └── docs/                       guides and architecture records
