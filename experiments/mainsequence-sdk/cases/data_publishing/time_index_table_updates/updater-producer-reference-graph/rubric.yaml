@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: dependency_classification
+    weight: 0.45
+    description: Full credit keeps the owned bars input as an executable updater and the external benchmark as a TimeIndexTableRef, returning both explicitly; partial credit distinguishes them but sketches an incomplete graph; zero credit makes both refs or both producers.
+  - id: execution_and_lineage
+    weight: 0.3
+    description: Full credit explains that only updater dependencies execute while refs provide read-only lineage and preserve external ownership; partial credit explains only scheduling or ownership; zero credit schedules the external table or skips the required producer.
+  - id: storage_ownership
+    weight: 0.25
+    description: Full credit uses the explicit DailyRiskMetricStorage output_table and preserves external ownership of the referenced benchmark; partial credit names output storage without explaining ownership; zero credit omits the output contract or claims the reference is owned locally.
+hard_failures:
+  - id: reference_as_producer
+    description: The answer says a TimeIndexTableRef will execute, schedule, or update its referenced table.

@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: secret_boundary
+    weight: 0.3
+    description: Full credit selects Secret for the sensitive credential, never exposes its value, and rejects Constant; partial credit selects Secret but omits a handling safeguard; zero credit stores it in a Constant or prints the value.
+  - id: idempotent_identity
+    weight: 0.3
+    description: Full credit resolves the unique name first using the CLI name-filtered list and creates only when missing, stopping on ambiguity; partial credit checks existence with an incomplete ambiguity rule; zero credit creates unconditionally.
+  - id: access_reconciliation
+    weight: 0.25
+    description: Full credit adds only missing edit for the public user UID and preserves all unrelated direct and team grants; partial credit gets edit and UID right but weakly covers preservation; zero credit replaces the list or uses a numeric ID.
+  - id: verification_boundary
+    weight: 0.15
+    description: Full credit plans post-change name/access and workload verification without claiming execution or requesting branch/environment IDs; partial credit verifies configured state only; zero credit claims success from intent.
+hard_failures:
+  - id: secret_exposure
+    description: The answer asks for, invents, logs, or returns the credential value in plaintext.

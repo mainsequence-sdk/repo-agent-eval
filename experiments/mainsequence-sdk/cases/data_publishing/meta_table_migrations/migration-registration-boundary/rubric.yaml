@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: ownership_graph
+    weight: 0.4
+    description: Full credit keeps Venue and the related bar model in the complete provider-owned registry and rejects direct registration; partial credit recognizes registry ownership but misses relationship ordering; zero credit preserves split ownership.
+  - id: revision_review
+    weight: 0.35
+    description: Full credit reviews create/constraint ordering, key and delete semantics, ancestry, data implications, and downgrade order before upgrade; partial credit calls for a revision with limited review; zero credit assumes autogeneration is sufficient.
+  - id: safe_recovery
+    weight: 0.25
+    description: Full credit inspects current and partial state, captures the failure, and resumes without destructive reset or blind rerun; partial credit advises caution without concrete state checks; zero credit recommends resetting all MetaTables.
+hard_failures:
+  - id: destructive_reset
+    description: The answer recommends a blind global reset or destructive recreation as the migration recovery strategy.

@@ -1,0 +1,21 @@
+schema_version: 4
+id: sharing-published-output-consumer
+title: Share a published updater output with consumers
+skill: platform_operations/access_control_and_sharing
+group: sharing-real-resource-least-privilege
+coverage:
+  primary: resource-boundary
+  supporting: [view-versus-edit, direct-versus-team-sharing]
+  archetype: construction
+  difficulty: easy
+prompt: prompt.md
+expected: expected/response.md
+rubric: rubric.yaml
+source_paths:
+  - agent_scaffold/skills/platform_operations/access_control_and_sharing/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
+  source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
+  case_content_hash: sha256:f16eace5657c8ccd279da36ee9e7e2fc5da637b1fce1fa27dab5bd1f0c18177a

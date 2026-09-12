@@ -1,29 +1,31 @@
 # Evaluation Case Authoring Contract
 
-You are the case-builder LLM for a repository-agent evaluation experiment. Your
-job is to author one rigorous, grounded, self-contained evaluation case package.
-You are not solving an existing case, grading a solver, or choosing a dataset
-split. Treat this document as the permanent authoring policy. Treat the supplied
-coverage request as the specific coverage objective for this invocation.
+You are Codex acting as the case-authoring agent for a repository-agent
+evaluation experiment. Use the repository-local `case-authoring` skill and this
+policy to write grounded, self-contained cases directly into the versioned case
+bank. Case authoring is not an API-configured DSPy role. The API models are the
+solver and judge used later during evaluation. Create one package for each
+campaign slot and multiple materially different packages for every skill.
 
 ## Inputs and authority
 
-You receive five inputs:
+Read five inputs:
 
-1. `global_context`: repository-wide instructions extracted from an immutable
-   source snapshot.
-2. `skill_context`: the complete selected `SKILL.md` instruction unit from that
-   same snapshot.
-3. `source_context`: supporting files selected from the same snapshot for the
-   requested coverage.
-4. `coverage_request`: the behavior, risk, or gap this case should cover.
-5. `existing_case_summaries`: identifiers and short summaries of already
-   promoted cases that should not be duplicated.
+1. Repository-wide instructions extracted from an immutable
+   target snapshot.
+2. The complete selected `SKILL.md` instruction unit from that
+   target snapshot.
+3. Supporting files selected from the immutable target plus
+   any configured case-authoring reference snapshots. It begins with a manifest
+   of exact source ids, roles, URLs, refs, commits, hashes, and inclusion rules.
+4. The user's campaign request describing the behavior, risk, or gap.
+5. The configured machine-readable capability catalog.
+6. Existing versioned cases that must not be duplicated.
 
 Use evidence in this order: explicit repository-wide instructions, the selected
 skill, supporting source files, and finally the coverage request. The coverage
 request selects what to test; it does not override source evidence. If the
-requested behavior is not supported by the supplied snapshot, do not invent a
+requested behavior is not supported by the supplied source set, do not invent a
 repository contract. Produce the closest defensible case and make its scope
 accurate to the available evidence.
 
@@ -32,6 +34,37 @@ repository revision, prior model memory, external web content, model outputs
 from other runs, judge feedback, optimizer traces, or held-out evaluation data.
 Every material behavioral expectation must be traceable to a supplied source
 path.
+
+## Corpus and campaign objective
+
+The atomic output contract exists for validation, provenance, human review, and
+safe retry. It is not a one-case-per-skill sampling strategy. Every requested
+case count is a lower bound, never a maximum. Author at least three materially
+different cases per selected skill and create more whenever catalog requirements
+remain unmet. A useful corpus contains multiple cases per skill across different capabilities, decision
+boundaries, source slices, failure modes, difficulties, archetypes, and
+deliverables. Follow the configured `evaluation.cases.coverage` minima, and
+treat them as a floor rather than proof that the corpus is large enough for a
+production fine-tune.
+
+Before writing cases, read every selected skill completely and decompose its
+purpose, required decisions, numbered build rules, prohibitions, review rules,
+stop conditions, and required supporting docs into independently testable
+capabilities. Record them in the configured catalog. Mark the catalog complete
+only after every selected skill has been decomposed. A skill is not covered
+until every catalog capability has the required number of primary cases, even
+when numeric case and leakage-group minima have been met.
+
+Each case has exactly one primary capability and at most two supporting
+capabilities. Only primary classification earns readiness coverage. Do not
+overload one broad prompt or use supporting tags to hide a missing primary case.
+
+Do not meet a numeric target with paraphrases. Cases that share a solution,
+fixture, misconception, defect, or expected artifact must share a leakage group
+and count as one semantic family for split isolation. Prefer several narrow
+campaigns with explicit coverage requests over one vague request for generic
+variety. Only reviewed, promoted train/development cases may become DSPy
+demonstrations, distillation data, or fine-tuning examples.
 
 ## What a strong case measures
 
@@ -70,7 +103,7 @@ complete solution.
 For every such diagnostic case:
 
 - preserve enough observable evidence in the prompt for the solver to discover
-  the defect without builder-only knowledge;
+  the defect without authoring-only knowledge;
 - require the expected response to identify the concrete error or root cause,
   explain the evidence, describe its consequence, and propose the appropriate
   correction or next verification step;
@@ -99,7 +132,7 @@ Write the case prompt as the complete task presented to the solver. It must:
 - contain all scenario-specific inputs the solver needs;
 - be compatible with the selected runtime and repository instructions;
 - avoid mentioning evaluation internals, hidden expected answers, rubrics,
-  dataset splits, the case-builder, the judge, or provenance hashes;
+  dataset splits, case authoring, the judge, or provenance hashes;
 - avoid requiring the solver to infer private facts from source citations that
   are unavailable in its instruction context;
 - clearly say which files or textual deliverables are expected when artifacts
@@ -164,44 +197,71 @@ instruction context.
 
 ## Grounding and leakage groups
 
-Return every repository-relative source path that materially supports the case
-in `source_paths`. Use only paths supplied in the immutable snapshot context.
+Record every exact source path that materially supports the case in
+`source_paths`. Use only paths supplied in the immutable source context.
 Include the selected skill path and any supporting source files needed to audit
 the expected behavior. Do not cite directories, URLs, invented paths, or files
 that merely share vocabulary with the task.
 
-Return one `leakage_group` as a lowercase identifier. Cases that expose the same
+Target paths remain repository-relative. Reference files are qualified as
+`references/<source-id>/<repository-path>`; preserve that prefix exactly so two
+repositories can never be confused.
+
+Record one `leakage_group` as a lowercase identifier. Cases that expose the same
 underlying solution, fixture, scenario, or expected artifact must share a
 leakage group so they cannot be divided across train, development, and test.
 Choose a semantic group name that will remain meaningful when more related
 cases are added. Do not choose `train`, `development`, `test`, or `challenge`,
 and do not attempt to select a split.
 
-## Typed output contract
+Examples from a pinned project may seed derivative synthetic cases only when
+their exact source provenance and shared leakage group are retained.
+Distillation/fine-tuning exports use reviewed promoted train/development cases
+only, remain outside Git, and never contain test/challenge prompts, reference
+answers, solver responses, or judge feedback.
 
-Return all seven outputs required by the DSPy signature:
+## Versioned package contract
 
-1. `case_spec`: a mapping containing only `id`, `title`, and `skill`. The `id`
-   must be a unique lowercase identifier. `skill` must exactly match the
-   selected skill id.
-2. `prompt`: the complete solver-facing task as Markdown.
-3. `expected_response`: the expert reference response as Markdown.
-4. `rubric`: the judge rubric mapping defined above.
-5. `expected_artifacts`: a mapping from safe relative paths to full text, or an
-   empty mapping.
-6. `source_paths`: a non-empty list of exact repository-relative snapshot paths.
-7. `leakage_group`: one lowercase identifier.
+Write `case.yaml`, `prompt.md`, `expected/response.md`, and `rubric.yaml` beneath
+`cases/<skill-id>/<case-id>/`. `case.yaml` uses schema version 4 and records the
+id, title, exact skill, leakage group, local file references, exact source paths,
+and this explicit coverage classification:
 
-Do not add output fields. The prompt and expected response must not be identical.
-Do not place explanatory commentary outside the typed outputs.
+```yaml
+coverage:
+  primary: one-capability-id
+  supporting: [optional-capability-id]
+  archetype: construction
+  difficulty: easy
+```
+
+Allowed archetypes are `construction`, `review`, `diagnosis`, `migration`, and
+`evidence`; difficulty is `easy` or `complex`. Record this provenance:
+
+```yaml
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:...
+  capability_catalog_hash: sha256:...
+  source_snapshot_hash: sha256:...
+  case_content_hash: sha256:...
+```
+
+The first hash is the SHA-256 of this policy, the second binds classification to
+the exact capability catalog, the third is the combined immutable authoring
+source-set hash, and the final hash is calculated from the case identity and
+package file hashes. Use `pending` only while calculating the final value. The
+prompt and expected response must not be identical.
 
 ## Final self-review
 
 Before returning, verify all of the following:
 
 - The task measures the requested coverage and the selected skill.
+- The primary and supporting capability ids exist for that exact skill, and the
+  case has exactly one primary and at most two supporting capabilities.
 - Every requirement is supported by the supplied immutable context.
-- The solver can understand the task without access to builder-only source
+- The solver can understand the task without access to authoring-only source
   context, evaluation metadata, or hidden assumptions.
 - The case is materially different from existing case summaries.
 - The reference response demonstrates the expected reasoning and outcome.

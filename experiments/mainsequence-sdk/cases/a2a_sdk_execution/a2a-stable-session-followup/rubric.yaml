@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: session_identity
+    weight: 0.4
+    description: Full credit resolves the Agent with the stable handle and reuses the returned AgentSession UID for both turns; partial credit mentions reuse but confuses the handle or Agent UID with the session UID; zero credit creates a new session or uses the Agent UID as the chat target.
+  - id: command_flow
+    weight: 0.35
+    description: Full credit provides the ordered discovery, get_or_create, and two a2a send commands with environment-scoped discovery; partial credit has the right lifecycle with a minor CLI omission; zero credit skips discovery or uses an incompatible command path.
+  - id: response_contract
+    weight: 0.25
+    description: Full credit uses strict dictionary output for both requests and keeps response kind at the advertised message default; partial credit satisfies only one constraint; zero credit requests unsupported task mode or does not preserve the JSON requirement.
+hard_failures:
+  - id: fabricated_execution
+    description: The answer claims that commands ran or that a live Agent response was verified despite the response-only task.

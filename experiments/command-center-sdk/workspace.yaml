@@ -1,0 +1,116 @@
+schema_version: 6
+
+workspace:
+  id: command-center-sdk-evaluation
+  # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
+
+evaluation:
+  repository:
+    url: https://github.com/mainsequence-sdk/command-center-sdk
+    ref: v0.1.21
+  instructions:
+    global:
+      - AGENTS.md
+      - command-center-sdk/AGENTS.md
+    skills:
+      directory: command-center-sdk/agent_scaffold/skills
+  case_authoring:
+    instructions: case-authoring.md
+    sources:
+      - id: tutorial
+        role: illustrative
+        repository:
+          url: https://github.com/mainsequence-projects/command-center-sdk-tutorial
+          ref: v0.1.30
+        include:
+          - README.md
+          - AGENTS.md
+          - docs/**
+          - src/**
+          - tests/**
+          - examples/**
+          - package.json
+  cases:
+    directory: cases
+    coverage:
+      catalog: cases/coverage.yaml
+      minimum_cases_per_skill: 12
+      minimum_leakage_groups_per_skill: 6
+  splits:
+    file: cases/splits.yaml
+    policy:
+      seed: command-center-sdk-foundations-v1
+      train: 0.5
+      development: 0.2
+      test: 0.2
+      challenge: 0.1
+  judge:
+    dspy:
+      module: Predict
+      signature:
+        inputs:
+          task: str
+          skill_context: str
+          rubric: str
+          expected_response: str
+          expected_artifacts: str
+          candidate_response: str
+        outputs:
+          criterion_scores: dict[str, float]
+          hard_failures: list[str]
+          feedback: str
+    model:
+      provider: openai_compatible
+      name: judge-model
+      base_url: http://localhost:11434/v1
+      parameters:
+        temperature: 0.0
+    calibration:
+      directory: judge-calibration
+    repetitions: 3
+
+experiments:
+  baseline:
+    mode: evaluate
+    solver:
+      dspy:
+        module: Predict
+        signature:
+          inputs:
+            global_context: str
+            skill_context: str
+            task: str
+          outputs:
+            response: str
+      model:
+        provider: openai_compatible
+        name: solver-model
+        base_url: http://localhost:11434/v1
+        parameters:
+          temperature: 0.2
+    runtime:
+      type: response_only
+      python: "3.12"
+    repetitions: 1
+  optimize-few-shot:
+    mode: optimize
+    based_on: baseline
+    dataset:
+      train: train
+      development: development
+      final_evaluation: test
+    optimizer:
+      name: LabeledFewShot
+      parameters:
+        k: 2
+        seed: 0
+    budget:
+      solver:
+        model_calls: 100
+        tokens: 250000
+      judge:
+        model_calls: 300
+        tokens: 500000
+      wall_seconds: 1800
+    output:
+      compiled_program: content_addressed_json

@@ -209,7 +209,6 @@ class ExperimentRunner:
                 selected_split="test",
             )
         role_usage = {
-            "case_builder": {"model_calls": 0, "tokens": 0, "configured_cost": 0.0},
             "solver": _usage(solver_observer),
             "judge": _usage(judge_observer),
         }

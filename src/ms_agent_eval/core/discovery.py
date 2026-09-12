@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterator
 
 from .models import GitSource, SourceRefKind
-from .sources import GitHubSourceProvider, ResolvedSource, run_git
+from .sources import GitHubSourceProvider, ResolvedSource
 
 
 @dataclass(frozen=True)
@@ -40,17 +40,7 @@ def discover_tags(repository_url: str) -> tuple[str, ...]:
             "ref": {"type": "commit", "value": "0" * 40},
         }
     )
-    canonical = GitHubSourceProvider.canonical_url(source.repository_url)
-    output = run_git(["ls-remote", "--tags", canonical], None)
-    tags: set[str] = set()
-    for line in output.splitlines():
-        fields = line.split("\t", maxsplit=1)
-        if len(fields) != 2 or not fields[1].startswith("refs/tags/"):
-            continue
-        name = fields[1].removeprefix("refs/tags/").removesuffix("^{}")
-        if name:
-            tags.add(name)
-    return tuple(sorted(tags, reverse=True))
+    return GitHubSourceProvider().tags(source)
 
 
 def inspect_checkout(checkout: Path) -> RepositoryInspection:

@@ -81,7 +81,7 @@ def _models(
     *,
     base_url: str,
     api_key: str | None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     discovered: tuple[str, ...] = ()
     if prompt.confirm("Test the API connection and list available models?", default=True):
         try:
@@ -89,7 +89,7 @@ def _models(
             prompt.write(f"Discovered {len(discovered)} model(s).")
         except AgentEvalError as error:
             prompt.write(f"Model discovery unavailable: {error}. Enter model ids manually.")
-    roles = ("case builder", "solver", "judge")
+    roles = ("solver", "judge")
     selected: list[str] = []
     for role in roles:
         available = tuple(item for item in discovered if item not in selected)
@@ -106,7 +106,7 @@ def _models(
             )
             value = prompt.text(f"Enter the {role} model id")
         selected.append(value)
-    return selected[0], selected[1], selected[2]
+    return selected[0], selected[1]
 
 
 def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
@@ -118,8 +118,8 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
         calibration = isinstance(payload, dict) and bool(payload.get("fixtures"))
     if cases == 0:
         next_command = (
-            f'ms-agent-eval cases build --workspace {repository.workspace_file} '
-            '--coverage "DESCRIBE_REQUIRED_COVERAGE"'
+            "ask Codex to use the case-authoring skill with "
+            f"{repository.workspace_file} and create the required case campaign"
         )
     elif not calibration:
         next_command = f"edit {calibration_manifest} and add human-labelled judge fixtures"
@@ -267,7 +267,7 @@ def run_guided_setup(
         use_api_key = prompt.confirm("Does this API require a key?", default=False)
         api_key = prompt.secret("API key") if use_api_key else None
         api_key_env = "OPENAI_API_KEY" if use_api_key else None
-        builder_model, solver_model, judge_model = _models(
+        solver_model, judge_model = _models(
             prompt,
             dependencies,
             base_url=api_base_url,
@@ -298,8 +298,8 @@ def run_guided_setup(
         runtime_python = prompt.text("Target Python version", default="3.12")
         cases_directory = prompt.text("Case directory", default="cases")
         coverage_request = prompt.text(
-            "Initial case coverage request",
-            default="Create grounded cases covering every selected skill",
+            "Initial case campaign request",
+            default="Create distinct foundational application cases for every selected skill",
         )
         include_optimization = prompt.confirm(
             "Create a separate LabeledFewShot optimization experiment?", default=True
@@ -317,7 +317,6 @@ def run_guided_setup(
             cases_directory=cases_directory,
             api_base_url=api_base_url,
             api_key_env=api_key_env,
-            case_builder_model=builder_model,
             solver_model=solver_model,
             judge_model=judge_model,
             runtime_type=runtime_type,
@@ -355,7 +354,8 @@ def run_guided_setup(
         for unit in validated_units:
             prompt.write(f"  - {unit.unit_id}: {unit.source_path}")
         prompt.write(f"API base URL: {api_base_url}")
-        prompt.write(f"Models: {builder_model}, {solver_model}, {judge_model}")
+        prompt.write(f"Runtime models: solver={solver_model}, judge={judge_model}")
+        prompt.write("Case authoring agent: Codex (uses the versioned case-authoring skill)")
         runtime_detail = runtime_type
         if runtime_image is not None:
             runtime_detail += f", image={runtime_image}, network={runtime_network}"
@@ -363,7 +363,7 @@ def run_guided_setup(
         prompt.write(
             f"Repetitions: baseline={baseline_repetitions}, judge={judge_repetitions}"
         )
-        prompt.write("Configured call ceilings: builder=100, optimizer solver=100, judge=300")
+        prompt.write("Configured call ceilings: optimizer solver=100, judge=300")
         prompt.write(f"Initial coverage: {coverage_request}")
         prompt.write(f"Workspace: {workspace_file}")
         prompt.write(f"External data: {data_root}")

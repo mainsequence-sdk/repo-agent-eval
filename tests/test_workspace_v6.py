@@ -1,18 +1,22 @@
+"""Workspace schema-v6 configuration and readiness tests."""
+
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
+from ms_agent_eval.core.authoring import load_snapshot_context
 from ms_agent_eval.core.errors import ConfigurationError, IntegrityError, ResolutionError
+from ms_agent_eval.core.hashing import sha256_file
 from ms_agent_eval.core.workspace import (
     WorkspaceConfiguration,
     WorkspaceRepository,
     resolve_role_models,
 )
-from ms_agent_eval.programs.dspy.engine import create_case_builder_program, program_hash
 from ms_agent_eval.core import planning
 from ms_agent_eval.core.planning import acquire_snapshot, compile_workspace, inspect_workspace
 from ms_agent_eval.core.snapshots import ExternalSnapshotStore, SnapshotBuilder
@@ -27,10 +31,9 @@ from .helpers import (
 )
 
 
-def test_schema_v4_rejects_environment_indirected_model_configuration() -> None:
+def test_schema_v6_rejects_case_authoring_model_configuration() -> None:
     payload = workspace_payload()
-    model = payload["evaluation"]["case_builder"]["model"]  # type: ignore[index]
-    model["name_env"] = "BUILDER_MODEL"  # type: ignore[index]
+    payload["evaluation"]["case_authoring"]["model"] = {"name": "builder"}  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="unknown fields"):
         WorkspaceConfiguration.from_mapping(payload)
 
@@ -62,6 +65,41 @@ def test_explicit_skill_files_are_the_only_directory_alternative() -> None:
     )
 
 
+def test_case_coverage_requires_multiple_cases_and_semantic_groups_per_skill() -> None:
+    payload = workspace_payload()
+    payload["evaluation"]["cases"]["coverage"] = {  # type: ignore[index]
+        "catalog": "cases/coverage.yaml",
+        "minimum_cases_per_skill": 12,
+        "minimum_leakage_groups_per_skill": 6,
+    }
+
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+
+    assert workspace.evaluation.cases.coverage.minimum_cases_per_skill == 12
+    assert workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill == 6
+
+    payload["evaluation"]["cases"]["coverage"] = {  # type: ignore[index]
+        "catalog": "cases/coverage.yaml",
+        "minimum_cases_per_skill": 4,
+        "minimum_leakage_groups_per_skill": 5,
+    }
+    with pytest.raises(ConfigurationError, match="cannot exceed"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_case_coverage_and_catalog_are_required() -> None:
+    payload = workspace_payload()
+    del payload["evaluation"]["cases"]["coverage"]  # type: ignore[index]
+
+    with pytest.raises(ConfigurationError, match="evaluation.cases.coverage"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload = workspace_payload()
+    del payload["evaluation"]["cases"]["coverage"]["catalog"]  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="coverage.catalog"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
 def test_configured_llm_roles_must_be_distinct() -> None:
     workspace = WorkspaceConfiguration.from_mapping(workspace_payload())
     models = resolve_role_models(
@@ -69,15 +107,14 @@ def test_configured_llm_roles_must_be_distinct() -> None:
         "baseline",
         {"UNRELATED_PROCESS_SETTING": "cannot-override-workspace-models"},
     )
-    assert set(models) == {"case_builder", "solver", "judge"}
+    assert set(models) == {"solver", "judge"}
     assert {role: model.model for role, model in models.items()} == {
-        "case_builder": "builder",
         "solver": "solver",
         "judge": "judge",
     }
     payload = workspace_payload()
     payload["evaluation"]["judge"]["model"]["name"] = "solver"  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="three distinct"):
+    with pytest.raises(ConfigurationError, match="distinct solver and judge"):
         WorkspaceConfiguration.from_mapping(payload)
 
 
@@ -98,7 +135,7 @@ def test_role_reuse_is_rejected_even_when_endpoints_differ() -> None:
     payload["experiments"]["baseline"]["solver"]["model"]["name"] = "shared"  # type: ignore[index]
     payload["evaluation"]["judge"]["model"]["name"] = "shared"  # type: ignore[index]
     payload["evaluation"]["judge"]["model"]["base_url"] = "http://remote.example/v1"  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="three distinct"):
+    with pytest.raises(ConfigurationError, match="distinct solver and judge"):
         WorkspaceConfiguration.from_mapping(payload)
 
 
@@ -120,7 +157,7 @@ def test_unknown_legacy_workspace_surface_is_rejected() -> None:
 
 def test_model_name_and_base_url_must_be_stored_directly() -> None:
     payload = workspace_payload()
-    model = payload["evaluation"]["case_builder"]["model"]  # type: ignore[index]
+    model = payload["experiments"]["baseline"]["solver"]["model"]  # type: ignore[index]
     del model["name"]  # type: ignore[index]
     model["name_env"] = "LEGACY_MODEL_SETTING"  # type: ignore[index]
 
@@ -128,12 +165,146 @@ def test_model_name_and_base_url_must_be_stored_directly() -> None:
         WorkspaceConfiguration.from_mapping(payload)
 
 
-def test_schema_v4_requires_case_authoring_instructions() -> None:
+def test_schema_v6_requires_case_authoring_instructions() -> None:
     payload = workspace_payload()
-    del payload["evaluation"]["case_builder"]["instructions"]  # type: ignore[index]
+    del payload["evaluation"]["case_authoring"]["instructions"]  # type: ignore[index]
 
-    with pytest.raises(ConfigurationError, match="case_builder.instructions"):
+    with pytest.raises(ConfigurationError, match="case_authoring.instructions"):
         WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_case_authoring_accepts_immutable_reference_sources() -> None:
+    payload = workspace_payload()
+    payload["evaluation"]["case_authoring"]["sources"] = [  # type: ignore[index]
+        {
+            "id": "project-example",
+            "role": "project",
+            "repository": {
+                "url": "https://github.com/example/project-example",
+                "ref": "v2.0.0",
+            },
+            "include": ["README.md", "docs/**", "src/**"],
+        }
+    ]
+
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+
+    assert len(workspace.evaluation.case_authoring.sources) == 1
+    source = workspace.evaluation.case_authoring.sources[0]
+    assert source.id == "project-example"
+    assert source.role == "project"
+    assert source.repository.ref == "v2.0.0"
+    assert source.include == ("README.md", "docs/**", "src/**")
+
+
+def test_case_authoring_reference_sources_reject_duplicates_and_unsafe_globs() -> None:
+    source = {
+        "id": "project-example",
+        "role": "project",
+        "repository": {
+            "url": "https://github.com/example/project-example",
+            "ref": "v2.0.0",
+        },
+        "include": ["docs/**"],
+    }
+    duplicated = workspace_payload()
+    duplicated["evaluation"]["case_authoring"]["sources"] = [source, source]  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="unique source ids"):
+        WorkspaceConfiguration.from_mapping(duplicated)
+
+    unsafe = workspace_payload()
+    unsafe_source = dict(source)
+    unsafe_source["include"] = ["../secrets/**"]
+    unsafe["evaluation"]["case_authoring"]["sources"] = [unsafe_source]  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="safe repository-relative glob"):
+        WorkspaceConfiguration.from_mapping(unsafe)
+
+    reserved = workspace_payload()
+    reserved_source = dict(source)
+    reserved_source["id"] = "target"
+    reserved["evaluation"]["case_authoring"]["sources"] = [reserved_source]  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="reserves the source id 'target'"):
+        WorkspaceConfiguration.from_mapping(reserved)
+
+
+def test_reference_source_context_is_filtered_qualified_and_content_addressed(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    external = tmp_path / "external"
+    payload = workspace_payload()
+    payload["workspace"]["data_root"] = external.as_posix()  # type: ignore[index]
+    payload["evaluation"]["case_authoring"]["sources"] = [  # type: ignore[index]
+        {
+            "id": "project-example",
+            "role": "project",
+            "repository": {
+                "url": "https://github.com/example/project-example",
+                "ref": "v2.0.0",
+            },
+            "include": ["docs/**"],
+        }
+    ]
+    manifest = workspace_root / "workspace.yaml"
+    manifest.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    repository = WorkspaceRepository.from_file(manifest)
+
+    primary_checkout = create_checkout(tmp_path / "primary")
+    primary, primary_directory = create_snapshot(
+        repository,
+        primary_checkout,
+        external,
+    )
+    configuration, target = repository.authoring_source_specifications()[0]
+    reference_checkout = tmp_path / "reference-checkout"
+    (reference_checkout / "docs").mkdir(parents=True)
+    (reference_checkout / "docs" / "architecture.md").write_text(
+        "# Architecture\n\nUse a service boundary.\n",
+        encoding="utf-8",
+    )
+    (reference_checkout / "private.txt").write_text("not selected\n", encoding="utf-8")
+    resolved = ResolvedSource(
+        target.source.repository_url,
+        target.source.repository_url + ".git",
+        target.source.ref,
+        "b" * 40,
+    )
+    store = ExternalSnapshotStore(external, workspace_root=repository.root)
+    reference = SnapshotBuilder(None, store).create_from_checkout(  # type: ignore[arg-type]
+        target,
+        resolved,
+        reference_checkout,
+    )
+    context = load_snapshot_context(
+        primary,
+        primary_directory,
+        global_paths=repository.workspace.evaluation.instructions.global_paths,
+        authoring_snapshots=((configuration, reference, store.directory(reference)),),
+    )
+
+    qualified = "references/project-example/docs/architecture.md"
+    assert qualified in context.source_paths
+    assert "references/project-example/private.txt" not in context.source_paths
+    assert context.snapshot_hash != primary.content_hash
+    assert [item.id for item in context.sources] == ["target", "project-example"]
+    supporting = context.supporting_source("alpha", "service architecture")
+    assert "project-example: role=project" in supporting
+    assert f"# Source: {qualified}" in supporting
+
+    revised = load_snapshot_context(
+        primary,
+        primary_directory,
+        global_paths=repository.workspace.evaluation.instructions.global_paths,
+        authoring_snapshots=(
+            (
+                replace(configuration, include=("docs/**", "private.txt")),
+                reference,
+                store.directory(reference),
+            ),
+        ),
+    )
+    assert revised.snapshot_hash != context.snapshot_hash
 
 
 def test_case_authoring_instructions_must_be_a_nonempty_regular_file(
@@ -166,40 +337,32 @@ def test_case_authoring_instructions_reject_symlinks(tmp_path: Path) -> None:
         repository.case_authoring_instructions()
 
 
-def test_case_authoring_content_changes_builder_program_identity(tmp_path: Path) -> None:
+def test_case_authoring_content_changes_policy_identity(tmp_path: Path) -> None:
     repository = create_workspace(tmp_path / "workspace")
-    original = program_hash(
-        create_case_builder_program(repository.case_authoring_instructions())
-    )
+    original = sha256_file(repository.case_authoring_path)
 
     repository.case_authoring_path.write_text(
         repository.case_authoring_instructions() + "\nRequire adversarial edge coverage.\n",
         encoding="utf-8",
     )
-    revised = program_hash(
-        create_case_builder_program(repository.case_authoring_instructions())
-    )
+    revised = sha256_file(repository.case_authoring_path)
 
     assert revised != original
 
 
-def test_case_authoring_program_identity_preserves_line_ending_bytes(
+def test_case_authoring_policy_identity_preserves_line_ending_bytes(
     tmp_path: Path,
 ) -> None:
     repository = create_workspace(tmp_path / "workspace")
     repository.case_authoring_path.write_bytes(b"Policy line one.\r\nPolicy line two.\r\n")
-    windows_hash = program_hash(
-        create_case_builder_program(repository.case_authoring_instructions())
-    )
+    windows_hash = sha256_file(repository.case_authoring_path)
     repository.case_authoring_path.write_bytes(b"Policy line one.\nPolicy line two.\n")
-    unix_hash = program_hash(
-        create_case_builder_program(repository.case_authoring_instructions())
-    )
+    unix_hash = sha256_file(repository.case_authoring_path)
 
     assert windows_hash != unix_hash
 
 
-def test_policy_change_rejects_cases_built_by_previous_builder_program(
+def test_policy_change_rejects_cases_authored_under_previous_policy(
     tmp_path: Path,
 ) -> None:
     repository = create_workspace(tmp_path / "workspace")
@@ -209,15 +372,9 @@ def test_policy_change_rejects_cases_built_by_previous_builder_program(
         tmp_path / "external",
     )
     environment = {"TEST_API_KEY": "test-secret"}
-    builder_model = resolve_role_models(repository.workspace, "baseline", environment)[
-        "case_builder"
-    ]
     seed_cases_and_calibration(
         repository,
-        builder_model_hash=builder_model.content_hash,
-        builder_program_hash=program_hash(
-            create_case_builder_program(repository.case_authoring_instructions())
-        ),
+        authoring_instructions_hash=sha256_file(repository.case_authoring_path),
         source_snapshot_hash=snapshot.content_hash,
     )
     compiled = compile_workspace(
@@ -231,7 +388,7 @@ def test_policy_change_rejects_cases_built_by_previous_builder_program(
         encoding="utf-8",
     )
 
-    with pytest.raises(IntegrityError, match="active DSPy builder program"):
+    with pytest.raises(IntegrityError, match="active instructions"):
         compiled.experiment_lock("baseline", environment=environment)
 
 

@@ -7,55 +7,71 @@ description: Use when creating, updating, reviewing, or planning evaluation case
 
 ## Purpose
 
-Create grounded schema-v2 evaluation cases through the workspace's configured
-DSPy case-builder LLM. Builder requests, responses, rejected drafts, and call
-evidence remain external. Only an explicitly promoted, validated case package
-belongs in Git.
+Use the current Codex session as the case-authoring agent. Read the versioned
+experiment policy and immutable repository evidence, then create reviewed case
+packages directly in the experiment case bank. Case authoring is not a DSPy
+program and does not call a configured OpenAI-compatible backend model.
+
+The runtime has exactly two LLM roles: the solver answers cases and the judge
+scores those answers. Keep both roles and all evaluation results isolated from
+authoring.
 
 ## Read First
 
 Read the workspace's `workspace.yaml`, its configured
-`evaluation.case_builder.instructions` file, `README.md`,
+`evaluation.case_authoring.instructions` file, `README.md`,
 `docs/getting-started.md`, `docs/structure.md`, and `docs/conventions.md`.
-Resolve the configured repository ref to its immutable external snapshot before
-considering case content.
-
-For MainSequence, the only workspace configuration is:
-
-```text
-experiments/mainsequence-sdk/workspace.yaml
-```
+Read the configured `evaluation.cases.coverage.catalog` before selecting any
+case. A draft or incomplete catalog is an authoring blocker, not permission to
+sample an arbitrary subset of a skill.
+Resolve the configured target and every `evaluation.case_authoring.sources`
+repository to immutable external snapshots before considering case content.
 
 The skill paths are exactly the `evaluation.instructions.skills` selection in
-that manifest. Never guess `.agents/skills`, `agent_scaffold/skills`, or another
+the manifest. Never guess `.agents/skills`, `agent_scaffold/skills`, or another
 location. If `directory` is configured, use every recursively discovered
 `SKILL.md`. If `files` is configured, use exactly those files.
 
 ## Non-negotiable Rules
 
-- Invoke `ms-agent-eval cases build`; do not directly invent a promoted case.
-- Treat the configured authoring file as durable DSPy builder policy and
-  `--coverage` as the narrower request for one invocation.
-- The builder model must be distinct from the solver and judge models.
-- Ground builder inputs in the immutable snapshot, not an installed package or
-  an unpinned checkout.
-- Never provide solver responses, judge votes, optimizer traces, test scores, or
-  held-out feedback to the builder.
+- The active Codex session authors the cases; never require a builder endpoint,
+  builder model name, builder credential, or builder DSPy configuration.
+- Treat the configured authoring file as durable policy and the user's request
+  as the narrower campaign objective.
+- Treat every requested case count as a lower bound. Author at least three
+  materially distinct cases per selected skill and expand further whenever the
+  capability catalog has unmet primary-coverage requirements.
+- Before authoring, decompose each complete selected skill into capability
+  units from its purpose, required decisions, numbered build rules,
+  prohibitions, review rules, stop conditions, and required supporting docs.
+  Record those units in the capability catalog; never infer breadth from case
+  count alone.
+- Give each case with exactly one cataloged primary capability and no more than
+  two supporting capabilities. A capability is covered only by primary cases;
+  supporting tags provide context but not readiness credit.
+- Ground cases in the immutable target/reference source set, not an installed
+  package, mutable checkout, branch, or model memory.
+- Preserve reference labels exactly as
+  `references/<source-id>/<repository-path>` and bind provenance to the combined
+  authoring source-set hash.
+- Never use solver responses, judge votes, optimizer traces, scores, or held-out
+  feedback during authoring.
 - Never send a rubric or expected response to the solver.
 - When a case contains a grounded faulty test, false premise, broken
   configuration, contradiction, or misleading symptom, require an
   `error_identification` criterion weighted at 0.35–0.50. Do not add it when no
   real defect is present.
 - Do not add evaluator methods, evaluator status fields, Python judge plugins,
-  keyword checks, or checklist scoring code. The configured DSPy judge LLM is
-  the only semantic judge.
-- A builder draft cannot select its train/development/test split. It proposes a
-  leakage group; the workspace split policy assigns that group on promotion.
-- Do not copy checkouts, model calls, drafts, or run results into Git.
+  keyword checks, or checklist scoring code. The DSPy judge LLM is the only
+  semantic judge.
+- Assign leakage groups semantically. Apply the configured deterministic split
+  policy after cases exist; never choose or change a group to obtain a desired
+  train/development/test/challenge placement.
+- Do not copy source repositories, model calls, or run results into Git.
 
 ## Workflow
 
-### 1. Inspect the locked target
+### 1. Inspect the locked workspace
 
 Run:
 
@@ -63,49 +79,30 @@ Run:
 ms-agent-eval inspect --workspace path/to/workspace.yaml
 ```
 
-Confirm the resolved commit, global instruction paths, discovered skill id and
-path, case coverage, split groups, builder identity, judge identity, and
-calibration corpus.
+Confirm every source URL/ref/commit/snapshot, the combined source-set hash,
+global instructions, exact skill ids and paths, case coverage, split groups,
+solver identity, judge identity, and calibration corpus. An incomplete status
+caused only by missing cases or calibration is expected while authoring.
 
-### 2. Request builder drafts
+### 2. Build or audit the capability catalog
 
-Confirm that the three role models and any credential references are configured
-in `workspace.yaml`, then invoke the configured builder:
+Read every selected skill completely. Create one stable capability id for each
+independently testable decision or behavior, merge only true semantic
+duplicates, and set `minimum_primary_cases` to the number of independent
+examples required. The default is three. Mark the catalog `complete` only when
+every selected skill has been decomposed. Validation must report all remaining
+capability gaps explicitly.
 
-```bash
-ms-agent-eval cases build \
-  --workspace path/to/workspace.yaml \
-  --skill skill/id \
-  --coverage "Describe the behavior and coverage gap"
-```
+### 3. Read exact evidence
 
-The DSPy builder must return a complete package: metadata, prompt, expected
-response, optional expected artifacts, weighted rubric, hard failures, immutable
-source paths, and leakage group. Its call evidence and draft live below the
-external data root.
+For each requested skill, read the complete locked `SKILL.md`, then the smallest
+set of target/reference files needed for the selected capability. Treat target
+instructions as normative. References provide scenarios and concrete examples;
+they do not redefine the evaluated SDK.
 
-### 3. Inspect before promotion
+### 4. Author atomic packages
 
-```bash
-ms-agent-eval cases inspect-drafts --workspace path/to/workspace.yaml
-```
-
-Review grounding, self-containment, expected behavior, rubric usefulness,
-hard-failure semantics, and leakage grouping. For diagnostic cases, confirm the
-prompt contains enough evidence to discover the error and that identifying the
-actual root cause receives substantial credit. Reject weak drafts by leaving
-them external. Do not repair a rejected draft directly in the case directory;
-issue a clearer builder coverage request.
-
-### 4. Promote explicitly
-
-```bash
-ms-agent-eval cases promote \
-  --workspace path/to/workspace.yaml \
-  --draft DRAFT_ID
-```
-
-Promotion writes this shape:
+Create this shape directly:
 
 ```text
 cases/<skill-id>/<case-id>/
@@ -117,33 +114,71 @@ cases/<skill-id>/<case-id>/
 └── rubric.yaml
 ```
 
-`case.yaml` records builder model/program, source snapshot, generation request,
-and package hashes. Direct edits invalidate that provenance and require a new
-builder revision. The builder program hash includes the exact authoring-policy
-content; after that file changes, rebuild and explicitly promote affected cases
-instead of bypassing the mismatch.
+The prompt must be self-contained for a response-only solver unless the
+workspace explicitly selects an isolated execution runtime. The expected
+response is judge reference evidence, not an exact-string oracle. The rubric
+defines semantic quality and all weights sum to one.
 
-### 5. Validate the whole contract
+Use case schema version 4. Classify the case explicitly:
+
+```yaml
+coverage:
+  primary: one-capability-id
+  supporting: [optional-capability-id]
+  archetype: construction
+  difficulty: easy
+```
+
+Allowed archetypes are `construction`, `review`, `diagnosis`, `migration`, and
+`evidence`; difficulty is `easy` or `complex`. Provenance is:
+
+```yaml
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:...
+  capability_catalog_hash: sha256:...
+  source_snapshot_hash: sha256:...
+  case_content_hash: sha256:...
+```
+
+Compute `authoring_instructions_hash` from the exact configured authoring file,
+use the inspected combined source-set hash, and compute `case_content_hash` from
+the framework's case identity. It is acceptable to write `pending` while
+calculating the final package hash, but never leave a promoted case pending.
+
+### 5. Update grouped splits mechanically
+
+For each new leakage group, use the workspace split seed and proportions to
+derive its split with the framework's SHA-256 mapping. Preserve existing group
+assignments. Related variants share one group and therefore one split.
+
+### 6. Validate the complete contract
 
 ```bash
 ms-agent-eval validate --workspace path/to/workspace.yaml
 ```
 
-Validation must prove that every case skill exists, every referenced source path
-is locked, every group owns exactly one split, every expected result and rubric
-exists, all rubric weights sum to one, provenance matches package bytes, all
-three LLM identities differ, and the judge calibration corpus has strong,
+Validation must prove that every case skill exists, every source path is locked,
+every group owns exactly one split, every expected result and rubric exists,
+weights sum to one, provenance matches current package bytes and authoring
+policy/catalog, every required capability has enough primary cases, solver and
+judge identities differ, and judge calibration has strong,
 partial, incorrect, contradictory, and adversarial human labels.
 
 ## Dataset Governance
 
 Optimization sees train and development only. A compiled state-only JSON
-artifact must be published before the untouched test set is loaded. Never use
-test or challenge results to revise builder cases, prompts, demonstrations, or
-optimizer settings.
+artifact is published before the untouched test set is loaded. Never use test or
+challenge results to revise cases, prompts, demonstrations, or optimizer
+settings.
+
+Examples from pinned projects may seed derivative synthetic cases only when
+their provenance and shared leakage group are retained. Distillation and
+fine-tuning exports use reviewed train/development cases only, remain outside
+Git, and never contain held-out prompts, answers, responses, or judge feedback.
 
 ## Final Response
 
-Report the workspace, resolved source commit, skill, coverage request, external
-draft ids, promoted case ids, source paths, leakage groups, validation performed,
-and any rejected drafts or calibration gaps. Never report a draft as promoted.
+Report the workspace, resolved source commits and source-set hash, authored case
+ids by skill, exact source paths, leakage groups and assigned splits, validation
+performed, remaining coverage gaps, and any case rejected during self-review.

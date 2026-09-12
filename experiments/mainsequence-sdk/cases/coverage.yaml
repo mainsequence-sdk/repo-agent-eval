@@ -1,0 +1,311 @@
+schema_version: 1
+status: complete
+default_minimum_primary_cases: 3
+skills:
+  a2a_sdk_execution:
+    capabilities:
+      - id: agent-discovery
+        title: Discover an existing Agent
+        description: Locate and inspect an already deployed Agent before attempting communication.
+      - id: stable-session-identity
+        title: Preserve session identity
+        description: Keep the same session identity across related A2A follow-up messages.
+      - id: response-kind-negotiation
+        title: Respect advertised response kinds
+        description: Select only response modes and content kinds advertised by the remote Agent.
+      - id: bounded-message-response
+        title: Keep communication bounded
+        description: Send a scoped request and interpret the returned A2A response without expanding into Agent construction.
+      - id: file-transfer-recovery
+        title: Handle file transfer and recovery
+        description: Apply the documented file-transfer, retry, and recovery boundaries for A2A communication.
+      - id: handle-shortcut
+        title: Use the handle shortcut
+        description: Apply the documented shortcut helper without losing session, capability, or response boundaries.
+      - id: sdk-execution-path
+        title: Use the supported SDK path
+        description: Construct the documented Python SDK calls for discovery, sessions, messages, and responses.
+      - id: response-handling
+        title: Interpret A2A responses
+        description: Handle response envelopes, content, task state, and failure outcomes through the documented response path.
+      - id: deterministic-execution-path
+        title: Preserve deterministic execution
+        description: Follow the documented ordered execution path and stop safely when a required observation is unavailable.
+      - id: role-and-behavior-boundaries
+        title: Respect role and behavior boundaries
+        description: Keep caller, target Agent, task, response, and capability responsibilities distinct.
+  application_surfaces/api_surfaces:
+    capabilities:
+      - id: endpoint-classification
+        title: Classify the endpoint surface
+        description: Distinguish health, metadata, and application data endpoints and their evidence obligations.
+      - id: contract-authority
+        title: Select the authoritative contract
+        description: Resolve the normative Command Center request and response contract before implementation.
+      - id: trusted-request-identity
+        title: Use trusted caller identity
+        description: Read platform-injected identity safely without accepting spoofable caller input.
+      - id: thin-service-boundary
+        title: Keep endpoints thin
+        description: Separate FastAPI transport concerns from reusable service and domain behavior.
+      - id: schema-fixture-conformance
+        title: Prove schema and fixture conformance
+        description: Validate payload shape against authoritative schemas and representative fixtures.
+      - id: frontend-integration
+        title: Integrate the frontend contract
+        description: Align endpoints with the current Command Center SDK resource and application contracts.
+      - id: release-evidence
+        title: Establish release evidence
+        description: Distinguish declaration, release, health, data proof, and deployed behavior evidence.
+  data_access/exploration:
+    capabilities:
+      - id: storage-surface-classification
+        title: Classify storage surfaces
+        description: Distinguish row-oriented MetaTables from time-indexed data before choosing discovery operations.
+      - id: semantic-search
+        title: Perform semantic discovery
+        description: Use semantic catalog discovery to identify plausible resources without inventing identifiers.
+      - id: structured-filtering
+        title: Apply structured filters
+        description: Narrow catalog results with supported structured filters and explicit selection evidence.
+      - id: column-search
+        title: Search by column contract
+        description: Discover resources using required columns, schemas, and grain constraints.
+      - id: detail-and-raw-query
+        title: Inspect details and query safely
+        description: Move from discovery to bounded detail inspection and supported raw-query planning.
+      - id: evidence-and-ambiguity
+        title: Preserve evidence limits
+        description: State what observed catalog evidence proves, what remains ambiguous, and what must be verified.
+      - id: implementation-handoff
+        title: Hand discovery into implementation
+        description: Produce an auditable handoff containing selected identities, assumptions, and next operations.
+  data_publishing/meta_table_migrations:
+    capabilities:
+      - id: provider-scaffold
+        title: Establish a migration provider
+        description: Create the supported provider-owned migration package and scaffolding boundary.
+      - id: provider-scope-metadata
+        title: Define provider scope metadata
+        description: Declare stable ownership, namespace, and provider metadata for migration discovery.
+      - id: revision-lifecycle
+        title: Manage revision lifecycle
+        description: Create, order, apply, and reason about provider-owned revisions.
+      - id: lifecycle-axes-and-registry
+        title: Coordinate lifecycle axes and registry
+        description: Keep migration roots, registry entries, package identity, and lifecycle axes consistent.
+      - id: migration-first-registration
+        title: Register through migrations
+        description: Use migrations as the schema ownership path instead of runtime registration shortcuts.
+      - id: dynamic-provider-hooks
+        title: Implement dynamic provider hooks
+        description: Apply the supported hooks for provider discovery and runtime migration integration.
+      - id: failure-stage-diagnosis
+        title: Diagnose migration stages
+        description: Locate failures in discovery, ordering, execution, registration, or verification using supplied evidence.
+      - id: protected-teardown
+        title: Protect destructive boundaries
+        description: Handle downgrade and teardown behavior without unsafe or unowned destructive actions.
+  data_publishing/meta_tables:
+    capabilities:
+      - id: management-mode-selection
+        title: Select the management mode
+        description: Choose the supported MetaTable ownership and management mode for the scenario.
+      - id: sqlalchemy-source-contract
+        title: Define the SQLAlchemy source contract
+        description: Model the current declarative source and supported type behavior correctly.
+      - id: logical-and-physical-identity
+        title: Separate logical and physical identity
+        description: Keep logical MetaTable identity distinct from physical storage naming and contract hashes.
+      - id: grain-keys-and-columns
+        title: Define grain, keys, and columns
+        description: Establish stable grain, primary keys, column metadata, and uniqueness constraints.
+      - id: relationships-and-cascades
+        title: Model relationships and cascades
+        description: Build valid foreign-key relationships and deliberate cascade behavior across related MetaTables.
+      - id: migration-driven-evolution
+        title: Evolve schemas through migrations
+        description: Change owned MetaTable schemas through the supported migration lifecycle.
+      - id: governed-operations
+        title: Use governed row and service operations
+        description: Apply current row, query, and service APIs without bypassing ownership boundaries.
+      - id: registration-and-deletion-boundaries
+        title: Respect registration and deletion boundaries
+        description: Distinguish registration, resource lifecycle, and protected deletion responsibilities.
+      - id: time-index-tail-delete-routing
+        title: Route time-index tail deletion
+        description: Route updater-owned bounded tail deletion through the current time-index table API rather than generic MetaTable deletion.
+  data_publishing/time_index_table_updates:
+    capabilities:
+      - id: storage-contract
+        title: Define TimeIndexMetaTable storage
+        description: Treat TimeIndexMetaTable as the storage identity, schema, index, and persistence contract.
+      - id: updater-storage-separation
+        title: Separate updater execution from storage
+        description: Keep TimeIndexTableUpdater execution logic distinct from TimeIndexMetaTable storage identity.
+      - id: update-configuration
+        title: Configure an update
+        description: Use TimeIndexTableUpdateConfig and TimeIndexTableUpdate to define current update behavior.
+      - id: updater-identity-and-hashing
+        title: Define updater identity and hashing
+        description: Make updater identity, configuration hashes, and namespace isolation deterministic.
+      - id: hash-namespace-isolation
+        title: Isolate validation namespaces
+        description: Use hash_namespace only for intentional validation isolation, never as semantic configuration or identity repair.
+      - id: incremental-windows
+        title: Compute incremental windows
+        description: Handle update windows, backfills, warm-up, existing tails, and empty results correctly.
+      - id: scoped-tail-deletion
+        title: Scope tail deletion
+        description: Restrict replacement or deletion to the intended storage identity, entity scope, and time window.
+      - id: nanosecond-utc-output
+        title: Produce canonical time output
+        description: Return correctly indexed UTC nanosecond time-series output with the required schema.
+      - id: producer-and-reference-dependencies
+        title: Model producer and reference dependencies
+        description: Use executable TimeIndexTableUpdater producers and read-only TimeIndexTableRef dependencies correctly.
+      - id: multidimensional-index-progress
+        title: Track multidimensional progress
+        description: Compute read and update progress for all index dimensions without collapsing entity-specific state.
+      - id: foreign-keys-and-schema-evolution
+        title: Maintain time-series relationships
+        description: Preserve foreign keys, related MetaTables, and migration-driven schema evolution for stored time series.
+      - id: storage-metadata-and-identity
+        title: Preserve storage metadata
+        description: Keep table metadata, logical identity, physical identity, and updater configuration boundaries coherent.
+  maintenance/bug_auditor:
+    capabilities:
+      - id: read-only-status
+        title: Preserve read-only audit status
+        description: Audit evidence without mutating the repository, platform, issue tracker, or environment.
+      - id: evidence-record
+        title: Build an evidence record
+        description: Tie each finding to concrete supplied observations and distinguish fact from hypothesis.
+      - id: root-cause-localization
+        title: Localize the root cause
+        description: Connect an observable failure to the actual defective boundary rather than restating symptoms.
+      - id: ownership-classification
+        title: Classify ownership
+        description: Distinguish target SDK, project, environment, platform, and reference-project ownership.
+      - id: upstream-source-inspection
+        title: Inspect upstream evidence
+        description: Compare local behavior with the relevant authoritative SDK or platform source evidence.
+      - id: duplicate-and-escalation-boundary
+        title: Handle duplicates and escalation
+        description: Avoid duplicate reporting and escalate only with the evidence required by the owning team.
+      - id: uncertainty-and-next-actions
+        title: Bound uncertainty
+        description: Stop at unsupported conclusions and prescribe the smallest corrective verification or next action.
+      - id: audit-status-and-output
+        title: Communicate audit status and findings
+        description: Keep the investigation observable and return the required evidence-backed finding structure.
+  maintenance/code_repository_maintenance:
+    capabilities:
+      - id: git-context-preflight
+        title: Establish Git context
+        description: Inspect branch, remote, worktree, and repository state before maintenance actions.
+      - id: local-environment-rebuild
+        title: Rebuild the local environment
+        description: Recreate the supported Python environment and validate the pinned SDK context safely.
+      - id: authentication-and-token-safety
+        title: Protect authentication material
+        description: Choose the correct authentication lane without exposing or persisting credentials unsafely.
+      - id: sdk-update
+        title: Update the SDK dependency
+        description: Change the SDK pin through the supported dependency and lock workflow.
+      - id: managed-skill-refresh
+        title: Refresh managed skills
+        description: Update managed instruction bundles while preserving the documented ownership boundary.
+      - id: canonical-source-sync
+        title: Synchronize canonical sources
+        description: Keep generated or copied managed content aligned with its canonical source and recorded pin.
+      - id: partial-failure-recovery
+        title: Recover partial maintenance state
+        description: Diagnose and safely resume or unwind a partially completed update or synchronization.
+      - id: validation-and-reporting
+        title: Validate and report maintenance
+        description: Run proportionate checks and report exact changed state, evidence, and unresolved blockers.
+  platform_operations/access_control_and_sharing:
+    capabilities:
+      - id: resource-boundary
+        title: Identify the shared resource
+        description: Resolve the actual resource and ownership boundary before applying access changes.
+      - id: view-versus-edit
+        title: Select view or edit access
+        description: Grant the least privilege required by the requested consumer behavior.
+      - id: direct-versus-team-sharing
+        title: Choose direct or team sharing
+        description: Select the correct principal and sharing path for individual or group access.
+      - id: team-membership-administration
+        title: Administer team membership
+        description: Manage team membership separately from resource grants and preserve unrelated members.
+      - id: constant-versus-secret
+        title: Distinguish constants and secrets
+        description: Store and share configuration through the correct public or secret resource type.
+      - id: idempotent-named-configuration
+        title: Reconcile named configuration
+        description: Make repeated configuration and grant operations idempotent without broad replacement.
+      - id: public-principal-identity
+        title: Resolve public principal identity
+        description: Use stable public principal identifiers and never guess private or mutable identities.
+      - id: effective-access-verification
+        title: Verify effective access
+        description: Confirm the intended effective permission while detecting conflicts and preserving unrelated access.
+  platform_operations/orchestration_and_releases:
+    capabilities:
+      - id: workflow-definition-and-validation
+        title: Define and validate workflows
+        description: Express orchestration as code and distinguish local structure from backend validation.
+      - id: exact-job-image
+        title: Select the exact Job image
+        description: Bind each Job to the correct immutable runtime image and ownership source.
+      - id: manual-and-automatic-jobs
+        title: Distinguish Job execution modes
+        description: Model manual and automatic Jobs without conflating schedules, triggers, and image ownership.
+      - id: job-schedule-and-run
+        title: Separate Job, Schedule, and JobRun
+        description: Preserve the lifecycle and identity of declarations, schedules, and concrete executions.
+      - id: run-logs-and-usage
+        title: Inspect execution evidence
+        description: Use JobRun state, logs, and resource usage as execution evidence.
+      - id: artifacts
+        title: Publish and consume artifacts
+        description: Handle versioned execution artifacts with explicit producer and consumer boundaries.
+      - id: resources-and-releases
+        title: Manage resources and releases
+        description: Distinguish resource declarations, release creation, and deployed runtime state.
+      - id: automatic-resource-release
+        title: Automate resource releases
+        description: Configure safe automatic release behavior without treating declaration as completed deployment.
+      - id: deployment-proof-chain
+        title: Establish deployment proof
+        description: Require the full evidence chain for release, health, execution, and expected output behavior.
+  sdk_code_repository_execution:
+    capabilities:
+      - id: docs-first-routing
+        title: Route from repository instructions
+        description: Read the repository instruction hierarchy before selecting an execution path.
+      - id: git-native-context
+        title: Derive context from Git
+        description: Use Git-native branch, remote, and worktree facts as the repository context authority.
+      - id: process-frozen-context
+        title: Freeze process context
+        description: Establish stable execution context before commands or platform interactions begin.
+      - id: local-versus-branch-owned
+        title: Distinguish local and branch-owned state
+        description: Decide which behavior belongs to the checkout, branch, remote, or platform registration.
+      - id: success-definition
+        title: Define success evidence
+        description: State the observations required to claim task success rather than relying on command completion.
+      - id: specialized-skill-routing
+        title: Route specialized work
+        description: Delegate domain behavior to the exact owning skill instead of absorbing it into repository execution.
+      - id: structure-and-execution-path
+        title: Use the repository execution structure
+        description: Follow the current repository layout, supported commands, and validation path.
+      - id: namespace-first-operations
+        title: Resolve namespaces first
+        description: Establish the correct namespace and resource context before platform operations.
+      - id: ambiguity-stop-boundary
+        title: Stop on material ambiguity
+        description: Identify missing authority or unsafe assumptions and request the smallest necessary clarification.

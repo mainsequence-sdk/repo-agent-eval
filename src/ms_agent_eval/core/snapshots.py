@@ -231,10 +231,9 @@ class SnapshotBuilder:
                         content_hash=locked_file.content_hash,
                     )
                 )
-            # The entire pinned repository is retained externally so the case builder
-            # can ground drafts in supporting source files without adding another
-            # user-authored source registry. Instruction units remain an explicit,
-            # separately locked subset.
+            # The entire pinned repository is retained externally so Codex can ground
+            # authored cases in supporting source files. Instruction units remain an
+            # explicit, separately locked subset.
             for source_file in sorted(checkout.rglob("*")):
                 relative = source_file.relative_to(checkout)
                 if ".git" in relative.parts or source_file.is_symlink():

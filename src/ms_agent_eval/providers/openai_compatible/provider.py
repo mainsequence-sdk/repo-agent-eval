@@ -29,11 +29,13 @@ def create_observed_lm(
         )
     arguments: dict[str, object] = {
         "api_base": model.base_url.rstrip("/"),
+        # LiteLLM's OpenAI route requires a non-empty key even when the
+        # configured OpenAI-compatible server is intentionally unauthenticated.
+        # This fixed sentinel is transport plumbing, not a credential.
+        "api_key": api_key or "not-needed",
         "cache": False,
         **dict(model.parameters),
     }
-    if api_key:
-        arguments["api_key"] = api_key
     return ObservedDspyLM(
         provider_id=model.provider,
         model=f"openai/{model.model}",

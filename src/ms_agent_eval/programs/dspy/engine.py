@@ -16,23 +16,6 @@ from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.storage import ArtifactStore
 
 
-class CaseBuilder(dspy.Signature):
-    """Author one grounded, self-contained evaluation case package."""
-
-    global_context: str = dspy.InputField()
-    skill_context: str = dspy.InputField()
-    source_context: str = dspy.InputField()
-    coverage_request: str = dspy.InputField()
-    existing_case_summaries: list[str] = dspy.InputField()
-    case_spec: dict[str, object] = dspy.OutputField()
-    prompt: str = dspy.OutputField()
-    expected_response: str = dspy.OutputField()
-    rubric: dict[str, object] = dspy.OutputField()
-    expected_artifacts: dict[str, str] = dspy.OutputField()
-    source_paths: list[str] = dspy.OutputField()
-    leakage_group: str = dspy.OutputField()
-
-
 class InstructionResponse(dspy.Signature):
     """Answer a task using only the locked repository instruction context."""
 
@@ -57,24 +40,6 @@ class RubricJudge(dspy.Signature):
 
 
 PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
-    "case_builder": {
-        "inputs": (
-            "global_context",
-            "skill_context",
-            "source_context",
-            "coverage_request",
-            "existing_case_summaries",
-        ),
-        "outputs": (
-            "case_spec",
-            "prompt",
-            "expected_response",
-            "rubric",
-            "expected_artifacts",
-            "source_paths",
-            "leakage_group",
-        ),
-    },
     "solver": {
         "inputs": ("global_context", "skill_context", "task"),
         "outputs": ("response",),
@@ -91,12 +56,6 @@ PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
         "outputs": ("criterion_scores", "hard_failures", "feedback"),
     },
 }
-
-
-def create_case_builder_program(instructions: str) -> dspy.Predict:
-    if not instructions.strip():
-        raise ConfigurationError("case-builder instructions must not be empty")
-    return dspy.Predict(CaseBuilder.with_instructions(instructions))
 
 
 def create_solver_program() -> dspy.Predict:

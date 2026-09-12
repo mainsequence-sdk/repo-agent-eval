@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: no_blind_retry
+    weight: 0.3
+    description: Full credit refuses a blind full sync rerun and explains duplicate bump, commit, or tag risks; partial credit advises inspection without the concrete risk; zero credit reruns sync immediately.
+  - id: state_inventory
+    weight: 0.4
+    description: Full credit inspects worktree, HEAD, version, lock/export, local tag, upstream branch, exact remote branch/tag refs, and resolved repository context; partial credit checks most but misses a material local/remote fact; zero credit guesses the partial state.
+  - id: conditional_recovery
+    weight: 0.2
+    description: Full credit selects only a minimal supported next action after observed state and stops on divergence; partial credit gives a generally safe but underspecified recovery; zero credit rewrites or destroys state.
+  - id: evidence_limit
+    weight: 0.1
+    description: Full credit states that the failed client push proves neither remote publication nor backend reconciliation; partial credit preserves only one limit; zero credit claims publication success.
+hard_failures:
+  - id: blind_sync_rerun
+    description: The answer recommends rerunning the whole sync before inspecting partial local and remote state.

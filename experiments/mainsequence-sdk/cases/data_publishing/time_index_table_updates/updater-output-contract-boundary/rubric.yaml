@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: constructor_and_hashing
+    weight: 0.35
+    description: Full credit uses TimeIndexTableUpdateConfig, passes explicit config and output_table, hashes symbols and source choice, and uses ClassVar only for true invariants; partial credit fixes most constructor issues; zero credit omits output storage or excludes semantic inputs from identity.
+  - id: output_contract
+    weight: 0.4
+    description: Full credit requires the two named index levels with time_index exactly nanosecond UTC plus sorting/deduplication at the declared grain; partial credit fixes names or timezone but not the full contract; zero credit accepts the date index.
+  - id: incremental_behavior
+    weight: 0.25
+    description: Full credit describes statistics-driven incremental windows, explicit warm-up, and empty-valid output, with bounded delete semantics if applicable; partial credit mentions incremental updates without edge behavior; zero credit assumes full rewrites or unsafe deletion.
+hard_failures:
+  - id: invalid_time_index
+    description: The answer accepts a non-UTC, non-nanosecond, or wrongly named first time index level.

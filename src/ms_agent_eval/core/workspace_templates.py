@@ -13,24 +13,6 @@ from .errors import ConfigurationError, IntegrityError
 
 
 _SIGNATURES: Mapping[str, Mapping[str, Mapping[str, str]]] = {
-    "case_builder": {
-        "inputs": {
-            "global_context": "str",
-            "skill_context": "str",
-            "source_context": "str",
-            "coverage_request": "str",
-            "existing_case_summaries": "list[str]",
-        },
-        "outputs": {
-            "case_spec": "dict[str, object]",
-            "prompt": "str",
-            "expected_response": "str",
-            "rubric": "dict[str, object]",
-            "expected_artifacts": "dict[str, str]",
-            "source_paths": "list[str]",
-            "leakage_group": "str",
-        },
-    },
     "solver": {
         "inputs": {
             "global_context": "str",
@@ -63,6 +45,7 @@ class WorkspaceTemplate:
     cases_directory: str
     api_key_env: str | None
     case_authoring_instructions: str
+    capability_catalog: str
 
     @property
     def workspace_yaml(self) -> str:
@@ -113,7 +96,6 @@ def build_workspace_template(
     skills: Mapping[str, object],
     cases_directory: str,
     api_base_url: str,
-    case_builder_model: str,
     solver_model: str,
     judge_model: str,
     data_root: str | None = None,
@@ -136,7 +118,7 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 4,
+        "schema_version": 6,
         "workspace": workspace,
         "evaluation": {
             "repository": {"url": repository_url, "ref": repository_ref},
@@ -144,19 +126,17 @@ def build_workspace_template(
                 "global": list(global_instructions),
                 "skills": dict(skills),
             },
-            "case_builder": {
+            "case_authoring": {
                 "instructions": "case-authoring.md",
-                "dspy": _program("case_builder"),
-                "model": _model(
-                    name=case_builder_model,
-                    base_url=api_base_url,
-                    api_key_env=api_key_env,
-                    temperature=0.2,
-                ),
-                "budget": {"model_calls": 100, "tokens": 500000},
-                "output": {"drafts": "external", "promotion": "explicit"},
             },
-            "cases": {"directory": cases_directory},
+            "cases": {
+                "directory": cases_directory,
+                "coverage": {
+                    "catalog": f"{cases_directory}/coverage.yaml",
+                    "minimum_cases_per_skill": 8,
+                    "minimum_leakage_groups_per_skill": 4,
+                },
+            },
             "splits": {"file": f"{cases_directory}/splits.yaml"},
             "judge": {
                 "dspy": _program("judge"),
@@ -211,7 +191,19 @@ def build_workspace_template(
         .joinpath("templates/case-authoring.md")
         .read_text(encoding="utf-8")
     )
-    return WorkspaceTemplate(payload, cases_directory, api_key_env, authoring)
+    capability_catalog = (
+        "schema_version: 1\n"
+        "status: draft\n"
+        "default_minimum_primary_cases: 3\n"
+        "skills: {}\n"
+    )
+    return WorkspaceTemplate(
+        payload,
+        cases_directory,
+        api_key_env,
+        authoring,
+        capability_catalog,
+    )
 
 
 def planned_workspace_paths(
@@ -224,6 +216,7 @@ def planned_workspace_paths(
     paths = [
         workspace_file.resolve(),
         root / "case-authoring.md",
+        root / template.cases_directory / "coverage.yaml",
         root / template.cases_directory / "splits.yaml",
         root / "judge-calibration" / "manifest.yaml",
     ]
@@ -273,6 +266,7 @@ def write_workspace_template(
     files: dict[Path, str] = {
         workspace_file: template.workspace_yaml,
         root / "case-authoring.md": template.case_authoring_instructions,
+        cases_root / "coverage.yaml": template.capability_catalog,
         cases_root / "splits.yaml": "schema_version: 2\ngroups: {}\n",
         calibration / "manifest.yaml": "schema_version: 2\nfixtures: []\n",
     }
@@ -315,6 +309,7 @@ def write_workspace_template(
     result = {
         "workspace": workspace_file.as_posix(),
         "case_authoring": (root / "case-authoring.md").as_posix(),
+        "capability_catalog": (cases_root / "coverage.yaml").as_posix(),
         "cases": cases_root.as_posix(),
         "calibration": (root / "judge-calibration").as_posix(),
     }

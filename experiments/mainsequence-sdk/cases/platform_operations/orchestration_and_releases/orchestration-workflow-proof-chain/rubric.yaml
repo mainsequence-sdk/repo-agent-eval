@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: declaration_location
+    weight: 0.25
+    description: Full credit uses a direct YAML/YML child of .mainsequence/workflows and rejects nested scheduled_jobs.yaml; partial credit fixes one path problem; zero credit keeps the unsupported layout.
+  - id: backend_authority
+    weight: 0.3
+    description: Full credit retrieves the current template and uses backend path/content validation without recreating parsing or inventing fields; partial credit relies on backend validation but omits template pinning; zero credit parses into a local deployment payload.
+  - id: exact_image
+    weight: 0.15
+    description: Full credit states that every Job resolves to an exact image with correct manual-versus-automatic ownership; partial credit requires an image but leaves strategy vague; zero credit permits latest or unpushed code.
+  - id: proof_chain
+    weight: 0.3
+    description: Full credit separates push, repository-event application, deployment, Job/schedule existence, JobRun, status, and logs; partial credit checks only some downstream evidence; zero credit treats push as execution success.
+hard_failures:
+  - id: push_equals_execution
+    description: The answer claims a successful Git push proves the workflow was applied or the Job ran successfully.

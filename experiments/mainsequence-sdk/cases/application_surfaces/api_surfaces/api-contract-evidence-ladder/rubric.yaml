@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: contract_authority
+    weight: 0.35
+    description: Full credit pins a resolved Command Center SDK commit and uses the manifest-selected schema plus indexed valid and invalid fixtures as authority; partial credit names the repository or schema without the full pinned chain; zero credit treats Pydantic or OpenAPI as canonical.
+  - id: local_conformance
+    weight: 0.3
+    description: Full credit covers draft-2020-12 fixture validation and serialized route responses with identity, authorization, errors, and redaction; partial credit covers schemas and some route tests; zero credit relies on one accepted example.
+  - id: evidence_boundaries
+    weight: 0.35
+    description: Full credit distinguishes health and release creation from deployment and live frontend proof, then specifies deployed schema validation, frontend exercise, and logs; partial credit notes the gap but omits material proof; zero credit accepts the original conclusion.
+hard_failures:
+  - id: false_live_proof
+    description: The answer says health success or release creation proves the deployed contract-bearing data path works.

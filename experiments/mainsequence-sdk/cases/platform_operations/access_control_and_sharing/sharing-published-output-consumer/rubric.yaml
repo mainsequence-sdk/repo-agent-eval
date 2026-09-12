@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: resource_boundary
+    weight: 0.35
+    description: Full credit shares the published TimeIndexMetaTable rather than updater code, repository, or schedule; partial credit identifies the output but ambiguously includes another resource; zero credit shares only code or the producer.
+  - id: least_privilege
+    weight: 0.3
+    description: Full credit selects one team view grant and explains why edit and individual grants are unnecessary; partial credit chooses view with incomplete principal reasoning; zero credit grants edit or broad repository access.
+  - id: public_identity_and_preservation
+    weight: 0.2
+    description: Full credit uses the supplied public team UUID, verifies it, and preserves unrelated grants; partial credit handles identity or preservation only; zero credit uses numeric IDs or broad revocation.
+  - id: effective_verification
+    weight: 0.15
+    description: Full credit rechecks exact resource access and verifies the consumer read path without claiming execution; partial credit checks configured access only; zero credit assumes a requested grant is effective.
+hard_failures:
+  - id: excessive_edit_access
+    description: The answer grants edit or repository maintenance rights to analysts whose stated need is read-only consumption.

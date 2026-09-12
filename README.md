@@ -13,49 +13,53 @@ cases, rubrics, and models.
 | Technology | How it is used |
 |---|---|
 | Python 3.12+ | Framework implementation and `ms-agent-eval` command-line interface. |
-| DSPy 3.2 | The only prompt-programming layer. Typed DSPy signatures define the case builder, solver, and judge; `LabeledFewShot` compiles optimized solver state. |
-| OpenAI-compatible APIs | LLM transport for all three roles through DSPy's LM interface, including local Ollama `/v1` endpoints. Each role must use a different configured model identity. |
+| Codex skills | The current Codex session authors grounded cases from the versioned `case-authoring` policy and immutable source snapshots. |
+| DSPy 3.2 | The runtime prompt-programming layer. Typed DSPy signatures define the solver and judge; `LabeledFewShot` compiles optimized solver state. |
+| OpenAI-compatible APIs | LLM transport for the solver and judge through DSPy's LM interface. The two roles must use different configured model identities. |
 | YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-calibration manifests. |
-| Git | Resolves a repository URL plus tag or commit into an immutable source snapshot with recorded provenance. |
+| Git | Resolves the target and optional reference repositories from tags or commits into immutable snapshots with recorded provenance. |
 | Docker | Optional digest-pinned sandbox for commands that must execute against the target repository. Response-only evaluations do not require a container. |
 | SHA-256 + JSON artifacts | Identifies snapshots, programs, inputs, calls, and results so runs are reproducible and auditable. |
-| External filesystem storage | Keeps snapshots, drafts, model-call evidence, compiled DSPy programs, runs, and reports under `~/ms_agent_eval/<workspace-id>` instead of committing them. |
+| External filesystem storage | Keeps snapshots, model-call evidence, compiled DSPy programs, runs, and reports under `~/ms_agent_eval/<workspace-id>` instead of committing them. |
 | `uv`, Hatchling, pytest, Ruff | Dependency/environment management, package builds, tests, and linting. |
 
 The target repository is data, not a Python dependency of the framework. The
 framework snapshots it, loads only the configured instructions and cases, asks
-the selected LLMs to build/solve/judge, and writes all mutable evidence outside
-both repositories.
+the runtime LLMs to solve and judge, and writes all mutable evidence outside
+both repositories. Codex authors cases directly before runtime evaluation.
 
 ## How an experiment runs
 
-Every scored workflow has three distinct LLM roles and a strict data boundary:
+Every scored workflow has Codex authoring plus two distinct runtime LLM roles:
 
 ```mermaid
 flowchart TB
     subgraph Definition["Versioned experiment definition"]
         Workspace["workspace.yaml"]
         AuthoringPolicy["case-authoring.md"]
+        CapabilityCatalog["cases/coverage.yaml"]
         Cases["Promoted cases + rubrics"]
         Splits["Grouped train / development / test splits"]
         Workspace --> AuthoringPolicy
+        Workspace --> CapabilityCatalog
         Workspace --> Cases
         Cases --> Splits
     end
 
     subgraph Authoring["Case authoring"]
-        Repo["Repository URL + tag/commit"] --> Snapshot["Immutable external snapshot"]
+        Repo["Target + reference repositories"] --> Snapshot["Immutable external snapshots"]
         Workspace --> Snapshot
-        Snapshot --> Builder["1. DSPy case-builder LLM"]
-        AuthoringPolicy -->|"DSPy instructions"| Builder
-        Builder --> Drafts["External validated drafts"]
-        Drafts -->|"explicit human promotion"| Cases
+        Snapshot --> SourceSet["Content-addressed authoring source set"]
+        SourceSet --> Author["Codex + case-authoring skill"]
+        AuthoringPolicy --> Author
+        CapabilityCatalog --> Author
+        Author --> Cases
     end
 
     subgraph Baseline["Baseline evaluation"]
-        Cases --> Solver["2. DSPy solver LLM"]
+        Cases --> Solver["1. DSPy solver LLM"]
         Solver --> Candidate["Candidate response"]
-        Candidate --> Judge["3. DSPy LLM judge"]
+        Candidate --> Judge["2. DSPy LLM judge"]
         Cases -->|"rubric + expected result"| Judge
         Judge --> BaselineResults["External scores + call evidence"]
     end
@@ -73,12 +77,15 @@ flowchart TB
     end
 ```
 
-- The case builder combines the versioned `case-authoring.md` policy with the
-  locked target context and one invocation-specific coverage request. It authors
-  grounded prompts, expected results, rubrics, source paths, and leakage groups,
-  and cannot see solver answers or evaluation results. Diagnostic cases give
-  substantial rubric weight to correctly identifying a real error instead of
-  blindly following a faulty premise.
+- Codex first decomposes every complete selected skill into the versioned
+  `cases/coverage.yaml` capability catalog, then combines the versioned
+  `case-authoring.md` policy with locked target and
+  reference-repository snapshots. It writes reviewed case packages directly to
+  the case bank, with source/policy/catalog/content hashes. Each case has one
+  primary capability; readiness requires every catalog capability to reach its
+  configured primary-case depth. This step requires no model
+  endpoint. Diagnostic cases give substantial rubric weight to correctly
+  identifying a real error instead of blindly following a faulty premise.
 - The solver sees the task and locked instruction context, never the rubric or
   expected result.
 - The LLM judge is the only semantic scorer. Framework code only validates its
@@ -117,22 +124,44 @@ uv run ms-agent-eval init \
   --skills-directory .agents/skills \
   --cases cases \
   --api-base-url http://127.0.0.1:8000/v1 \
-  --case-builder-model builder-model \
   --solver-model solver-model \
   --judge-model judge-model
 ```
 
-The generated schema-v4 `workspace.yaml` has only two user-facing sections:
+The generated schema-v6 `workspace.yaml` has only two user-facing sections:
 
 1. `evaluation`: repository, global instructions, exactly one skill selection,
-   case builder, case directory, split policy, and LLM judge.
+   case-authoring policy/sources, case directory, split policy, and LLM judge.
 2. `experiments`: solver, runtime, normal evaluation, and optional DSPy
    optimization.
 
 Use `skills.files` instead of `skills.directory` when evaluating only an exact
 list of `SKILL.md` files. Both-or-neither is rejected.
 
-## Configure the three models
+Optional tutorials, real projects, and separately versioned contract sources
+belong under `evaluation.case_authoring.sources`. Each URL/ref is independently
+snapshotted outside Git; selected paths reach Codex under
+`references/<source-id>/...` and participate in one combined provenance hash.
+
+Case-bank readiness is also workspace configuration. New workspaces default to
+at least eight promoted cases and four distinct leakage groups per skill:
+
+```yaml
+evaluation:
+  cases:
+    directory: cases
+    coverage:
+      catalog: cases/coverage.yaml
+      minimum_cases_per_skill: 8
+      minimum_leakage_groups_per_skill: 4
+```
+
+The generated catalog starts as `draft`. Codex must read every selected skill,
+record all independently testable capabilities, and mark it `complete` before
+scored-run readiness. Requested case counts are lower bounds; the authoring
+campaign expands until every capability has its required primary examples.
+
+## Configure the two runtime models
 
 Model names and API locations are durable workspace configuration. Each role stores
 its provider, model name, base URL, and parameters directly in `workspace.yaml`:
@@ -148,8 +177,8 @@ model:
 
 Only credentials remain process-local. When a provider requires a key, add
 `api_key_env: OPENAI_API_KEY` to each applicable model block and define that
-secret in the ignored `.env` file. The configured provider/model identities
-must all differ. Runtime state defaults to
+secret in the ignored `.env` file. The solver and judge provider/model
+identities must differ. Runtime state defaults to
 `~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
 another external path.
 
@@ -157,20 +186,22 @@ another external path.
 
 ```bash
 uv run ms-agent-eval validate --workspace workspace.yaml
-uv run ms-agent-eval cases build \
-  --workspace workspace.yaml \
-  --coverage "Create one grounded case for every discovered skill"
-uv run ms-agent-eval cases inspect-drafts --workspace workspace.yaml
-uv run ms-agent-eval cases promote --workspace workspace.yaml --draft DRAFT_ID
+# Ask Codex to use the case-authoring skill with this workspace and campaign goal.
 uv run ms-agent-eval inspect --workspace workspace.yaml
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 ```
 
-Generated snapshots, builder calls/drafts, solver calls, judge calls, compiled
+Generated snapshots, solver calls, judge calls, compiled
 state, results, and reports remain outside Git. Only `workspace.yaml`, promoted
 case packages, `case-authoring.md`, split assignments, and human-labelled judge
 calibration inputs are versioned.
+
+Ask Codex for narrow campaigns covering different capabilities, sources,
+difficulties, and archetypes until `validate` reports that every skill satisfies the configured
+case and leakage-group minima. Those minima prevent a one-case-per-skill bank
+from being treated as evaluation- or training-ready; they remain a floor, not a
+guarantee of enough data for a production fine-tune.
 
 Start with [Getting started](docs/getting-started.md), then read
 [Repository structure](docs/structure.md) and [Conventions](docs/conventions.md).
@@ -187,7 +218,7 @@ repository/
 ├── experiments/
 │   └── <workspace>/
 │       ├── workspace.yaml      target, instructions, cases, models, runtime
-│       ├── case-authoring.md   versioned DSPy builder policy
+│       ├── case-authoring.md   versioned Codex authoring policy
 │       ├── .env.example        optional credential-name template
 │       ├── cases/              promoted cases, rubrics, provenance, splits
 │       └── judge-calibration/  human-labelled judge fixtures
@@ -199,8 +230,7 @@ Mutable and generated data belongs outside Git under the workspace data root:
 
 ```text
 ~/ms_agent_eval/<workspace-id>/
-├── snapshots/                  immutable target-repository snapshots
-├── case-drafts/                builder drafts awaiting explicit promotion
+├── snapshots/                  immutable target and reference snapshots
 ├── blobs/sha256/               content-addressed responses, traces, and state
 ├── manifests/                  locks, model calls, runs, scores, and reports
 └── tmp/                        atomic staging

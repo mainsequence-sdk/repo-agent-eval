@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: migration_sequence
+    weight: 0.45
+    description: Full credit updates the model and complete registry, uses the migration CLI to inspect/generate/review/upgrade, and rejects startup registration and custom payloads; partial credit has the migration-first idea but omits a major phase; zero credit accepts runtime schema creation.
+  - id: provider_lifecycle
+    weight: 0.3
+    description: Full credit identifies the root transition from platform_managed reserved to alembic_managed active without a parent; partial credit mentions provider ownership without the states; zero credit invents a parent or bypasses the provider.
+  - id: completion_evidence
+    weight: 0.25
+    description: Full credit distinguishes planned validation from execution and names revision, schema, branch-context, and test evidence; partial credit has generic verification; zero credit claims the schema exists merely because code ran.
+hard_failures:
+  - id: runtime_registration_shortcut
+    description: The answer recommends direct model registration or application startup as the normal schema-migration mechanism.

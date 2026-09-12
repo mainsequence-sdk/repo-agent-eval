@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: observable_success
+    weight: 0.3
+    description: Full credit defines concrete local tests plus exact-commit, validation-run, log, and published-table evidence; partial credit defines only local or live success; zero credit starts implementation with no success condition.
+  - id: git_context
+    weight: 0.35
+    description: Full credit uses current --debug --json and requires the actual Git branch to resolve, treating remote/branch/HEAD as identity and auth as permission only; partial credit runs the check but incompletely states required evidence; zero credit selects source identity through credentials or collection order.
+  - id: blocked_scope
+    weight: 0.2
+    description: Full credit allows ordinary local work on an unregistered branch while blocking only live branch-owned operations until registration and fresh resolution; partial credit blocks too much or too little; zero credit claims live work can proceed unresolved.
+  - id: specialized_routing
+    weight: 0.15
+    description: Full credit routes updater semantics to data_publishing/time_index_table_updates and keeps this skill at bootstrap/context; partial credit names the skill but absorbs some domain design; zero credit implements updater semantics here.
+hard_failures:
+  - id: environment_uid_selector
+    description: The answer asks for or persists an Environment, repository, or branch UID to select Git source context.

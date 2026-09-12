@@ -7,12 +7,12 @@ import pytest
 import yaml
 
 from ms_agent_eval.core.errors import PreflightError
+from ms_agent_eval.core.hashing import sha256_file
 from ms_agent_eval.core.planning import compile_workspace
 from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.runner import ExperimentRunner
 from ms_agent_eval.core.workspace import ResolvedRoleModel
 from ms_agent_eval.programs.dspy.budget import BudgetLedger
-from ms_agent_eval.programs.dspy.engine import create_case_builder_program, program_hash
 
 from .helpers import (
     FixedObservedLM,
@@ -32,17 +32,9 @@ def _environment() -> Mapping[str, str]:
 def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
-    builder_model = ResolvedRoleModel.resolve(
-        "case_builder",
-        repository.workspace.evaluation.case_builder.model,
-        _environment(),
-    )
     seed_cases_and_calibration(
         repository,
-        builder_model_hash=builder_model.content_hash,
-        builder_program_hash=program_hash(
-            create_case_builder_program(repository.case_authoring_instructions())
-        ),
+        authoring_instructions_hash=sha256_file(repository.case_authoring_path),
         source_snapshot_hash=lock.content_hash,
     )
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
@@ -77,7 +69,7 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
     assert all(item.evaluation.passed for item in run.cases)
     assert run.role_usage["solver"]["model_calls"] == 3
     assert run.role_usage["judge"]["model_calls"] == 8
-    assert run.role_usage["case_builder"]["model_calls"] == 0
+    assert set(run.role_usage) == {"solver", "judge"}
     assert all(call.role == "solver" for item in run.cases for call in item.solver.calls)
 
 

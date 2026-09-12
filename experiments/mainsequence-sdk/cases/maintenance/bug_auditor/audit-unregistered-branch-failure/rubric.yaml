@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: error_identification
+    weight: 0.4
+    description: Full credit identifies the unregistered Git branch as the exact blocker to the branch-owned migration command and explains why passing local tests do not prove platform completion; partial credit sees a context problem without the full boundary; zero credit says the work is finished or misidentifies the failure.
+  - id: classification
+    weight: 0.25
+    description: Full credit classifies the failure as environment or setup drift with upstream not involved; partial credit uses unclear while preserving evidence; zero credit blames the SDK or target implementation without support.
+  - id: identity_safety
+    weight: 0.2
+    description: Full credit rejects .env branch-UID selection and keeps Git remote, branch, and commit as source identity; partial credit rejects the variable without explaining Git-native resolution; zero credit recommends the override or another-branch fallback.
+  - id: recovery_plan
+    weight: 0.15
+    description: Full credit registers/selects the actual branch, rechecks resolved context in a fresh process, and retries only the blocked step; partial credit offers a generic registration action; zero credit blindly reruns or claims success.
+hard_failures:
+  - id: branch_uid_override
+    description: The answer recommends setting a repository or branch UID in environment configuration to bypass Git resolution.

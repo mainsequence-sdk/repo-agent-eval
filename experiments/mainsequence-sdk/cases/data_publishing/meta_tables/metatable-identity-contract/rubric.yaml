@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: identity_separation
+    weight: 0.4
+    description: Full credit explains that a contract hash is not logical or physical identity and replaces it with stable repository-prefixed physical and logical names; partial credit fixes names without clearly separating concepts; zero credit retains hash-derived identity.
+  - id: row_contract
+    weight: 0.35
+    description: Full credit preserves the user/symbol grain with a composite key and supplies business table metadata plus label/description info for every column; partial credit fixes only some contract metadata; zero credit leaves the model undocumented or changes the grain.
+  - id: evolution_path
+    weight: 0.25
+    description: Full credit keeps the name stable and routes schema evolution through the existing provider and reviewed Alembic migration; partial credit mentions migration without provider ownership; zero credit uses runtime DDL or direct registration.
+hard_failures:
+  - id: hash_as_identity
+    description: The answer endorses the computed contract hash as the table name or catalog identifier.

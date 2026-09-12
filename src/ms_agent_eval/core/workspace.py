@@ -26,30 +26,12 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 4
+WORKSPACE_SCHEMA_VERSION = 6
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SPLITS = {"train", "development", "test", "challenge"}
 _PROGRAM_FIELDS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
-    "case_builder": {
-        "inputs": (
-            "global_context",
-            "skill_context",
-            "source_context",
-            "coverage_request",
-            "existing_case_summaries",
-        ),
-        "outputs": (
-            "case_spec",
-            "prompt",
-            "expected_response",
-            "rubric",
-            "expected_artifacts",
-            "source_paths",
-            "leakage_group",
-        ),
-    },
     "solver": {
         "inputs": ("global_context", "skill_context", "task"),
         "outputs": ("response",),
@@ -67,24 +49,6 @@ _PROGRAM_FIELDS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     },
 }
 _PROGRAM_TYPES: Mapping[str, Mapping[str, Mapping[str, str]]] = {
-    "case_builder": {
-        "inputs": {
-            "global_context": "str",
-            "skill_context": "str",
-            "source_context": "str",
-            "coverage_request": "str",
-            "existing_case_summaries": "list[str]",
-        },
-        "outputs": {
-            "case_spec": "dict[str, object]",
-            "prompt": "str",
-            "expected_response": "str",
-            "rubric": "dict[str, object]",
-            "expected_artifacts": "dict[str, str]",
-            "source_paths": "list[str]",
-            "leakage_group": "str",
-        },
-    },
     "solver": {
         "inputs": {
             "global_context": "str",
@@ -163,6 +127,20 @@ def _relative_path(value: object, field: str) -> str:
     return path.as_posix()
 
 
+def _source_glob(value: object, field: str) -> str:
+    result = _string(value, field).replace("\\", "/")
+    path = PurePosixPath(result)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or "\x00" in result
+        or ":" in path.parts[0]
+        or path.as_posix() in {"", "."}
+    ):
+        raise ConfigurationError(f"{field} must be a safe repository-relative glob")
+    return path.as_posix()
+
+
 def _string_list(value: object, field: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise ConfigurationError(f"{field} must be a list")
@@ -229,10 +207,15 @@ class RepositoryConfiguration:
     ref: str
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> RepositoryConfiguration:
-        _reject_unknown(payload, {"url", "ref"}, "evaluation.repository")
-        url = _string(payload.get("url"), "evaluation.repository.url")
-        ref = _string(payload.get("ref"), "evaluation.repository.ref")
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str = "evaluation.repository",
+    ) -> RepositoryConfiguration:
+        _reject_unknown(payload, {"url", "ref"}, field)
+        url = _string(payload.get("url"), f"{field}.url")
+        ref = _string(payload.get("ref"), f"{field}.ref")
         kind = SourceRefKind.COMMIT if _COMMIT.fullmatch(ref) else SourceRefKind.TAG
         source = GitSource(url, SourceRef(kind, ref))
         # Reuse the strict GitHub URL/ref validation used by snapshot acquisition.
@@ -248,6 +231,37 @@ class RepositoryConfiguration:
     def to_git_source(self) -> GitSource:
         kind = SourceRefKind.COMMIT if _COMMIT.fullmatch(self.ref) else SourceRefKind.TAG
         return GitSource(self.url, SourceRef(kind, self.ref))
+
+
+@dataclass(frozen=True)
+class AuthoringSourceConfiguration:
+    id: str
+    role: str
+    repository: RepositoryConfiguration
+    include: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        index: int,
+    ) -> AuthoringSourceConfiguration:
+        field = f"evaluation.case_authoring.sources[{index}]"
+        _reject_unknown(payload, {"id", "role", "repository", "include"}, field)
+        include = tuple(
+            _source_glob(item, f"{field}.include[]")
+            for item in _string_list(payload.get("include"), f"{field}.include")
+        )
+        return cls(
+            _identifier(payload.get("id"), f"{field}.id"),
+            _identifier(payload.get("role"), f"{field}.role"),
+            RepositoryConfiguration.from_mapping(
+                _mapping(payload.get("repository"), f"{field}.repository"),
+                field=f"{field}.repository",
+            ),
+            include,
+        )
 
 
 @dataclass(frozen=True)
@@ -422,47 +436,43 @@ class RoleBudget:
 
 
 @dataclass(frozen=True)
-class CaseBuilderConfiguration:
+class CaseAuthoringConfiguration:
     instructions: str
-    program: DspyProgramConfiguration
-    model: ModelConfiguration
-    budget: RoleBudget
-    drafts: str
-    promotion: str
+    sources: tuple[AuthoringSourceConfiguration, ...]
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> CaseBuilderConfiguration:
+    def from_mapping(cls, payload: Mapping[str, object]) -> CaseAuthoringConfiguration:
         _reject_unknown(
             payload,
-            {"instructions", "dspy", "model", "budget", "output"},
-            "evaluation.case_builder",
+            {"instructions", "sources"},
+            "evaluation.case_authoring",
         )
-        output = _mapping(payload.get("output"), "evaluation.case_builder.output")
-        _reject_unknown(output, {"drafts", "promotion"}, "evaluation.case_builder.output")
-        drafts = _string(output.get("drafts"), "case_builder.output.drafts")
-        promotion = _string(output.get("promotion"), "case_builder.output.promotion")
-        if drafts != "external" or promotion != "explicit":
+        raw_sources = payload.get("sources", [])
+        if not isinstance(raw_sources, Sequence) or isinstance(
+            raw_sources, (str, bytes, bytearray)
+        ):
+            raise ConfigurationError("evaluation.case_authoring.sources must be a list")
+        sources = tuple(
+            AuthoringSourceConfiguration.from_mapping(
+                _mapping(item, f"evaluation.case_authoring.sources[{index}]"),
+                index=index,
+            )
+            for index, item in enumerate(raw_sources)
+        )
+        source_ids = [item.id for item in sources]
+        if len(source_ids) != len(set(source_ids)):
             raise ConfigurationError(
-                "case_builder output must use external drafts and explicit promotion"
+                "evaluation.case_authoring.sources must use unique source ids"
+            )
+        if "target" in source_ids:
+            raise ConfigurationError(
+                "evaluation.case_authoring.sources reserves the source id 'target'"
             )
         return cls(
             _relative_path(
-                payload.get("instructions"), "evaluation.case_builder.instructions"
+                payload.get("instructions"), "evaluation.case_authoring.instructions"
             ),
-            DspyProgramConfiguration.from_mapping(
-                _mapping(payload.get("dspy"), "evaluation.case_builder.dspy"),
-                field="evaluation.case_builder.dspy",
-            ),
-            ModelConfiguration.from_mapping(
-                _mapping(payload.get("model"), "evaluation.case_builder.model"),
-                field="evaluation.case_builder.model",
-            ),
-            RoleBudget.from_mapping(
-                _mapping(payload.get("budget"), "evaluation.case_builder.budget"),
-                field="evaluation.case_builder.budget",
-            ),
-            drafts,
-            promotion,
+            sources,
         )
 
 
@@ -495,13 +505,51 @@ class JudgeConfiguration:
 
 
 @dataclass(frozen=True)
+class CaseCoverageConfiguration:
+    catalog: str
+    minimum_cases_per_skill: int
+    minimum_leakage_groups_per_skill: int
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> CaseCoverageConfiguration:
+        _reject_unknown(
+            payload,
+            {"catalog", "minimum_cases_per_skill", "minimum_leakage_groups_per_skill"},
+            "evaluation.cases.coverage",
+        )
+        catalog = _relative_path(
+            payload.get("catalog"), "evaluation.cases.coverage.catalog"
+        )
+        minimum_cases = _positive_int(
+            payload.get("minimum_cases_per_skill", 8),
+            "evaluation.cases.coverage.minimum_cases_per_skill",
+        )
+        minimum_groups = _positive_int(
+            payload.get("minimum_leakage_groups_per_skill", 4),
+            "evaluation.cases.coverage.minimum_leakage_groups_per_skill",
+        )
+        if minimum_groups > minimum_cases:
+            raise ConfigurationError(
+                "evaluation.cases.coverage.minimum_leakage_groups_per_skill "
+                "cannot exceed minimum_cases_per_skill"
+            )
+        return cls(catalog, minimum_cases, minimum_groups)
+
+
+@dataclass(frozen=True)
 class CasesConfiguration:
     directory: str
+    coverage: CaseCoverageConfiguration
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> CasesConfiguration:
-        _reject_unknown(payload, {"directory"}, "evaluation.cases")
-        return cls(_relative_path(payload.get("directory"), "evaluation.cases.directory"))
+        _reject_unknown(payload, {"directory", "coverage"}, "evaluation.cases")
+        return cls(
+            _relative_path(payload.get("directory"), "evaluation.cases.directory"),
+            CaseCoverageConfiguration.from_mapping(
+                _mapping(payload.get("coverage"), "evaluation.cases.coverage")
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -560,7 +608,7 @@ class SplitsConfiguration:
 class EvaluationConfiguration:
     repository: RepositoryConfiguration
     instructions: InstructionConfiguration
-    case_builder: CaseBuilderConfiguration
+    case_authoring: CaseAuthoringConfiguration
     cases: CasesConfiguration
     splits: SplitsConfiguration
     judge: JudgeConfiguration
@@ -569,7 +617,7 @@ class EvaluationConfiguration:
     def from_mapping(cls, payload: Mapping[str, object]) -> EvaluationConfiguration:
         _reject_unknown(
             payload,
-            {"repository", "instructions", "case_builder", "cases", "splits", "judge"},
+            {"repository", "instructions", "case_authoring", "cases", "splits", "judge"},
             "evaluation",
         )
         return cls(
@@ -579,8 +627,8 @@ class EvaluationConfiguration:
             InstructionConfiguration.from_mapping(
                 _mapping(payload.get("instructions"), "evaluation.instructions")
             ),
-            CaseBuilderConfiguration.from_mapping(
-                _mapping(payload.get("case_builder"), "evaluation.case_builder")
+            CaseAuthoringConfiguration.from_mapping(
+                _mapping(payload.get("case_authoring"), "evaluation.case_authoring")
             ),
             CasesConfiguration.from_mapping(_mapping(payload.get("cases"), "evaluation.cases")),
             SplitsConfiguration.from_mapping(_mapping(payload.get("splits"), "evaluation.splits")),
@@ -809,9 +857,6 @@ class WorkspaceConfiguration:
             MappingProxyType(experiments),
         )
         result._validate_role_configuration()
-        result.evaluation.case_builder.program.validate_role(
-            "case_builder", field="evaluation.case_builder.dspy"
-        )
         result.evaluation.judge.program.validate_role("judge", field="evaluation.judge.dspy")
         for experiment in result.experiments.values():
             if experiment.mode is ExperimentMode.EVALUATE:
@@ -855,23 +900,15 @@ class WorkspaceConfiguration:
         return experiment.runtime
 
     def _validate_role_configuration(self) -> None:
-        builder = self.evaluation.case_builder.model
         judge = self.evaluation.judge.model
-        if (builder.provider, builder.model) == (judge.provider, judge.model):
-            raise ConfigurationError("case-builder and judge model identities must differ")
         for experiment in self.experiments.values():
             if experiment.mode is not ExperimentMode.EVALUATE:
                 continue
             assert experiment.solver is not None
             solver = experiment.solver.model
-            identities = {
-                (builder.provider, builder.model),
-                (solver.provider, solver.model),
-                (judge.provider, judge.model),
-            }
-            if len(identities) != 3:
+            if (solver.provider, solver.model) == (judge.provider, judge.model):
                 raise ConfigurationError(
-                    f"experiment {experiment.id!r} must configure three distinct LLM models"
+                    f"experiment {experiment.id!r} must configure distinct solver and judge LLMs"
                 )
 
 
@@ -923,16 +960,13 @@ def resolve_role_models(
 ) -> Mapping[str, ResolvedRoleModel]:
     solver = workspace.solver(experiment_id)
     models = {
-        "case_builder": ResolvedRoleModel.resolve(
-            "case_builder", workspace.evaluation.case_builder.model, environment
-        ),
         "solver": ResolvedRoleModel.resolve("solver", solver.model, environment),
         "judge": ResolvedRoleModel.resolve("judge", workspace.evaluation.judge.model, environment),
     }
     identities = {(item.provider, item.model) for item in models.values()}
-    if len(identities) != 3:
+    if len(identities) != 2:
         raise ConfigurationError(
-            "case-builder, solver, and judge must resolve to three distinct provider/model identities"
+            "solver and judge must resolve to distinct provider/model identities"
         )
     return MappingProxyType(models)
 
@@ -967,6 +1001,16 @@ class WorkspaceRepository:
         return self.path(self.workspace.evaluation.splits.file, field="splits.file")
 
     @property
+    def capability_catalog_path(self) -> Path:
+        relative = self.workspace.evaluation.cases.coverage.catalog
+        source = self.root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ResolutionError(
+                f"capability catalog does not exist or is unsafe: {source}"
+            )
+        return self.path(relative, field="evaluation.cases.coverage.catalog")
+
+    @property
     def calibration_root(self) -> Path:
         return self.path(
             self.workspace.evaluation.judge.calibration_directory,
@@ -975,13 +1019,13 @@ class WorkspaceRepository:
 
     @property
     def case_authoring_path(self) -> Path:
-        relative = self.workspace.evaluation.case_builder.instructions
+        relative = self.workspace.evaluation.case_authoring.instructions
         source = self.root / relative
         if source.is_symlink() or not source.is_file():
             raise ResolutionError(
                 f"case-authoring instructions do not exist or are unsafe: {source}"
             )
-        return self.path(relative, field="evaluation.case_builder.instructions")
+        return self.path(relative, field="evaluation.case_authoring.instructions")
 
     def case_authoring_instructions(self) -> str:
         path = self.case_authoring_path
@@ -1038,6 +1082,23 @@ class WorkspaceRepository:
             display_name=self.workspace.id,
             source=self.workspace.evaluation.repository.to_git_source(),
             instruction_bundles=(bundle,),
+        )
+
+    def authoring_source_specifications(
+        self,
+    ) -> tuple[tuple[AuthoringSourceConfiguration, TargetSpecification], ...]:
+        return tuple(
+            (
+                source,
+                TargetSpecification(
+                    schema_version=1,
+                    id=f"{self.workspace.id}-{source.id}",
+                    display_name=source.id,
+                    source=source.repository.to_git_source(),
+                    instruction_bundles=(),
+                ),
+            )
+            for source in self.workspace.evaluation.case_authoring.sources
         )
 
     def environment(self) -> Mapping[str, str]:

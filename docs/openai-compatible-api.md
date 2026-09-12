@@ -1,8 +1,8 @@
 # OpenAI-Compatible API
 
-The case builder, solver, and judge use the same provider-neutral HTTP
-protocol. Each role stores its API base URL and model id directly in
-`workspace.yaml`:
+The solver and judge use the same provider-neutral HTTP protocol. Each runtime
+role stores its API base URL and model id directly in `workspace.yaml`. Case
+authoring is performed by the active Codex session and has no endpoint setting:
 
 ```yaml
 model:
@@ -14,8 +14,8 @@ model:
 ```
 
 The API address and model name are versioned experiment configuration. They do
-not come from environment variables. All three roles may share one API
-address, but their model ids must differ.
+not come from environment variables. Both roles may share one API address, but
+their model ids must differ.
 
 The base URL must include the path expected by the server; the framework does
 not silently append `/v1`. Ollama, vLLM, LM Studio, and hosted services may be
@@ -60,7 +60,7 @@ uv run ms-agent-eval setup
 ```
 
 The wizard asks for the base URL, optionally tests `GET /models`, lets the user
-select or enter three model ids, and previews the resulting YAML before it
+select or enter two model ids, and previews the resulting YAML before it
 writes anything. Model discovery performs no inference call.
 
 Check the resolved non-secret identities afterward:

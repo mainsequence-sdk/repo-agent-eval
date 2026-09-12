@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: surface_classification
+    weight: 0.4
+    description: Full credit distinguishes the row-oriented instrument MetaTable from the daily TimeIndexMetaTable and uses the appropriate discovery surface for each; partial credit names both kinds with an incomplete method; zero credit treats them as one updater or one table kind.
+  - id: evidence_report
+    weight: 0.35
+    description: Full credit requires observable identities, metadata, schema/key details, cadence, and explicit unknowns without inferring join compatibility; partial credit captures basic IDs but omits important evidence limits; zero credit invents found objects or compatibility.
+  - id: routing
+    weight: 0.25
+    description: Full credit limits the output to discovery and routes MetaTable, updater, and API work to their owning skills; partial credit preserves the discovery boundary but routes incompletely; zero credit implements or redesigns those concerns in the exploration pass.
+hard_failures:
+  - id: fabricated_catalog_state
+    description: The answer reports concrete discovered UIDs or live availability that the prompt does not supply.

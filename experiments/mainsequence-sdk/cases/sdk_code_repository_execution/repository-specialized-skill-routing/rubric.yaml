@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: exact_routing
+    weight: 0.45
+    description: Full credit routes MetaTable and migration, Command Center API, nightly orchestration, and access policy to all exact owning skills; partial credit routes most with one meaningful omission; zero credit lets the bootstrap skill own domain behavior or routes concerns incorrectly.
+  - id: owner_boundaries
+    weight: 0.25
+    description: Full credit distinguishes schema/evolution, API contract/release, Job execution, and resource access without cross-ownership; partial credit has correct skills but blurs one boundary; zero credit conflates implementation, deployment, and sharing.
+  - id: success_evidence
+    weight: 0.3
+    description: Full credit defines integrated but owner-specific evidence for valid schema/migration, pinned contract and deployed frontend, exact-image JobRun/logs, and least-privilege effective access; partial credit defines generic evidence; zero credit claims work complete from planning or omits verification.
+hard_failures:
+  - id: fabricated_completion
+    description: The answer states that any implementation, deployment, JobRun, or access verification has already completed.

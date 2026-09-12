@@ -1,2 +1,24 @@
 schema_version: 2
-groups: {}
+groups:
+  a2a-response-kind-negotiation: train
+  a2a-stable-session-identity: train
+  api-contract-and-deployment-evidence: train
+  api-platform-injected-human-identity: train
+  audit-git-context-environment-blocker: development
+  audit-target-repository-time-index-defect: challenge
+  exploration-semantic-catalog-discovery: development
+  exploration-storage-surface-classification: train
+  maintenance-partial-sync-state-recovery: test
+  maintenance-sdk-and-skill-refresh: development
+  metatable-grain-keys-relationships: train
+  metatable-logical-physical-contract-identity: test
+  migration-direct-registration-boundary: train
+  migration-provider-revision-lifecycle: test
+  orchestration-declarative-workflow-evidence: train
+  orchestration-job-image-ownership: train
+  repository-git-native-context-and-success: challenge
+  repository-specialized-domain-routing: train
+  sharing-real-resource-least-privilege: challenge
+  sharing-secret-name-and-access-reconciliation: test
+  updater-output-index-and-hash-contract: train
+  updater-producer-vs-reference-dependencies: train

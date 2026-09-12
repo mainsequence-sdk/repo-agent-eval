@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: discovery_strategy
+    weight: 0.4
+    description: Full credit starts with semantic time-index-table search and uses detail only after selecting a candidate; partial credit chooses the right storage surface but a less suitable discovery order; zero credit starts implementation or invents an identifier.
+  - id: evidence_capture
+    weight: 0.3
+    description: Full credit retains concrete identity, descriptive, cadence, and schema metadata and checks the profile-to-table UID when present; partial credit records only some identifying evidence; zero credit offers conclusions without observable catalog fields.
+  - id: boundary_and_handoff
+    weight: 0.3
+    description: Full credit states that nothing is verified before execution and hands updater design to the publishing skill after discovery; partial credit preserves one boundary; zero credit claims live success or designs the updater in this pass.
+hard_failures:
+  - id: fabricated_discovery
+    description: The answer claims that a matching table or UID was found despite having no live command output.

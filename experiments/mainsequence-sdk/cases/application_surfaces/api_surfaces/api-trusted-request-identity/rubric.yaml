@@ -1,0 +1,14 @@
+passing_score: 0.75
+criteria:
+  - id: trusted_identity
+    weight: 0.45
+    description: Full credit uses Request and request.state.user_uid or request.state.user as the human caller and rejects User.get_logged_user and caller-controlled identity; partial credit uses request state but leaves an ambiguity; zero credit trusts the path value or runtime login as the caller.
+  - id: authorization_boundary
+    weight: 0.3
+    description: Full credit explicitly distinguishes authentication identity from resource authorization and describes the separate policy for another-user access; partial credit mentions authorization without preserving the distinction; zero credit assumes injected identity automatically authorizes the operation.
+  - id: thin_route
+    weight: 0.25
+    description: Full credit keeps transport handling in the route and delegates domain persistence to an explicit service; partial credit has the right split with minor noise; zero credit adds header parsing, environment detection, or domain-heavy route logic.
+hard_failures:
+  - id: untrusted_caller
+    description: The answer continues to use caller-controlled user_id or User.get_logged_user as the authenticated request identity.

@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: error_identification
+    weight: 0.4
+    description: Full credit identifies the real microsecond-versus-nanosecond UTC index defect and explains why pd.to_datetime utc normalization alone did not satisfy it; partial credit notices a dtype issue without the exact unit boundary; zero credit misses the defect or says the supplied output is valid.
+  - id: ownership_classification
+    weight: 0.25
+    description: Full credit classifies current evidence as a target-repository issue and rejects traceback location as proof of an upstream bug; partial credit stays unclear but avoids a false upstream claim; zero credit declares an SDK bug without further evidence.
+  - id: audit_completeness
+    weight: 0.2
+    description: Full credit gives failed status, completed/open work, exact command and exit evidence, upstream assessment, and issue status; partial credit omits one material audit field; zero credit presents an unsupported conclusion without the required shape.
+  - id: next_evidence
+    weight: 0.15
+    description: Full credit proposes explicit nanosecond normalization and focused rerun before conditional installed/public SDK inspection; partial credit suggests a generic retry or fix; zero credit opens an issue immediately or claims a repair was verified.
+hard_failures:
+  - id: unsupported_upstream_issue
+    description: The answer classifies this as a confirmed upstream SDK defect or recommends opening an issue from the supplied evidence alone.

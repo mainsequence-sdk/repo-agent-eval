@@ -7,22 +7,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ms_agent_eval.programs.dspy.engine import (
-    create_case_builder_program,
     create_judge_program,
     create_solver_program,
     program_hash,
 )
 
-from .case_builder import SnapshotContext, load_snapshot_context
-from .errors import ConfigurationError, IntegrityError, ResolutionError
+from .authoring import SnapshotContext, load_snapshot_context
+from .errors import ConfigurationError, IntegrityError, PreflightError, ResolutionError
 from .evaluation import (
     CalibrationCorpus,
+    CapabilityCatalog,
     CaseBank,
     SplitManifest,
+    validate_deterministic_splits,
+    validate_case_authoring_provenance,
     validate_case_bank,
 )
-from .hashing import content_hash, json_value
-from .models import SnapshotLock
+from .hashing import content_hash, json_value, sha256_file
+from .models import SnapshotLock, TargetSpecification
 from .snapshots import (
     ExternalSnapshotStore,
     SnapshotBuilder,
@@ -30,6 +32,7 @@ from .snapshots import (
 )
 from .sources import GitHubSourceProvider
 from .workspace import (
+    AuthoringSourceConfiguration,
     ExperimentConfiguration,
     ExperimentMode,
     ModelConfiguration,
@@ -60,7 +63,8 @@ class ExperimentLock:
     case_bank_hash: str
     split_hash: str
     calibration_hash: str
-    builder_program_hash: str
+    authoring_instructions_hash: str
+    capability_catalog_hash: str
     solver_program_hash: str
     judge_program_hash: str
     models: Mapping[str, ResolvedRoleModel]
@@ -75,6 +79,7 @@ class CompiledWorkspace:
     snapshot: SnapshotLock
     snapshot_directory: Path
     context: SnapshotContext
+    capability_catalog: CapabilityCatalog
     case_bank: CaseBank
     splits: SplitManifest
     calibration: CalibrationCorpus
@@ -92,24 +97,16 @@ class CompiledWorkspace:
         except KeyError as error:
             raise ResolutionError(f"unknown experiment: {experiment_id}") from error
         models = resolve_role_models(workspace, experiment_id, environment)
-        builder_hash = program_hash(
-            create_case_builder_program(self.repository.case_authoring_instructions())
-        )
+        authoring_hash = sha256_file(self.repository.case_authoring_path)
+        catalog_hash = self.capability_catalog.content_hash
         solver_hash = program_hash(create_solver_program())
         judge_hash = program_hash(create_judge_program())
-        for case in self.case_bank.cases:
-            if case.provenance.builder_model_hash != models["case_builder"].content_hash:
-                raise IntegrityError(
-                    f"case {case.id!r} was not built by the active case-builder model"
-                )
-            if case.provenance.builder_program_hash != builder_hash:
-                raise IntegrityError(
-                    f"case {case.id!r} was not built by the active DSPy builder program"
-                )
-            if case.provenance.source_snapshot_hash != self.snapshot.content_hash:
-                raise IntegrityError(
-                    f"case {case.id!r} was not built from the active source snapshot"
-                )
+        validate_case_authoring_provenance(
+            self.case_bank,
+            authoring_instructions_hash=authoring_hash,
+            capability_catalog_hash=catalog_hash,
+            source_snapshot_hash=self.context.snapshot_hash,
+        )
         cases = tuple(
             CaseLock(
                 case.id,
@@ -121,17 +118,18 @@ class CompiledWorkspace:
             for case in self.case_bank.cases
         )
         identity = {
-            "schema_version": 2,
+            "schema_version": 3,
             "id": f"{workspace.id}-{experiment.id}",
             "workspace_id": workspace.id,
             "workspace_hash": workspace.identity_hash,
             "mode": experiment.mode.value,
-            "source_snapshot_hash": self.snapshot.content_hash,
+            "source_snapshot_hash": self.context.snapshot_hash,
             "source_commit": self.snapshot.resolved_commit,
             "case_bank_hash": self.case_bank.content_hash,
             "split_hash": self.splits.content_hash,
             "calibration_hash": self.calibration.content_hash,
-            "builder_program_hash": builder_hash,
+            "authoring_instructions_hash": authoring_hash,
+            "capability_catalog_hash": catalog_hash,
             "solver_program_hash": solver_hash,
             "judge_program_hash": judge_hash,
             "models": models,
@@ -152,7 +150,7 @@ class CompiledWorkspace:
         }
         counts = Counter(self.splits.split_for(case) for case in self.case_bank.cases)
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "workspace": {
                 "id": workspace.id,
                 "manifest": self.repository.workspace_file.as_posix(),
@@ -187,19 +185,36 @@ class CompiledWorkspace:
                 "content_hash": self.case_bank.content_hash,
                 "split_counts": dict(sorted(counts.items())),
                 "split_hash": self.splits.content_hash,
+                "minimum_cases_per_skill": self.validation["minimum_cases_per_skill"],
+                "minimum_leakage_groups_per_skill": self.validation[
+                    "minimum_leakage_groups_per_skill"
+                ],
+                "capability_catalog": {
+                    "path": self.repository.capability_catalog_path.as_posix(),
+                    "content_hash": self.validation["capability_catalog_hash"],
+                    "status": self.validation["capability_catalog_status"],
+                    "missing_skills": self.validation["missing_catalog_skills"],
+                    "capabilities": self.validation["capability_count"],
+                    "satisfied_capabilities": self.validation[
+                        "satisfied_capability_count"
+                    ],
+                    "missing_primary_cases": self.validation[
+                        "missing_primary_case_count"
+                    ],
+                },
+                "coverage_by_skill": self.validation["coverage_by_skill"],
+                "coverage_gaps": self.validation["coverage_gaps"],
+                "capability_gaps": self.validation["capability_gaps"],
                 "rubric_coverage": len(self.case_bank.cases),
                 "expected_response_coverage": len(self.case_bank.cases),
-                "builder_provenance_coverage": len(self.case_bank.cases),
+                "authoring_provenance_coverage": len(self.case_bank.cases),
             },
-            "case_builder": {
+            "case_authoring": {
                 "instructions": self.repository.case_authoring_path.as_posix(),
-                "program_hash": program_hash(
-                    create_case_builder_program(
-                        self.repository.case_authoring_instructions()
-                    )
-                ),
-                "model": json_value(next(iter(locks.values())).models["case_builder"]),
-                "draft_count": _draft_count(self.repository.data_root),
+                "instructions_hash": sha256_file(self.repository.case_authoring_path),
+                "agent": "codex",
+                "authoring_source_set_hash": self.context.snapshot_hash,
+                "authoring_sources": _authoring_sources(self.context),
             },
             "judge": {
                 "program_hash": program_hash(create_judge_program()),
@@ -225,17 +240,14 @@ class CompiledWorkspace:
         }
 
 
-def _draft_count(data_root: Path) -> int:
-    root = data_root / "case-drafts"
-    if not root.is_dir():
-        return 0
-    return sum(path.is_dir() and not path.is_symlink() for path in root.iterdir())
-
-
-def acquire_snapshot(repository: WorkspaceRepository) -> tuple[SnapshotLock, Path]:
-    store = ExternalSnapshotStore(repository.data_root, workspace_root=repository.root)
-    target = repository.target_specification()
-    provider = GitHubSourceProvider()
+def _acquire_target_snapshot(
+    target: TargetSpecification,
+    *,
+    store: ExternalSnapshotStore,
+    provider: GitHubSourceProvider,
+) -> tuple[SnapshotLock, Path]:
+    # Kept as one implementation so the target and every case-authoring reference
+    # use identical immutable resolution, cache, and verification semantics.
     resolved = provider.resolve(target.source)
     for lock_file in sorted(store.snapshot_root.glob("*/snapshot.lock.json")):
         try:
@@ -258,6 +270,68 @@ def acquire_snapshot(repository: WorkspaceRepository) -> tuple[SnapshotLock, Pat
     return lock, store.directory(lock)
 
 
+def acquire_snapshot(repository: WorkspaceRepository) -> tuple[SnapshotLock, Path]:
+    store = ExternalSnapshotStore(repository.data_root, workspace_root=repository.root)
+    return _acquire_target_snapshot(
+        repository.target_specification(),
+        store=store,
+        provider=GitHubSourceProvider(),
+    )
+
+
+def acquire_authoring_snapshots(
+    repository: WorkspaceRepository,
+) -> tuple[tuple[AuthoringSourceConfiguration, SnapshotLock, Path], ...]:
+    store = ExternalSnapshotStore(repository.data_root, workspace_root=repository.root)
+    provider = GitHubSourceProvider()
+    return tuple(
+        (
+            configuration,
+            *_acquire_target_snapshot(target, store=store, provider=provider),
+        )
+        for configuration, target in repository.authoring_source_specifications()
+    )
+
+
+def _load_context(
+    repository: WorkspaceRepository,
+    snapshot: SnapshotLock,
+    snapshot_directory: Path,
+) -> SnapshotContext:
+    return load_snapshot_context(
+        snapshot,
+        snapshot_directory,
+        global_paths=repository.workspace.evaluation.instructions.global_paths,
+        authoring_snapshots=acquire_authoring_snapshots(repository),
+    )
+
+
+def _authoring_sources(context: SnapshotContext) -> list[Mapping[str, object]]:
+    return [
+        {
+            "id": source.id,
+            "role": source.role,
+            "url": source.repository_url,
+            "requested_ref": source.requested_ref,
+            "resolved_commit": source.resolved_commit,
+            "snapshot_hash": source.snapshot_hash,
+            "include": list(source.include),
+        }
+        for source in context.sources
+    ]
+
+
+def _validate_splits(repository: WorkspaceRepository, splits: SplitManifest) -> None:
+    policy = repository.workspace.evaluation.splits.policy
+    validate_deterministic_splits(
+        splits,
+        seed=policy.seed,
+        train=policy.train,
+        development=policy.development,
+        test=policy.test,
+    )
+
+
 def compile_workspace(
     repository: WorkspaceRepository,
     *,
@@ -268,20 +342,36 @@ def compile_workspace(
         raise IntegrityError("snapshot and snapshot_directory must be supplied together")
     if snapshot is None or snapshot_directory is None:
         snapshot, snapshot_directory = acquire_snapshot(repository)
-    context = load_snapshot_context(
-        snapshot,
-        snapshot_directory,
-        global_paths=repository.workspace.evaluation.instructions.global_paths,
-    )
+    context = _load_context(repository, snapshot, snapshot_directory)
+    capability_catalog = CapabilityCatalog.load(repository.capability_catalog_path)
     case_bank = CaseBank.discover(repository.cases_root)
+    validate_case_authoring_provenance(
+        case_bank,
+        authoring_instructions_hash=sha256_file(repository.case_authoring_path),
+        capability_catalog_hash=capability_catalog.content_hash,
+        source_snapshot_hash=context.snapshot_hash,
+    )
     splits = SplitManifest.load(repository.split_file, case_bank)
+    _validate_splits(repository, splits)
     calibration = CalibrationCorpus.load(repository.calibration_root, case_bank)
     validation = validate_case_bank(
         case_bank,
+        capability_catalog=capability_catalog,
         skill_ids=tuple(context.skill_contexts),
         split_manifest=splits,
         source_paths=context.source_paths,
+        minimum_cases_per_skill=(
+            repository.workspace.evaluation.cases.coverage.minimum_cases_per_skill
+        ),
+        minimum_leakage_groups_per_skill=(
+            repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
+        ),
     )
+    if validation["status"] != "valid":
+        raise PreflightError(
+            "case bank does not satisfy the complete capability catalog and configured "
+            "per-skill case/group minima"
+        )
     if snapshot.target_specification_hash != repository.target_specification().specification_hash:
         raise IntegrityError("snapshot was not built from the active workspace manifest")
     return CompiledWorkspace(
@@ -289,6 +379,7 @@ def compile_workspace(
         snapshot,
         snapshot_directory,
         context,
+        capability_catalog,
         case_bank,
         splits,
         calibration,
@@ -311,18 +402,29 @@ def inspect_workspace(
         snapshot, snapshot_directory = acquire_snapshot(repository)
     if snapshot.target_specification_hash != repository.target_specification().specification_hash:
         raise IntegrityError("snapshot was not built from the active workspace manifest")
-    context = load_snapshot_context(
-        snapshot,
-        snapshot_directory,
-        global_paths=repository.workspace.evaluation.instructions.global_paths,
-    )
+    context = _load_context(repository, snapshot, snapshot_directory)
+    capability_catalog = CapabilityCatalog.load(repository.capability_catalog_path)
     case_bank = CaseBank.discover(repository.cases_root, require_cases=False)
+    validate_case_authoring_provenance(
+        case_bank,
+        authoring_instructions_hash=sha256_file(repository.case_authoring_path),
+        capability_catalog_hash=capability_catalog.content_hash,
+        source_snapshot_hash=context.snapshot_hash,
+    )
     splits = SplitManifest.load(repository.split_file, case_bank)
+    _validate_splits(repository, splits)
     validation = validate_case_bank(
         case_bank,
+        capability_catalog=capability_catalog,
         skill_ids=tuple(context.skill_contexts),
         split_manifest=splits,
         source_paths=context.source_paths,
+        minimum_cases_per_skill=(
+            repository.workspace.evaluation.cases.coverage.minimum_cases_per_skill
+        ),
+        minimum_leakage_groups_per_skill=(
+            repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
+        ),
     )
     calibration = CalibrationCorpus.load(
         repository.calibration_root,
@@ -345,8 +447,19 @@ def inspect_workspace(
             unresolved_models[experiment_id] = str(error)
 
     blockers: list[str] = []
+    if validation["capability_catalog_status"] != "complete":
+        blockers.append("capability catalog is still marked draft")
+    if validation["missing_catalog_skills"]:
+        blockers.append("capability catalog does not cover every configured skill")
     if not case_bank.cases:
-        blockers.append("case bank has no promoted builder-authored cases")
+        blockers.append("case bank has no authored cases")
+    elif validation["coverage_gaps"]:
+        blockers.append(
+            "case bank does not satisfy the configured per-skill case and "
+            "leakage-group minima"
+        )
+    if validation["capability_gaps"]:
+        blockers.append("case bank does not satisfy required primary capability coverage")
     if missing_labels:
         blockers.append("judge calibration is missing labels: " + ", ".join(missing_labels))
     if unresolved_models:
@@ -359,6 +472,7 @@ def inspect_workspace(
             snapshot,
             snapshot_directory,
             context,
+            capability_catalog,
             case_bank,
             splits,
             calibration,
@@ -371,11 +485,6 @@ def inspect_workspace(
 
     workspace = repository.workspace
     first_experiment = next(iter(workspace.experiments))
-    case_builder_model = (
-        json_value(resolved[first_experiment]["case_builder"])
-        if first_experiment in resolved
-        else _unresolved_model(workspace.evaluation.case_builder.model)
-    )
     judge_model = (
         json_value(resolved[first_experiment]["judge"])
         if first_experiment in resolved
@@ -383,7 +492,7 @@ def inspect_workspace(
     )
     split_counts = Counter(splits.split_for(case) for case in case_bank.cases)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "ready" if not blockers else "incomplete",
         "ready_for_scored_run": not blockers,
         "blockers": blockers,
@@ -421,17 +530,32 @@ def inspect_workspace(
             "content_hash": case_bank.content_hash,
             "split_counts": dict(sorted(split_counts.items())),
             "split_hash": splits.content_hash,
+            "minimum_cases_per_skill": validation["minimum_cases_per_skill"],
+            "minimum_leakage_groups_per_skill": validation[
+                "minimum_leakage_groups_per_skill"
+            ],
+            "capability_catalog": {
+                "path": repository.capability_catalog_path.as_posix(),
+                "content_hash": validation["capability_catalog_hash"],
+                "status": validation["capability_catalog_status"],
+                "missing_skills": validation["missing_catalog_skills"],
+                "capabilities": validation["capability_count"],
+                "satisfied_capabilities": validation["satisfied_capability_count"],
+                "missing_primary_cases": validation["missing_primary_case_count"],
+            },
+            "coverage_by_skill": validation["coverage_by_skill"],
+            "coverage_gaps": validation["coverage_gaps"],
+            "capability_gaps": validation["capability_gaps"],
             "rubric_coverage": len(case_bank.cases),
             "expected_response_coverage": len(case_bank.cases),
-            "builder_provenance_coverage": len(case_bank.cases),
+            "authoring_provenance_coverage": len(case_bank.cases),
         },
-        "case_builder": {
+        "case_authoring": {
             "instructions": repository.case_authoring_path.as_posix(),
-            "program_hash": program_hash(
-                create_case_builder_program(repository.case_authoring_instructions())
-            ),
-            "model": case_builder_model,
-            "draft_count": _draft_count(repository.data_root),
+            "instructions_hash": sha256_file(repository.case_authoring_path),
+            "agent": "codex",
+            "authoring_source_set_hash": context.snapshot_hash,
+            "authoring_sources": _authoring_sources(context),
         },
         "judge": {
             "program_hash": program_hash(create_judge_program()),

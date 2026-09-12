@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 6
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -7,49 +7,115 @@ workspace:
 evaluation:
   repository:
     url: https://github.com/mainsequence-sdk/mainsequence-sdk
-    ref: v4.4.5
+    ref: v8.1.9
   instructions:
     global:
       - agent_scaffold/AGENTS.md
     skills:
       directory: agent_scaffold/skills
-  case_builder:
+  case_authoring:
     instructions: case-authoring.md
-    dspy:
-      module: Predict
-      signature:
-        inputs:
-          global_context: str
-          skill_context: str
-          source_context: str
-          coverage_request: str
-          existing_case_summaries: list[str]
-        outputs:
-          case_spec: dict[str, object]
-          prompt: str
-          expected_response: str
-          rubric: dict[str, object]
-          expected_artifacts: dict[str, str]
-          source_paths: list[str]
-          leakage_group: str
-    model:
-      provider: openai_compatible
-      name: builder-model
-      base_url: http://localhost:11434/v1
-      parameters:
-        temperature: 0.2
-    budget:
-      model_calls: 100
-      tokens: 500000
-    output:
-      drafts: external
-      promotion: explicit
+    sources:
+      - id: tutorial
+        role: illustrative
+        repository:
+          url: https://github.com/mainsequence-projects/mainsequence-sdk-tutorial
+          ref: v0.1.67
+        include:
+          - README.md
+          - AGENTS.md
+          - docs/**
+          - src/**
+          - tests/**
+          - examples/**
+      - id: mainsequence-markets
+        role: project
+        repository:
+          url: https://github.com/mainsequence-projects/MainSequenceMarkets
+          ref: v1.0.14
+        include:
+          - AGENTS.md
+          - README.md
+          - pyproject.toml
+          - docs/**
+          - src/**
+          - apps/**
+          - api/**
+          - examples/**
+          - tests/**
+      - id: alpaca-connectors
+        role: project
+        repository:
+          url: https://github.com/mainsequence-projects/alpaca-connectors
+          ref: v0.1.32
+        include:
+          - AGENTS.md
+          - README.md
+          - pyproject.toml
+          - Dockerfile
+          - .mainsequence/**
+          - docs/**
+          - src/**
+          - api/**
+          - tests/**
+      - id: binance-connectors
+        role: project
+        repository:
+          url: https://github.com/mainsequence-projects/binance-connectors
+          ref: v0.1.25
+        include:
+          - AGENTS.md
+          - README.md
+          - pyproject.toml
+          - Dockerfile
+          - .mainsequence/**
+          - docs/**
+          - src/**
+          - api/**
+          - agents/**
+          - dashboards/**
+          - examples/**
+          - tests/**
+      - id: marketsanalytics
+        role: project
+        repository:
+          url: https://github.com/mainsequence-projects/marketsanalytics
+          ref: v0.1.10
+        include:
+          - README.md
+          - pyproject.toml
+          - Dockerfile
+          - .mainsequence/**
+          - docs/**
+          - src/**
+          - api/**
+          - agent_release/**
+          - tests/**
+      - id: command-center-sdk
+        role: contract_reference
+        repository:
+          url: https://github.com/mainsequence-sdk/command-center-sdk
+          ref: v0.1.21
+        include:
+          - command-center-sdk/AGENTS.md
+          - command-center-sdk/README.md
+          - command-center-sdk/contracts/**
+          - command-center-sdk/docs/backend-contracts.md
+          - command-center-sdk/docs/resources.md
+          - command-center-sdk/src/contracts/**
+          - command-center-sdk/src/resource/**
+          - command-center-sdk/agent_scaffold/skills/contracts/**
+          - command-center-sdk/agent_scaffold/skills/resource/**
   cases:
     directory: cases
+    coverage:
+      catalog: cases/coverage.yaml
+      minimum_cases_per_skill: 12
+      minimum_leakage_groups_per_skill: 6
   splits:
     file: cases/splits.yaml
     policy:
-      seed: mainsequence-sdk-v4.4.5
+      seed: mainsequence-sdk-foundations-v1
       train: 0.5
       development: 0.2
       test: 0.2

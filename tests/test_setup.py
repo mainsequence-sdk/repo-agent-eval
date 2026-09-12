@@ -119,7 +119,6 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
             "v1.0.0",
             "directory",
             "skills",
-            "builder",
             "solver",
             "judge",
             "response_only",
@@ -136,12 +135,12 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 4
+    assert repository.workspace.schema_version == 6
+    assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"
     assert repository.case_authoring_path == workspace.parent / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
     assert repository.workspace.evaluation.instructions.skills.directory == "skills"
-    assert repository.workspace.evaluation.case_builder.model.model == "builder"
-    assert repository.workspace.evaluation.case_builder.model.base_url.endswith("/v1")
+    assert repository.workspace.evaluation.case_authoring.instructions == "case-authoring.md"
     assert not (workspace.parent / ".env").exists()
     assert not (workspace.parent / ".env.example").exists()
     assert result["resolved_commit"] == "a" * 40
@@ -157,7 +156,6 @@ def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
             data_root.as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
-            "builder-manual",
             "solver-manual",
             "judge-manual",
             "1",
@@ -204,7 +202,6 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
             "v1.0.0",
             "directory",
             "skills",
-            "builder",
             "solver",
             "judge",
             "response_only",
@@ -246,7 +243,6 @@ def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) 
             "v1.0.0",
             "directory",
             "skills",
-            "builder",
             "solver",
             "judge",
             "response_only",
@@ -298,7 +294,6 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
             "v1.0.0",
             "directory",
             "skills",
-            "builder",
             "solver",
             "judge",
             "response_only",

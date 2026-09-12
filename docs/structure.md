@@ -6,17 +6,17 @@
 
 ```text
 core/
-  workspace.py             schema-v4 manifest and three-role identity
+  workspace.py             schema-v6 manifest and two runtime LLM roles
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
-  case_builder.py           external drafts and explicit promotion
+  authoring.py              immutable evidence context for Codex authoring
   evaluation.py            cases, rubrics, calibration, LLM-judge aggregation
   planning.py              generated indexes and experiment locks
   runner.py                shared evaluate/optimize DSPy path
   execution.py             digest-pinned isolated Docker target execution
   storage.py               external content-addressed artifacts
   reporting.py             current-schema summaries and regressions
-programs/dspy/              typed builder, solver, and judge programs
+programs/dspy/              typed solver and judge programs
 providers/openai_compatible/ observed DSPy LM binding
 ```
 
@@ -30,9 +30,10 @@ An experiment is deliberately small:
 ```text
 experiments/<name>/
 ├── workspace.yaml         the only framework configuration
-├── case-authoring.md      durable DSPy case-builder instructions
+├── case-authoring.md      durable Codex authoring instructions
 ├── .env.example           optional credential-name template
 ├── cases/
+│   ├── coverage.yaml      required capabilities and primary-case depth
 │   ├── splits.yaml        group-to-split assignments
 │   └── <skill>/<case>/    promoted prompts, expectations, rubrics, provenance
 └── judge-calibration/
@@ -40,13 +41,26 @@ experiments/<name>/
     └── *.md               calibration candidate responses
 ```
 
-The manifest has `evaluation` and `experiments` sections and explicitly points
-to `case-authoring.md`. The Markdown file is versioned experiment policy, not
-generated data: its exact content becomes the case-builder DSPy signature
-instructions and participates in builder provenance. Snapshot ids, skill
+The manifest has `evaluation` and `experiments` sections, explicitly points to
+`case-authoring.md`, and may declare immutable reference repositories under
+`evaluation.case_authoring.sources`. The Markdown file is versioned experiment
+policy, not generated data: its exact content participates in case-authoring
+provenance. Snapshot ids, skill
 indexes, case indexes, compatibility maps, normalized program hashes, model
 hashes, calibration hashes, and experiment locks are generated evidence—not
 additional configuration directories.
+
+`evaluation.cases.coverage` points to the capability catalog and sets additional
+readiness floors for authored cases and distinct leakage groups per skill.
+Codex decomposes every selected skill into testable capabilities, gives each
+case one primary capability and at most two supporting capabilities, and
+reviews existing packages to keep a campaign semantically diverse. Numeric
+counts cannot hide a missing semantic capability.
+
+The evaluated repository owns the solver instruction inventory. Authoring-only
+reference repositories supply tutorials, real-project examples, or external
+contracts. They are not copied into the experiment directory, and their files
+are exposed through unambiguous `references/<source-id>/...` labels.
 
 The selected skill source is exactly one of:
 
@@ -71,13 +85,13 @@ The default is `~/ms_agent_eval/<workspace-id>`:
 ```text
 blobs/sha256/              immutable requests, responses, traces, and state
 manifests/                 locks, calibration, evaluations, and run results
-snapshots/                 immutable selected repository content
-case-drafts/               validated/rejected builder packages and provenance
+snapshots/                 immutable target and reference repository content
 tmp/                       atomic staging
 ```
 
-No generated result is committed. Only explicit case promotion crosses from the
-external data plane into the experiment workspace.
+No generated result is committed. Codex-authored prompts, expected responses,
+rubrics, and provenance are experiment inputs, so their case packages are
+versioned in the workspace.
 
 ## Repository root
 

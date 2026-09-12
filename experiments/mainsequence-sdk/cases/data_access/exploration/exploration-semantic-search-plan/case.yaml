@@ -1,0 +1,21 @@
+schema_version: 4
+id: exploration-semantic-search-plan
+title: Plan evidence-first time-index data discovery
+skill: data_access/exploration
+group: exploration-semantic-catalog-discovery
+coverage:
+  primary: semantic-search
+  supporting: [structured-filtering, evidence-and-ambiguity]
+  archetype: construction
+  difficulty: easy
+prompt: prompt.md
+expected: expected/response.md
+rubric: rubric.yaml
+source_paths:
+  - agent_scaffold/skills/data_access/exploration/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
+  source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
+  case_content_hash: sha256:26a7ed92888f3950bb5199245143c936136409f110c1ff5feedd6f83f7d0e9ce

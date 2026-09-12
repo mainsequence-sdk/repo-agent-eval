@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import statistics
 from collections import Counter
@@ -17,6 +18,8 @@ from .hashing import content_hash, sha256_file
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _CONTENT_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CASE_ARCHETYPES = {"construction", "review", "diagnosis", "migration", "evidence"}
+_CASE_DIFFICULTIES = {"easy", "complex"}
 
 
 def _identifier(value: object, field: str, *, path: Path) -> str:
@@ -85,6 +88,170 @@ def _yaml(path: Path) -> Mapping[str, object]:
     except yaml.YAMLError as error:
         raise ConfigurationError(f"invalid YAML: {error}", path=path) from error
     return _mapping(payload, "document", path=path)
+
+
+@dataclass(frozen=True)
+class CapabilityRequirement:
+    id: str
+    title: str
+    description: str
+    minimum_primary_cases: int
+
+
+@dataclass(frozen=True)
+class SkillCapabilityCatalog:
+    skill: str
+    capabilities: tuple[CapabilityRequirement, ...]
+
+
+@dataclass(frozen=True)
+class CapabilityCatalog:
+    status: str
+    default_minimum_primary_cases: int
+    skills: tuple[SkillCapabilityCatalog, ...]
+    content_hash: str
+
+    @classmethod
+    def load(cls, path: Path) -> CapabilityCatalog:
+        payload = _yaml(path)
+        _reject_unknown(
+            payload,
+            {
+                "schema_version",
+                "status",
+                "default_minimum_primary_cases",
+                "skills",
+            },
+            "capability catalog",
+            path=path,
+        )
+        if payload.get("schema_version") != 1:
+            raise ConfigurationError("capability catalog schema_version must be 1", path=path)
+        status = _string(payload.get("status"), "capability catalog.status", path=path)
+        if status not in {"draft", "complete"}:
+            raise ConfigurationError(
+                "capability catalog.status must be draft or complete", path=path
+            )
+        raw_default = payload.get("default_minimum_primary_cases", 3)
+        if (
+            not isinstance(raw_default, int)
+            or isinstance(raw_default, bool)
+            or raw_default < 1
+        ):
+            raise ConfigurationError(
+                "capability catalog.default_minimum_primary_cases must be a positive integer",
+                path=path,
+            )
+        raw_skills = _mapping(payload.get("skills", {}), "capability catalog.skills", path=path)
+        skills: list[SkillCapabilityCatalog] = []
+        for raw_skill, raw_entry in sorted(raw_skills.items()):
+            skill = _skill_id(raw_skill, "capability catalog skill", path=path)
+            entry = _mapping(
+                raw_entry, f"capability catalog.skills.{skill}", path=path
+            )
+            _reject_unknown(
+                entry,
+                {"capabilities"},
+                f"capability catalog.skills.{skill}",
+                path=path,
+            )
+            capabilities: list[CapabilityRequirement] = []
+            for raw_capability in _sequence(
+                entry.get("capabilities", []),
+                f"capability catalog.skills.{skill}.capabilities",
+                path=path,
+            ):
+                item = _mapping(raw_capability, "capability", path=path)
+                _reject_unknown(
+                    item,
+                    {"id", "title", "description", "minimum_primary_cases"},
+                    "capability",
+                    path=path,
+                )
+                minimum = item.get("minimum_primary_cases", raw_default)
+                if (
+                    not isinstance(minimum, int)
+                    or isinstance(minimum, bool)
+                    or minimum < 1
+                ):
+                    raise ConfigurationError(
+                        "capability.minimum_primary_cases must be a positive integer",
+                        path=path,
+                    )
+                capabilities.append(
+                    CapabilityRequirement(
+                        _identifier(item.get("id"), "capability.id", path=path),
+                        _string(item.get("title"), "capability.title", path=path),
+                        _string(
+                            item.get("description"),
+                            "capability.description",
+                            path=path,
+                        ),
+                        minimum,
+                    )
+                )
+            capability_ids = [item.id for item in capabilities]
+            if len(capability_ids) != len(set(capability_ids)):
+                raise ConfigurationError(
+                    f"capability ids must be unique within skill {skill!r}", path=path
+                )
+            if status == "complete" and not capabilities:
+                raise ConfigurationError(
+                    f"complete capability catalog has no capabilities for skill {skill!r}",
+                    path=path,
+                )
+            skills.append(SkillCapabilityCatalog(skill, tuple(capabilities)))
+        return cls(status, raw_default, tuple(skills), sha256_file(path))
+
+    def requirements_for(self, skill: str) -> tuple[CapabilityRequirement, ...] | None:
+        return next(
+            (item.capabilities for item in self.skills if item.skill == skill),
+            None,
+        )
+
+
+@dataclass(frozen=True)
+class CaseCoverage:
+    primary: str
+    supporting: tuple[str, ...]
+    archetype: str
+    difficulty: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object], *, path: Path) -> CaseCoverage:
+        _reject_unknown(
+            payload,
+            {"primary", "supporting", "archetype", "difficulty"},
+            "case.coverage",
+            path=path,
+        )
+        primary = _identifier(payload.get("primary"), "coverage.primary", path=path)
+        supporting = tuple(
+            _identifier(item, "coverage.supporting[]", path=path)
+            for item in _sequence(
+                payload.get("supporting", []), "coverage.supporting", path=path
+            )
+        )
+        if len(supporting) > 2:
+            raise ConfigurationError(
+                "coverage.supporting may contain at most two capabilities", path=path
+            )
+        if len(supporting) != len(set(supporting)) or primary in supporting:
+            raise ConfigurationError(
+                "coverage capabilities must be unique and primary cannot be supporting",
+                path=path,
+            )
+        archetype = _identifier(payload.get("archetype"), "coverage.archetype", path=path)
+        if archetype not in _CASE_ARCHETYPES:
+            raise ConfigurationError(
+                f"coverage.archetype must be one of {sorted(_CASE_ARCHETYPES)}", path=path
+            )
+        difficulty = _identifier(payload.get("difficulty"), "coverage.difficulty", path=path)
+        if difficulty not in _CASE_DIFFICULTIES:
+            raise ConfigurationError(
+                f"coverage.difficulty must be one of {sorted(_CASE_DIFFICULTIES)}", path=path
+            )
+        return cls(primary, supporting, archetype, difficulty)
 
 
 @dataclass(frozen=True)
@@ -187,11 +354,11 @@ class Rubric:
 
 @dataclass(frozen=True)
 class CaseProvenance:
-    builder_model_hash: str
-    builder_program_hash: str
+    authoring_agent: str
+    authoring_instructions_hash: str
+    capability_catalog_hash: str
     source_snapshot_hash: str
-    generation_request_hash: str
-    draft_content_hash: str
+    case_content_hash: str
 
     @classmethod
     def from_mapping(
@@ -199,42 +366,55 @@ class CaseProvenance:
         payload: Mapping[str, object],
         *,
         path: Path,
-        allow_pending_draft_hash: bool = False,
+        allow_pending_case_hash: bool = False,
     ) -> CaseProvenance:
         _reject_unknown(
             payload,
             {
-                "builder_model_hash",
-                "builder_program_hash",
+                "authoring_agent",
+                "authoring_instructions_hash",
+                "capability_catalog_hash",
                 "source_snapshot_hash",
-                "generation_request_hash",
-                "draft_content_hash",
+                "case_content_hash",
             },
             "case.provenance",
             path=path,
         )
-        values = {
-            field: _content_hash_value(payload.get(field), f"provenance.{field}", path=path)
-            for field in (
-                "builder_model_hash",
-                "builder_program_hash",
-                "source_snapshot_hash",
-                "generation_request_hash",
+        authoring_agent = _string(
+            payload.get("authoring_agent"), "provenance.authoring_agent", path=path
+        )
+        if authoring_agent != "codex":
+            raise ConfigurationError(
+                "provenance.authoring_agent must be codex", path=path
             )
-        }
-        raw_draft_hash = payload.get("draft_content_hash")
-        if allow_pending_draft_hash and raw_draft_hash == "pending":
-            draft_hash = "pending"
+        instructions_hash = _content_hash_value(
+            payload.get("authoring_instructions_hash"),
+            "provenance.authoring_instructions_hash",
+            path=path,
+        )
+        catalog_hash = _content_hash_value(
+            payload.get("capability_catalog_hash"),
+            "provenance.capability_catalog_hash",
+            path=path,
+        )
+        snapshot_hash = _content_hash_value(
+            payload.get("source_snapshot_hash"),
+            "provenance.source_snapshot_hash",
+            path=path,
+        )
+        raw_case_hash = payload.get("case_content_hash")
+        if allow_pending_case_hash and raw_case_hash == "pending":
+            case_hash = "pending"
         else:
-            draft_hash = _content_hash_value(
-                raw_draft_hash, "provenance.draft_content_hash", path=path
+            case_hash = _content_hash_value(
+                raw_case_hash, "provenance.case_content_hash", path=path
             )
         return cls(
-            values["builder_model_hash"],
-            values["builder_program_hash"],
-            values["source_snapshot_hash"],
-            values["generation_request_hash"],
-            draft_hash,
+            authoring_agent,
+            instructions_hash,
+            catalog_hash,
+            snapshot_hash,
+            case_hash,
         )
 
 
@@ -252,6 +432,7 @@ class CaseDefinition:
     prompt: str
     expected_response: str
     rubric: Rubric
+    coverage: CaseCoverage
     source_paths: tuple[str, ...]
     provenance: CaseProvenance
     content_hash: str
@@ -269,6 +450,7 @@ class CaseDefinition:
                 "title",
                 "skill",
                 "group",
+                "coverage",
                 "prompt",
                 "expected",
                 "rubric",
@@ -279,9 +461,9 @@ class CaseDefinition:
             "case",
             path=case_file,
         )
-        if payload.get("schema_version") != 2:
+        if payload.get("schema_version") != 4:
             raise ConfigurationError(
-                "case schema_version must be 2; legacy cases are not supported", path=case_file
+                "case schema_version must be 4; legacy cases are not supported", path=case_file
             )
         prompt_path = _relative_file(
             directory, payload.get("prompt"), "case.prompt", path=case_file
@@ -317,14 +499,19 @@ class CaseDefinition:
         provenance = CaseProvenance.from_mapping(
             _mapping(payload.get("provenance"), "case.provenance", path=case_file),
             path=case_file,
-            allow_pending_draft_hash=not verify_provenance,
+            allow_pending_case_hash=not verify_provenance,
+        )
+        coverage = CaseCoverage.from_mapping(
+            _mapping(payload.get("coverage"), "case.coverage", path=case_file),
+            path=case_file,
         )
         identity = {
-            "schema_version": 2,
+            "schema_version": 4,
             "id": _identifier(payload.get("id"), "case.id", path=case_file),
             "title": _string(payload.get("title"), "case.title", path=case_file),
             "skill": _skill_id(payload.get("skill"), "case.skill", path=case_file),
             "group": _identifier(payload.get("group"), "case.group", path=case_file),
+            "coverage": coverage,
             "prompt_hash": sha256_file(prompt_path),
             "expected_hash": sha256_file(expected_path),
             "rubric_hash": sha256_file(rubric_path),
@@ -332,10 +519,10 @@ class CaseDefinition:
             "source_paths": source_paths,
         }
         package_hash = content_hash(identity)
-        if verify_provenance and provenance.draft_content_hash != package_hash:
+        if verify_provenance and provenance.case_content_hash != package_hash:
             raise IntegrityError(
-                f"case {identity['id']!r} changed after builder promotion: "
-                f"{provenance.draft_content_hash} != {package_hash}"
+                f"case {identity['id']!r} changed after authoring: "
+                f"{provenance.case_content_hash} != {package_hash}"
             )
         return cls(
             id=identity["id"],
@@ -350,6 +537,7 @@ class CaseDefinition:
             prompt=prompt_path.read_text(encoding="utf-8"),
             expected_response=expected_path.read_text(encoding="utf-8"),
             rubric=Rubric.load(rubric_path),
+            coverage=coverage,
             source_paths=source_paths,
             provenance=provenance,
             content_hash=package_hash,
@@ -456,6 +644,60 @@ class SplitManifest:
 
     def split_for(self, case: CaseDefinition) -> str:
         return dict((item.group, item.split) for item in self.assignments)[case.group]
+
+
+def deterministic_group_split(
+    group: str,
+    *,
+    seed: str,
+    train: float,
+    development: float,
+    test: float,
+) -> str:
+    digest = hashlib.sha256(f"{seed}:{group}".encode()).digest()
+    point = int.from_bytes(digest[:8], "big") / 2**64
+    if point < train:
+        return "train"
+    if point < train + development:
+        return "development"
+    if point < train + development + test:
+        return "test"
+    return "challenge"
+
+
+def validate_deterministic_splits(
+    split_manifest: SplitManifest,
+    *,
+    seed: str,
+    train: float,
+    development: float,
+    test: float,
+) -> None:
+    mismatches = {
+        item.group: {
+            "actual": item.split,
+            "expected": deterministic_group_split(
+                item.group,
+                seed=seed,
+                train=train,
+                development=development,
+                test=test,
+            ),
+        }
+        for item in split_manifest.assignments
+        if item.split
+        != deterministic_group_split(
+            item.group,
+            seed=seed,
+            train=train,
+            development=development,
+            test=test,
+        )
+    }
+    if mismatches:
+        raise IntegrityError(
+            f"split assignments do not match the configured deterministic policy: {mismatches}"
+        )
 
 
 @dataclass(frozen=True)
@@ -763,9 +1005,12 @@ def calibrate_judge(
 def validate_case_bank(
     case_bank: CaseBank,
     *,
+    capability_catalog: CapabilityCatalog,
     skill_ids: Sequence[str],
     split_manifest: SplitManifest,
     source_paths: Sequence[str],
+    minimum_cases_per_skill: int = 8,
+    minimum_leakage_groups_per_skill: int = 4,
 ) -> dict[str, object]:
     known_skills = set(skill_ids)
     known_sources = set(source_paths)
@@ -777,14 +1022,135 @@ def validate_case_bank(
         raise IntegrityError(f"cases reference unknown skills: {unknown_skills}")
     if missing_sources:
         raise IntegrityError(f"cases reference paths absent from snapshot: {missing_sources}")
+    catalog_skills = {item.skill for item in capability_catalog.skills}
+    extra_catalog_skills = sorted(catalog_skills - known_skills)
+    if extra_catalog_skills:
+        raise IntegrityError(
+            f"capability catalog references unknown skills: {extra_catalog_skills}"
+        )
+    missing_catalog_skills = sorted(known_skills - catalog_skills)
+    requirements = {
+        item.skill: {capability.id: capability for capability in item.capabilities}
+        for item in capability_catalog.skills
+    }
+    for case in case_bank.cases:
+        known_capabilities = requirements.get(case.skill)
+        if known_capabilities is None:
+            raise IntegrityError(
+                f"case {case.id!r} belongs to a skill absent from the capability catalog"
+            )
+        referenced = (case.coverage.primary, *case.coverage.supporting)
+        unknown_capabilities = sorted(set(referenced) - known_capabilities.keys())
+        if unknown_capabilities:
+            raise IntegrityError(
+                f"case {case.id!r} references unknown capabilities: {unknown_capabilities}"
+            )
     counts = Counter(split_manifest.split_for(case) for case in case_bank.cases)
+    coverage_by_skill = []
+    coverage_gaps = []
+    capability_gaps = []
+    for skill_id in skill_ids:
+        cases = tuple(case for case in case_bank.cases if case.skill == skill_id)
+        group_count = len({case.group for case in cases})
+        primary_counts = Counter(case.coverage.primary for case in cases)
+        supporting_counts = Counter(
+            capability for case in cases for capability in case.coverage.supporting
+        )
+        capability_coverage = []
+        for requirement in requirements.get(skill_id, {}).values():
+            primary_count = primary_counts[requirement.id]
+            capability_coverage.append(
+                {
+                    "capability": requirement.id,
+                    "primary_cases": primary_count,
+                    "supporting_cases": supporting_counts[requirement.id],
+                    "required_primary_cases": requirement.minimum_primary_cases,
+                }
+            )
+            if primary_count < requirement.minimum_primary_cases:
+                capability_gaps.append(
+                    {
+                        "skill": skill_id,
+                        "capability": requirement.id,
+                        "primary_cases": primary_count,
+                        "required_primary_cases": requirement.minimum_primary_cases,
+                        "missing_primary_cases": (
+                            requirement.minimum_primary_cases - primary_count
+                        ),
+                    }
+                )
+        coverage_by_skill.append(
+            {
+                "skill": skill_id,
+                "cases": len(cases),
+                "leakage_groups": group_count,
+                "capabilities": capability_coverage,
+            }
+        )
+        if len(cases) < minimum_cases_per_skill or group_count < minimum_leakage_groups_per_skill:
+            coverage_gaps.append(
+                {
+                    "skill": skill_id,
+                    "cases": len(cases),
+                    "required_cases": minimum_cases_per_skill,
+                    "leakage_groups": group_count,
+                    "required_leakage_groups": minimum_leakage_groups_per_skill,
+                }
+            )
     return {
-        "status": "valid",
+        "status": (
+            "valid"
+            if capability_catalog.status == "complete"
+            and not missing_catalog_skills
+            and not coverage_gaps
+            and not capability_gaps
+            else "incomplete"
+        ),
         "case_count": len(case_bank.cases),
         "case_bank_hash": case_bank.content_hash,
         "split_hash": split_manifest.content_hash,
         "split_counts": dict(sorted(counts.items())),
+        "minimum_cases_per_skill": minimum_cases_per_skill,
+        "minimum_leakage_groups_per_skill": minimum_leakage_groups_per_skill,
+        "capability_catalog_hash": capability_catalog.content_hash,
+        "capability_catalog_status": capability_catalog.status,
+        "missing_catalog_skills": missing_catalog_skills,
+        "capability_count": sum(len(item.capabilities) for item in capability_catalog.skills),
+        "satisfied_capability_count": (
+            sum(len(item.capabilities) for item in capability_catalog.skills)
+            - len(capability_gaps)
+        ),
+        "missing_primary_case_count": sum(
+            int(item["missing_primary_cases"]) for item in capability_gaps
+        ),
+        "coverage_by_skill": coverage_by_skill,
+        "coverage_gaps": coverage_gaps,
+        "capability_gaps": capability_gaps,
         "rubric_coverage": len(case_bank.cases),
         "expected_response_coverage": len(case_bank.cases),
-        "builder_provenance_coverage": len(case_bank.cases),
+        "authoring_provenance_coverage": len(case_bank.cases),
     }
+
+
+def validate_case_authoring_provenance(
+    case_bank: CaseBank,
+    *,
+    authoring_instructions_hash: str,
+    capability_catalog_hash: str,
+    source_snapshot_hash: str,
+) -> None:
+    """Reject cases authored under a different policy or immutable source set."""
+
+    for case in case_bank.cases:
+        if case.provenance.authoring_instructions_hash != authoring_instructions_hash:
+            raise IntegrityError(
+                f"case {case.id!r} was not authored under the active instructions"
+            )
+        if case.provenance.capability_catalog_hash != capability_catalog_hash:
+            raise IntegrityError(
+                f"case {case.id!r} was not classified under the active capability catalog"
+            )
+        if case.provenance.source_snapshot_hash != source_snapshot_hash:
+            raise IntegrityError(
+                f"case {case.id!r} was not authored from the active authoring source set"
+            )

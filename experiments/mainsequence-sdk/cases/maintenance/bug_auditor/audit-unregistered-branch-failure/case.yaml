@@ -1,0 +1,22 @@
+schema_version: 4
+id: audit-unregistered-branch-failure
+title: Diagnose an unregistered branch platform blocker
+skill: maintenance/bug_auditor
+group: audit-git-context-environment-blocker
+coverage:
+  primary: ownership-classification
+  supporting: [root-cause-localization, uncertainty-and-next-actions]
+  archetype: diagnosis
+  difficulty: complex
+prompt: prompt.md
+expected: expected/response.md
+rubric: rubric.yaml
+source_paths:
+  - agent_scaffold/skills/maintenance/bug_auditor/SKILL.md
+  - agent_scaffold/skills/sdk_code_repository_execution/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:4e16278cb289ce111ed72616c99b322c8f6312bcb3a45d4019cce695b3f386fb
+  capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
+  source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
+  case_content_hash: sha256:5a5ea9cc13f1085dd9521379b88e174b84b6aefe3caa76f26c5b8ce80363b26d

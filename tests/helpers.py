@@ -9,7 +9,7 @@ import yaml
 from litellm import ModelResponse
 
 from ms_agent_eval.core.evaluation import CaseDefinition
-from ms_agent_eval.core.hashing import json_value
+from ms_agent_eval.core.hashing import json_value, sha256_file
 from ms_agent_eval.core.models import SnapshotLock
 from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.snapshots import ExternalSnapshotStore, SnapshotBuilder
@@ -19,14 +19,14 @@ from ms_agent_eval.core.workspace import WorkspaceRepository
 
 CASE_AUTHORING_INSTRUCTIONS = """# Test case-authoring policy
 
-Build one grounded case from the supplied immutable instruction and source context.
-Return the complete typed output and design the rubric for semantic evaluation by the LLM judge.
+Author grounded cases from immutable instruction and source context.
+Write schema-v4 packages and design rubrics for semantic evaluation by the LLM judge.
 """
 
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 4,
+        "schema_version": 6,
         "workspace": {"id": "synthetic-evaluation"},
         "evaluation": {
             "repository": {
@@ -37,40 +37,17 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "global": ["AGENTS.md"],
                 "skills": dict({"directory": "skills"} if skills is None else skills),
             },
-            "case_builder": {
+            "case_authoring": {
                 "instructions": "case-authoring.md",
-                "dspy": {
-                    "module": "Predict",
-                    "signature": {
-                        "inputs": {
-                            "global_context": "str",
-                            "skill_context": "str",
-                            "source_context": "str",
-                            "coverage_request": "str",
-                            "existing_case_summaries": "list[str]",
-                        },
-                        "outputs": {
-                            "case_spec": "dict[str, object]",
-                            "prompt": "str",
-                            "expected_response": "str",
-                            "rubric": "dict[str, object]",
-                            "expected_artifacts": "dict[str, str]",
-                            "source_paths": "list[str]",
-                            "leakage_group": "str",
-                        },
-                    },
-                },
-                "model": {
-                    "provider": "openai_compatible",
-                    "name": "builder",
-                    "base_url": "http://localhost:8000/v1",
-                    "api_key_env": "TEST_API_KEY",
-                    "parameters": {"temperature": 0.0},
-                },
-                "budget": {"model_calls": 20, "tokens": 10000},
-                "output": {"drafts": "external", "promotion": "explicit"},
             },
-            "cases": {"directory": "cases"},
+            "cases": {
+                "directory": "cases",
+                "coverage": {
+                    "catalog": "cases/coverage.yaml",
+                    "minimum_cases_per_skill": 1,
+                    "minimum_leakage_groups_per_skill": 1,
+                },
+            },
             "splits": {"file": "cases/splits.yaml"},
             "judge": {
                 "dspy": {
@@ -160,6 +137,29 @@ def create_workspace(root: Path) -> WorkspaceRepository:
         CASE_AUTHORING_INSTRUCTIONS, encoding="utf-8"
     )
     (root / "cases").mkdir()
+    (root / "cases" / "coverage.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "status": "complete",
+                "default_minimum_primary_cases": 1,
+                "skills": {
+                    skill: {
+                        "capabilities": [
+                            {
+                                "id": "correctness",
+                                "title": "Correctness",
+                                "description": f"Apply the {skill} skill correctly.",
+                            }
+                        ]
+                    }
+                    for skill in ("alpha", "beta", "gamma")
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     (root / "judge-calibration").mkdir()
     return WorkspaceRepository.from_file(root / "workspace.yaml")
 
@@ -198,9 +198,9 @@ def create_case(
     skill: str,
     group: str,
     source_path: str,
-    builder_model_hash: str = f"sha256:{'1' * 64}",
-    builder_program_hash: str = f"sha256:{'2' * 64}",
+    authoring_instructions_hash: str = f"sha256:{'1' * 64}",
     source_snapshot_hash: str = f"sha256:{'3' * 64}",
+    capability_catalog_hash: str | None = None,
 ) -> CaseDefinition:
     directory = cases_root / skill / case_id
     expected = directory / "expected"
@@ -225,27 +225,36 @@ def create_case(
         encoding="utf-8",
     )
     payload = {
-        "schema_version": 2,
+        "schema_version": 4,
         "id": case_id,
         "title": f"Case {case_id}",
         "skill": skill,
         "group": group,
+        "coverage": {
+            "primary": "correctness",
+            "supporting": [],
+            "archetype": "construction",
+            "difficulty": "easy",
+        },
         "prompt": "prompt.md",
         "expected": "expected/response.md",
         "rubric": "rubric.yaml",
         "source_paths": [source_path],
         "provenance": {
-            "builder_model_hash": builder_model_hash,
-            "builder_program_hash": builder_program_hash,
+            "authoring_agent": "codex",
+            "authoring_instructions_hash": authoring_instructions_hash,
+            "capability_catalog_hash": (
+                capability_catalog_hash
+                or sha256_file(cases_root / "coverage.yaml")
+            ),
             "source_snapshot_hash": source_snapshot_hash,
-            "generation_request_hash": f"sha256:{'4' * 64}",
-            "draft_content_hash": "pending",
+            "case_content_hash": "pending",
         },
     }
     case_file = directory / "case.yaml"
     case_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     package_hash = CaseDefinition.load(directory, verify_provenance=False).content_hash
-    payload["provenance"]["draft_content_hash"] = package_hash  # type: ignore[index]
+    payload["provenance"]["case_content_hash"] = package_hash  # type: ignore[index]
     case_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return CaseDefinition.load(directory)
 
@@ -253,8 +262,7 @@ def create_case(
 def seed_cases_and_calibration(
     repository: WorkspaceRepository,
     *,
-    builder_model_hash: str = f"sha256:{'1' * 64}",
-    builder_program_hash: str = f"sha256:{'2' * 64}",
+    authoring_instructions_hash: str = f"sha256:{'1' * 64}",
     source_snapshot_hash: str = f"sha256:{'3' * 64}",
 ) -> None:
     cases = [
@@ -262,30 +270,27 @@ def seed_cases_and_calibration(
             repository.cases_root,
             case_id="case-train",
             skill="alpha",
-            group="group-train",
+            group="group-0",
             source_path="skills/alpha/SKILL.md",
-            builder_model_hash=builder_model_hash,
-            builder_program_hash=builder_program_hash,
+            authoring_instructions_hash=authoring_instructions_hash,
             source_snapshot_hash=source_snapshot_hash,
         ),
         create_case(
             repository.cases_root,
             case_id="case-development",
             skill="beta",
-            group="group-development",
+            group="group-17",
             source_path="skills/beta/SKILL.md",
-            builder_model_hash=builder_model_hash,
-            builder_program_hash=builder_program_hash,
+            authoring_instructions_hash=authoring_instructions_hash,
             source_snapshot_hash=source_snapshot_hash,
         ),
         create_case(
             repository.cases_root,
             case_id="case-test",
             skill="gamma",
-            group="group-test",
+            group="group-1",
             source_path="skills/gamma/SKILL.md",
-            builder_model_hash=builder_model_hash,
-            builder_program_hash=builder_program_hash,
+            authoring_instructions_hash=authoring_instructions_hash,
             source_snapshot_hash=source_snapshot_hash,
         ),
     ]
@@ -294,9 +299,9 @@ def seed_cases_and_calibration(
             {
                 "schema_version": 2,
                 "groups": {
-                    "group-train": "train",
-                    "group-development": "development",
-                    "group-test": "test",
+                    "group-0": "train",
+                    "group-17": "development",
+                    "group-1": "test",
                 },
             },
             sort_keys=False,
@@ -376,21 +381,5 @@ def judge_response(score: float) -> str:
         f'{{"correctness": {score}}}\n\n'
         "[[ ## hard_failures ## ]]\n[]\n\n"
         "[[ ## feedback ## ]]\nGrounded feedback.\n\n"
-        "[[ ## completed ## ]]"
-    )
-
-
-def builder_response(case_id: str = "built-case") -> str:
-    return (
-        "[[ ## case_spec ## ]]\n"
-        f'{{"id": "{case_id}", "title": "Built case", "skill": "alpha"}}\n\n'
-        "[[ ## prompt ## ]]\nExplain alpha.\n\n"
-        "[[ ## expected_response ## ]]\nUse alpha precisely.\n\n"
-        "[[ ## rubric ## ]]\n"
-        '{"passing_score": 0.8, "criteria": [{"id": "correctness", '
-        '"weight": 1.0, "description": "Correct use."}], "hard_failures": []}\n\n'
-        "[[ ## expected_artifacts ## ]]\n{}\n\n"
-        "[[ ## source_paths ## ]]\n[" + '"skills/alpha/SKILL.md"' + "]\n\n"
-        "[[ ## leakage_group ## ]]\nalpha-concept\n\n"
         "[[ ## completed ## ]]"
     )

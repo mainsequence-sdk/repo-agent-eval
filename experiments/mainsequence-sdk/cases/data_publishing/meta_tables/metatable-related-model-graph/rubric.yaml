@@ -1,0 +1,17 @@
+passing_score: 0.75
+criteria:
+  - id: grain_and_keys
+    weight: 0.35
+    description: Full credit models one Account row per account and a composite account/instrument Position key that rejects duplicates; partial credit has correct entities with an incomplete key; zero credit uses a time-index updater or leaves the Position grain unenforced.
+  - id: relationship_lifecycle
+    weight: 0.25
+    description: Full credit uses a SQLAlchemy foreign key to Account with cascade justified by the stated lifecycle; partial credit creates the relationship but omits or weakly explains delete behavior; zero credit stores an unrelated string with no relationship.
+  - id: identity_and_metadata
+    weight: 0.25
+    description: Full credit uses repository-prefixed physical names, explicit logical identifier/namespace/descriptions, and label/description info on every mapped column; partial credit includes most metadata; zero credit uses bare unstable names or omits contract metadata.
+  - id: provider_boundary
+    weight: 0.15
+    description: Full credit keeps both models in one provider graph and routes revision work to migrations without direct registration; partial credit mentions migrations but not graph scope; zero credit recommends application-time registration.
+hard_failures:
+  - id: direct_platform_registration
+    description: The answer uses direct register calls as the normal path for these platform-managed models.

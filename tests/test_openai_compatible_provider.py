@@ -105,6 +105,19 @@ def test_provider_uses_openai_route_and_redacts_failed_call_secret(tmp_path: Pat
     assert secret not in json.dumps(failure)
 
 
+def test_provider_supports_an_unauthenticated_openai_compatible_server(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    observer = ModelCallObserver(store, role="solver")
+
+    lm = create_observed_lm(_model(), observer)
+
+    assert lm.model == "openai/solver-model"
+    assert "api_key" not in lm.observed_parameters
+    assert "not-needed" not in repr(lm)
+
+
 def test_provider_redacts_secret_before_exception_leaves_lm(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     store = FilesystemArtifactStore(tmp_path / "artifacts")
     observer = ModelCallObserver(store, role="solver")
