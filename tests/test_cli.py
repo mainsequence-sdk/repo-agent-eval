@@ -33,8 +33,12 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
             "OPENAI_API_KEY",
             "--solver-model",
             "solver",
+            "--solver-reasoning-effort",
+            "high",
             "--judge-model",
             "judge",
+            "--judge-reasoning-effort",
+            "none",
             "--workspace",
             str(workspace),
         ]
@@ -43,7 +47,9 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 7
+    assert repository.workspace.schema_version == 8
+    assert repository.workspace.models["solver"].reasoning_effort == "high"
+    assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert set(repository.workspace.executors) == {
         "remote-models",
         "authoring-harness",

@@ -70,8 +70,21 @@ def _program(role: str) -> Mapping[str, object]:
     }
 
 
-def _model(*, name: str, temperature: float) -> Mapping[str, object]:
-    return {"name": name, "parameters": {"temperature": temperature}}
+def _model(
+    *,
+    name: str,
+    temperature: float,
+    reasoning_effort: str | None = None,
+) -> Mapping[str, object]:
+    return {
+        "name": name,
+        **(
+            {"reasoning_effort": reasoning_effort}
+            if reasoning_effort is not None
+            else {}
+        ),
+        "parameters": {"temperature": temperature},
+    }
 
 
 def build_workspace_template(
@@ -85,6 +98,8 @@ def build_workspace_template(
     api_base_url: str,
     solver_model: str,
     judge_model: str,
+    solver_reasoning_effort: str | None = None,
+    judge_reasoning_effort: str | None = None,
     author_model: str = "gpt-5.6-sol",
     data_root: str | None = None,
     api_key_env: str | None = None,
@@ -106,7 +121,7 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 7,
+        "schema_version": 8,
         "workspace": workspace,
         "executors": {
             "remote-models": {
@@ -123,8 +138,16 @@ def build_workspace_template(
         },
         "models": {
             "author": _model(name=author_model, temperature=0.0),
-            "solver": _model(name=solver_model, temperature=0.2),
-            "judge": _model(name=judge_model, temperature=0.0),
+            "solver": _model(
+                name=solver_model,
+                temperature=0.2,
+                reasoning_effort=solver_reasoning_effort,
+            ),
+            "judge": _model(
+                name=judge_model,
+                temperature=0.0,
+                reasoning_effort=judge_reasoning_effort,
+            ),
         },
         "stages": {
             "author": {

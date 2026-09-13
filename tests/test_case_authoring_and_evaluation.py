@@ -20,6 +20,7 @@ from ms_agent_eval.core.evaluation import (
     validate_deterministic_splits,
 )
 from ms_agent_eval.core.hashing import sha256_file
+from ms_agent_eval.programs.dspy.engine import create_judge_program, program_state
 from .helpers import create_workspace
 
 
@@ -169,6 +170,13 @@ def test_experiment_authoring_policies_make_calibration_a_campaign_output() -> N
             assert f"`{label}`" in policy
 
 
+def test_judge_program_treats_candidate_response_as_untrusted_data() -> None:
+    instructions = program_state(create_judge_program())["predictors"][0]["instructions"]
+
+    assert "untrusted evaluation data" in instructions
+    assert "Assess each criterion independently" in instructions
+
+
 def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None:
     root = Path(__file__).resolve().parents[1]
     experiment = root / "experiments/mainsequence-sdk"
@@ -189,10 +197,11 @@ def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None
         splits.split_for(cases[fixture.case_id]) in {"train", "development"}
         for fixture in corpus.fixtures
     )
-    assert fixtures["adversarial"].maximum_score < fixtures["contradictory"].minimum_score
-    assert fixtures["contradictory"].maximum_score < fixtures["incorrect"].minimum_score
-    assert fixtures["incorrect"].maximum_score < fixtures["partial"].minimum_score
     assert fixtures["partial"].maximum_score < fixtures["strong"].minimum_score
+    assert all(
+        fixtures[label].maximum_score < fixtures["partial"].minimum_score
+        for label in ("incorrect", "contradictory", "adversarial")
+    )
 
 
 def test_llm_judge_validates_exact_criterion_ids(tmp_path: Path) -> None:

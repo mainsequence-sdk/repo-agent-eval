@@ -1,4 +1,4 @@
-"""Workspace schema-v7 configuration and readiness tests."""
+"""Workspace schema-v8 configuration and readiness tests."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from .helpers import (
 )
 
 
-def test_schema_v7_rejects_case_authoring_model_configuration() -> None:
+def test_schema_v8_rejects_case_authoring_model_configuration() -> None:
     payload = workspace_payload()
     payload["evaluation"]["case_authoring"]["model"] = {"name": "builder"}  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="unknown fields"):
@@ -117,6 +117,40 @@ def test_configured_llm_roles_may_share_a_model_but_keep_distinct_stage_roles() 
     workspace = WorkspaceConfiguration.from_mapping(payload)
     shared = resolve_role_models(workspace, "baseline")
     assert shared["solver"].model == shared["judge"].model == "solver"
+
+
+def test_reasoning_effort_is_a_first_class_hashed_model_field() -> None:
+    payload = workspace_payload()
+    payload["models"]["solver"]["reasoning_effort"] = "high"  # type: ignore[index]
+
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+    resolved = resolve_role_models(workspace, "baseline")["solver"]
+
+    assert workspace.models["solver"].reasoning_effort == "high"
+    assert resolved.reasoning_effort == "high"
+    assert "reasoning_effort" not in resolved.parameters
+
+    default_hash = resolve_role_models(
+        WorkspaceConfiguration.from_mapping(workspace_payload()), "baseline"
+    )["solver"].content_hash
+    assert resolved.content_hash != default_hash
+
+
+@pytest.mark.parametrize("effort", ("off", "extreme", 3))
+def test_reasoning_effort_rejects_invalid_values(effort: object) -> None:
+    payload = workspace_payload()
+    payload["models"]["solver"]["reasoning_effort"] = effort  # type: ignore[index]
+
+    with pytest.raises(ConfigurationError, match="reasoning_effort"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_reasoning_effort_is_rejected_inside_generic_parameters() -> None:
+    payload = workspace_payload()
+    payload["models"]["solver"]["parameters"]["reasoning_effort"] = "high"  # type: ignore[index]
+
+    with pytest.raises(ConfigurationError, match="first-class model field"):
+        WorkspaceConfiguration.from_mapping(payload)
 
 
 def test_configured_api_key_reference_is_required_only_at_request_time() -> None:

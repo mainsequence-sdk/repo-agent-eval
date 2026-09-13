@@ -20,6 +20,7 @@ from .snapshots import (
 )
 from .sources import GitHubSourceProvider
 from .workspace import (
+    REASONING_EFFORTS,
     WorkspaceConfiguration,
     WorkspaceRepository,
     validate_external_data_root,
@@ -105,6 +106,27 @@ def _models(
             value = prompt.text(f"Enter the {role} model id")
         selected.append(value)
     return selected[0], selected[1]
+
+
+def _reasoning_effort(prompt: PromptBackend, role: str) -> str | None:
+    labels = {
+        "none": "None",
+        "minimal": "Minimal",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Extra high",
+        "max": "Maximum",
+        "ultra": "Ultra",
+    }
+    value = prompt.select(
+        f"Select the {role} reasoning effort",
+        (
+            Choice("Provider/model default", "__default__"),
+            *(Choice(labels[item], item) for item in REASONING_EFFORTS),
+        ),
+    )
+    return None if value == "__default__" else value
 
 
 def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
@@ -289,6 +311,8 @@ def run_guided_setup(
             base_url=api_base_url,
             api_key=api_key,
         )
+        solver_reasoning_effort = _reasoning_effort(prompt, "solver")
+        judge_reasoning_effort = _reasoning_effort(prompt, "judge")
         baseline_repetitions = _positive_integer(
             prompt.text("Baseline repetitions", default="1"), "baseline repetitions"
         )
@@ -335,6 +359,8 @@ def run_guided_setup(
             api_key_env=api_key_env,
             solver_model=solver_model,
             judge_model=judge_model,
+            solver_reasoning_effort=solver_reasoning_effort,
+            judge_reasoning_effort=judge_reasoning_effort,
             author_model="gpt-5.6-sol",
             runtime_type=runtime_type,
             runtime_python=runtime_python,
@@ -374,6 +400,11 @@ def run_guided_setup(
         prompt.write(
             "Stage models: "
             f"author=gpt-5.6-sol, solver={solver_model}, judge={judge_model}"
+        )
+        prompt.write(
+            "Reasoning effort: "
+            f"solver={solver_reasoning_effort or 'provider default'}, "
+            f"judge={judge_reasoning_effort or 'provider default'}"
         )
         prompt.write("Case authoring executor: artifact-exchange harness")
         runtime_detail = runtime_type

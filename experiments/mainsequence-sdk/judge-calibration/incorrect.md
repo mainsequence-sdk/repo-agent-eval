@@ -1,9 +1,12 @@
-Use platform-managed row models, with their contract hashes serving as the
-physical and logical identities:
+Use platform-managed row models with stable physical names:
 
 ```python
+ACCOUNT_TABLE = schema_table_name("portfolio_console", "account")
+POSITION_TABLE = schema_table_name("portfolio_console", "position")
+
+
 class Account(PlatformManagedMetaTable, Base):
-    __tablename__ = compute_metatable_contract_hash(columns=["account_uid"])
+    __tablename__ = ACCOUNT_TABLE
 
     account_uid = mapped_column(Uuid, primary_key=True)
     display_label = mapped_column(String)
@@ -11,9 +14,7 @@ class Account(PlatformManagedMetaTable, Base):
 
 
 class Position(PlatformManagedMetaTable, Base):
-    __tablename__ = compute_metatable_contract_hash(
-        columns=["account_uid", "instrument_uid", "quantity"]
-    )
+    __tablename__ = POSITION_TABLE
 
     account_uid = mapped_column(Uuid, primary_key=True)
     instrument_uid = mapped_column(Uuid, primary_key=True)

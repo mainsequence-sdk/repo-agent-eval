@@ -12,6 +12,7 @@ executors:
 models:
   solver:
     name: solver-model
+    reasoning_effort: high
     parameters: {temperature: 0.2}
 stages:
   solve:
@@ -23,6 +24,25 @@ stages:
 The API address and model name are versioned experiment configuration. They do
 not come from environment variables. Solver and judge are isolated roles but
 may deliberately share an API address and model id.
+
+Reasoning effort is also versioned explicitly with the model:
+
+```yaml
+models:
+  solver:
+    name: qwen3.6:27b-coding
+    reasoning_effort: high
+    parameters: {temperature: 0.2, max_tokens: 4096}
+  judge:
+    name: qwen3.6:27b-coding
+    reasoning_effort: none
+    parameters: {temperature: 0.0, max_tokens: 2048}
+```
+
+Accepted framework values are `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra`. The selected endpoint and model must support the
+chosen value. Omit the field to use the provider/model default. It is a
+first-class field and is prohibited inside the generic `parameters` mapping.
 
 The base URL must include the path expected by the server; the framework does
 not silently append `/v1`. Ollama, vLLM, LM Studio, and hosted services may be

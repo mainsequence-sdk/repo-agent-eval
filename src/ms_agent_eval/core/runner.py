@@ -23,11 +23,13 @@ class ExperimentRunner:
         *,
         environment: Mapping[str, str] | None = None,
         through: str | None = None,
+        pilot: bool = False,
     ) -> RunProgress:
         return self.coordinator.start(
             experiment_id,
             environment=environment,
             through=through,
+            pilot=pilot,
         )
 
     def resume(

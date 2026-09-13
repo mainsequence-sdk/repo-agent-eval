@@ -36,6 +36,13 @@ def create_observed_lm(
         "cache": False,
         **dict(model.parameters),
     }
+    if model.reasoning_effort is not None:
+        # OpenAI-compatible servers may implement documented OpenAI fields that
+        # LiteLLM's static model catalog does not associate with the configured
+        # custom model name. Opt this field in explicitly so it reaches the
+        # endpoint instead of failing client-side validation.
+        arguments["reasoning_effort"] = model.reasoning_effort
+        arguments["allowed_openai_params"] = ["reasoning_effort"]
     return ObservedDspyLM(
         provider_id=model.provider,
         model=f"openai/{model.model}",

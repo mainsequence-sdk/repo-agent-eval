@@ -75,6 +75,9 @@ class RunProgress:
     schema_version: int
     run_id: str
     experiment_id: str
+    execution_mode: str
+    benchmark_valid: bool
+    coverage_status: str
     status: str
     current_stage: str | None
     packets: tuple[Mapping[str, object], ...]
@@ -136,22 +139,37 @@ class StageCoordinator:
         *,
         environment: Mapping[str, str] | None = None,
         through: str | None = None,
+        pilot: bool = False,
     ) -> RunProgress:
         resolved_environment = (
             environment if environment is not None else self.workspace.repository.environment()
         )
         lock = self.workspace.experiment_lock(experiment_id, environment=resolved_environment)
-        self._validate_calibration_split(lock)
+        if pilot and lock.configuration.mode is not ExperimentMode.EVALUATE:
+            raise PreflightError("pilot execution supports evaluate experiments only")
+        self._validate_calibration_split(lock, pilot=pilot)
         run_id = str(uuid4())
+        execution_mode = "pilot" if pilot else "benchmark"
         lock_reference = self.artifacts.put_manifest(
             f"runs/{run_id}/experiment.lock", lock_as_dict(lock)
         )
         self.ledger.create_run(
             run_id,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": run_id,
                 "experiment_id": experiment_id,
+                "execution_mode": execution_mode,
+                "benchmark_valid": not pilot,
+                "coverage_status": self.workspace.validation["status"],
+                "selected_splits": (
+                    ["train", "development"] if pilot else ["configured"]
+                ),
+                "judge_repetitions": (
+                    1
+                    if pilot
+                    else self.workspace.repository.workspace.evaluation.judge.repetitions
+                ),
                 "workspace_id": lock.workspace_id,
                 "workspace_hash": lock.workspace_hash,
                 "experiment_lock_hash": lock.content_hash,
@@ -164,6 +182,7 @@ class StageCoordinator:
             lock,
             environment=resolved_environment,
             through=through,
+            pilot=pilot,
         )
 
     def resume(
@@ -175,6 +194,7 @@ class StageCoordinator:
     ) -> RunProgress:
         run = self.ledger.load_run(run_id)
         experiment_id = _string(run.get("experiment_id"), "run experiment_id")
+        pilot = _execution_mode(run) == "pilot"
         resolved_environment = (
             environment if environment is not None else self.workspace.repository.environment()
         )
@@ -183,12 +203,13 @@ class StageCoordinator:
             raise IntegrityError("workspace changed since this run was created")
         if run.get("experiment_lock_hash") != lock.content_hash:
             raise IntegrityError("experiment lock changed since this run was created")
-        self._validate_calibration_split(lock)
+        self._validate_calibration_split(lock, pilot=pilot)
         return self._advance(
             run_id,
             lock,
             environment=resolved_environment,
             through=through,
+            pilot=pilot,
         )
 
     def prepare_stage(
@@ -200,6 +221,7 @@ class StageCoordinator:
     ) -> tuple[StagePacket, ...]:
         run = self.ledger.load_run(run_id)
         experiment_id = _string(run.get("experiment_id"), "run experiment_id")
+        pilot = _execution_mode(run) == "pilot"
         lock = self.workspace.experiment_lock(experiment_id)
         if stage is StageKind.AUTHOR:
             return (self._author_packet(run_id, lock, campaign=campaign),)
@@ -209,6 +231,8 @@ class StageCoordinator:
         if calibration is None or not self._calibration_passed(calibration):
             raise PreflightError("judge calibration must pass before this stage is prepared")
         if stage is StageKind.OPTIMIZE:
+            if pilot:
+                raise PreflightError("pilot runs cannot prepare optimization")
             return (self._optimize_packet(run_id, lock, calibration),)
         if stage is StageKind.SOLVE:
             program_dependency: StagePacket | None = None
@@ -221,11 +245,17 @@ class StageCoordinator:
                 selected = "test" if final is not None else "development"
                 if final is not None:
                     program_dependency = final
+            selected_splits = (
+                ("train", "development")
+                if pilot and lock.configuration.mode is ExperimentMode.EVALUATE
+                else None
+            )
             return self._solve_packets(
                 run_id,
                 lock,
                 calibration,
                 selected_split=selected,
+                selected_splits=selected_splits,
                 program_dependency=program_dependency,
             )
         if stage is StageKind.JUDGE:
@@ -238,6 +268,8 @@ class StageCoordinator:
                 raise PreflightError("at least one solve result must persist before judge")
             return self._judge_packets(run_id, lock, calibration, solves)
         if stage is StageKind.FINAL_EVALUATE:
+            if pilot:
+                raise PreflightError("pilot runs cannot open held-out final evaluation")
             optimize = self._persisted_packet(run_id, StageKind.OPTIMIZE)
             if optimize is None:
                 raise PreflightError("optimize must persist before final_evaluate")
@@ -313,6 +345,7 @@ class StageCoordinator:
         *,
         environment: Mapping[str, str],
         through: str | None,
+        pilot: bool,
     ) -> RunProgress:
         if through is not None and through not in {item.value for item in StageKind}:
             raise ConfigurationError(f"unknown --through stage: {through}")
@@ -334,6 +367,8 @@ class StageCoordinator:
 
         program_dependency: StagePacket | None = None
         if lock.configuration.mode is ExperimentMode.OPTIMIZE:
+            if pilot:
+                raise IntegrityError("pilot execution cannot enter optimization")
             optimize = self._optimize_packet(run_id, lock, calibration)
             if not self._ensure_executed(optimize, lock, session):
                 return self._progress(run_id, lock.configuration.id, "awaiting_execution", optimize.stage)
@@ -373,7 +408,12 @@ class StageCoordinator:
                 program_dependency=program_dependency,
             )
         else:
-            solves = self._solve_packets(run_id, lock, calibration)
+            solves = self._solve_packets(
+                run_id,
+                lock,
+                calibration,
+                selected_splits=("train", "development") if pilot else None,
+            )
 
         pending = self._execute_all(solves, lock, session)
         if pending is not None:
@@ -395,7 +435,11 @@ class StageCoordinator:
         result = self.ledger.read_output(aggregate_status.result)
         assert isinstance(result, Mapping)
         return self._progress(
-            run_id, lock.configuration.id, "completed", aggregate.stage, result=result
+            run_id,
+            lock.configuration.id,
+            "pilot_completed" if pilot else "completed",
+            aggregate.stage,
+            result=result,
         )
 
     def _execute_all(
@@ -524,7 +568,7 @@ class StageCoordinator:
         if packet.stage is StageKind.AUTHOR:
             return self._execute_author(packet, session)
         if packet.stage is StageKind.CALIBRATE_JUDGE:
-            return self._execute_calibration(lock, session)
+            return self._execute_calibration(packet, lock, session)
         if packet.stage is StageKind.SOLVE:
             return self._execute_solve(packet, lock, session)
         if packet.stage is StageKind.JUDGE:
@@ -566,9 +610,17 @@ class StageCoordinator:
         )
 
     def _execute_calibration(
-        self, lock: ExperimentLock, session: _ExecutionSession
+        self,
+        packet: StagePacket,
+        lock: ExperimentLock,
+        session: _ExecutionSession,
     ) -> ExecutorOutput:
-        judge, observer = self._judge(lock, session, StageKind.CALIBRATE_JUDGE)
+        judge, observer = self._judge(
+            lock,
+            session,
+            StageKind.CALIBRATE_JUDGE,
+            repetitions=self._judge_repetitions(packet.run_id),
+        )
         start = len(observer.records)
         result = calibrate_judge(
             judge,
@@ -646,7 +698,12 @@ class StageCoordinator:
         case = next((item for item in self.workspace.case_bank.cases if item.id == case_id), None)
         if case is None:
             raise IntegrityError(f"judge packet references unknown case {case_id!r}")
-        judge, observer = self._judge(lock, session, StageKind.JUDGE)
+        judge, observer = self._judge(
+            lock,
+            session,
+            StageKind.JUDGE,
+            repetitions=self._judge_repetitions(packet.run_id),
+        )
         start = len(observer.records)
         result = judge.evaluate(
             case,
@@ -747,24 +804,26 @@ class StageCoordinator:
                         if isinstance(value, (int, float)) and not isinstance(value, bool):
                             role_usage[role][key] += value
             workspace = self.workspace.repository.workspace
-            return {
+            run = self.ledger.load_run(packet.run_id)
+            execution_mode = _execution_mode(run)
+            value: dict[str, object] = {
                 "schema_version": 1,
                 "run_id": packet.run_id,
                 "experiment_id": packet.experiment_id,
                 "lock_hash": lock.content_hash,
                 "mode": lock.mode,
+                "execution_mode": execution_mode,
+                "benchmark_valid": execution_mode == "benchmark",
+                "coverage_status": run.get("coverage_status", "unknown"),
+                "evaluated_splits": sorted(
+                    {
+                        str(item["split"])
+                        for item in cases
+                        if isinstance(item.get("split"), str)
+                    }
+                ),
                 "cases": cases,
                 "case_count": len(cases),
-                "mean_score": (
-                    sum(float(item["score"]) for item in cases) / len(cases)
-                    if cases
-                    else 0.0
-                ),
-                "pass_rate": (
-                    sum(bool(item["passed"]) for item in cases) / len(cases)
-                    if cases
-                    else 0.0
-                ),
                 "role_usage": {
                     role: dict(values) for role, values in role_usage.items()
                 },
@@ -773,10 +832,30 @@ class StageCoordinator:
                     != workspace.stages["judge"].executor
                 ),
             }
+            if execution_mode == "benchmark":
+                value["mean_score"] = (
+                    sum(float(item["score"]) for item in cases) / len(cases)
+                    if cases
+                    else 0.0
+                )
+                value["pass_rate"] = (
+                    sum(bool(item["passed"]) for item in cases) / len(cases)
+                    if cases
+                    else 0.0
+                )
+            else:
+                value["diagnostic_only"] = True
+                value["benchmark_metrics"] = None
+            return value
         raise ConfigurationError(f"local executor cannot execute {packet.stage.value}")
 
     def _judge(
-        self, lock: ExperimentLock, session: _ExecutionSession, stage: StageKind
+        self,
+        lock: ExperimentLock,
+        session: _ExecutionSession,
+        stage: StageKind,
+        *,
+        repetitions: int | None = None,
     ) -> tuple[LlmJudge, ModelCallObserver]:
         lm, observer = session.lm("judge", stage)
         program = create_judge_program()
@@ -803,9 +882,20 @@ class StageCoordinator:
                 observed,
                 model_hash=lock.models["judge"].content_hash,
                 program_hash=lock.judge_program_hash,
-                repetitions=self.workspace.repository.workspace.evaluation.judge.repetitions,
+                repetitions=(
+                    repetitions
+                    if repetitions is not None
+                    else self.workspace.repository.workspace.evaluation.judge.repetitions
+                ),
             ),
             observer,
+        )
+
+    def _judge_repetitions(self, run_id: str) -> int:
+        return (
+            1
+            if _execution_mode(self.ledger.load_run(run_id)) == "pilot"
+            else self.workspace.repository.workspace.evaluation.judge.repetitions
         )
 
     def _author_packet(
@@ -907,8 +997,27 @@ class StageCoordinator:
         calibration: StagePacket,
         *,
         selected_split: str | None = None,
+        selected_splits: Sequence[str] | None = None,
         program_dependency: StagePacket | None = None,
     ) -> tuple[StagePacket, ...]:
+        if selected_split is not None and selected_splits is not None:
+            raise IntegrityError("solve selection cannot use singular and plural splits")
+        split_selection = (
+            None
+            if selected_split is None and selected_splits is None
+            else frozenset(
+                (selected_split,) if selected_split is not None else selected_splits or ()
+            )
+        )
+        if split_selection is not None and not split_selection:
+            raise IntegrityError("solve split selection must not be empty")
+        if split_selection is not None and not split_selection <= {
+            "train",
+            "development",
+            "test",
+            "challenge",
+        }:
+            raise IntegrityError("solve split selection contains an unknown split")
         state_artifact = None
         solver_program_hash = lock.solver_program_hash
         dependencies = [calibration.packet_id]
@@ -933,7 +1042,7 @@ class StageCoordinator:
         repetitions = 1 if selected_split is not None else lock.configuration.repetitions
         for case in self.workspace.case_bank.cases:
             split = self.workspace.splits.split_for(case)
-            if selected_split is not None and split != selected_split:
+            if split_selection is not None and split not in split_selection:
                 continue
             for repetition in range(1, repetitions + 1):
                 inputs = [
@@ -1057,6 +1166,8 @@ class StageCoordinator:
         calibration: StagePacket,
         judges: Sequence[StagePacket],
     ) -> StagePacket:
+        run = self.ledger.load_run(run_id)
+        execution_mode = _execution_mode(run)
         return self._packet(
             run_id,
             lock,
@@ -1064,10 +1175,20 @@ class StageCoordinator:
             inputs=(
                 self.ledger.put_json(
                     "evaluation_index",
-                    {"judgment_packets": [item.packet_id for item in judges]},
+                    {
+                        "judgment_packets": [item.packet_id for item in judges],
+                        "execution_mode": execution_mode,
+                        "benchmark_valid": execution_mode == "benchmark",
+                    },
                 ),
             ),
-            instructions={"task": "Aggregate validated judgments deterministically."},
+            instructions={
+                "task": (
+                    "Persist diagnostic judgments without benchmark metrics."
+                    if execution_mode == "pilot"
+                    else "Aggregate validated judgments deterministically."
+                )
+            },
             dependencies=(calibration.packet_id, *(item.packet_id for item in judges)),
             output_schema="run-summary-v1",
         )
@@ -1356,6 +1477,8 @@ class StageCoordinator:
         *,
         result: Mapping[str, object] | None = None,
     ) -> RunProgress:
+        run = self.ledger.load_run(run_id)
+        execution_mode = _execution_mode(run)
         packets = tuple(
             {
                 "packet_id": item.packet.packet_id,
@@ -1368,17 +1491,22 @@ class StageCoordinator:
             for item in self.ledger.list(run_id)
         )
         return RunProgress(
-            1,
+            2,
             run_id,
             experiment_id,
+            execution_mode,
+            execution_mode == "benchmark",
+            str(run.get("coverage_status", "unknown")),
             status,
             None if stage is None else stage.value,
             packets,
             result,
         )
 
-    def _validate_calibration_split(self, lock: ExperimentLock) -> None:
-        if lock.configuration.mode is not ExperimentMode.OPTIMIZE:
+    def _validate_calibration_split(
+        self, lock: ExperimentLock, *, pilot: bool = False
+    ) -> None:
+        if lock.configuration.mode is not ExperimentMode.OPTIMIZE and not pilot:
             return
         cases = {case.id: case for case in self.workspace.case_bank.cases}
         held_out = sorted(
@@ -1389,7 +1517,8 @@ class StageCoordinator:
         )
         if held_out:
             raise PreflightError(
-                "optimization judge calibration cannot use held-out test/challenge cases: "
+                "optimization and pilot judge calibration cannot use held-out "
+                "test/challenge cases: "
                 f"{held_out}"
             )
 
@@ -1421,6 +1550,22 @@ def _usage(records: Sequence) -> Mapping[str, object]:  # type: ignore[type-arg]
 
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _execution_mode(run: Mapping[str, object]) -> str:
+    value = run.get("execution_mode")
+    if value is None and run.get("schema_version") == 1:
+        return "benchmark"
+    if value not in {"benchmark", "pilot"}:
+        raise IntegrityError("run execution_mode must be benchmark or pilot")
+    expected_validity = value == "benchmark"
+    if run.get("benchmark_valid") is not expected_validity:
+        raise IntegrityError("run benchmark_valid contradicts its execution_mode")
+    if value == "pilot" and run.get("selected_splits") != ["train", "development"]:
+        raise IntegrityError("pilot run must be restricted to train/development splits")
+    if value == "pilot" and run.get("judge_repetitions") != 1:
+        raise IntegrityError("pilot run must use exactly one diagnostic judge repetition")
+    return value
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

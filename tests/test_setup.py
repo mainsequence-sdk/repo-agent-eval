@@ -121,6 +121,8 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
             "skills",
             "solver",
             "judge",
+            "medium",
+            "none",
             "response_only",
         ),
         checkboxes=(("AGENTS.md",),),
@@ -135,7 +137,9 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 7
+    assert repository.workspace.schema_version == 8
+    assert repository.workspace.models["solver"].reasoning_effort == "medium"
+    assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"
     assert repository.case_authoring_path == workspace.parent / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
@@ -192,7 +196,7 @@ def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
             "cases",
             "Cover the selected skill",
         ),
-        selects=("v1.0.0", "files", "response_only"),
+        selects=("v1.0.0", "files", "__default__", "__default__", "response_only"),
         checkboxes=(("AGENTS.md",), ("skills/alpha/SKILL.md",)),
         confirms=(False, False, False, True),
     )
@@ -232,6 +236,8 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
             "skills",
             "solver",
             "judge",
+            "__default__",
+            "__default__",
             "response_only",
         ),
         checkboxes=(("AGENTS.md",),),
@@ -274,6 +280,8 @@ def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) 
             "skills",
             "solver",
             "judge",
+            "__default__",
+            "__default__",
             "response_only",
         ),
         checkboxes=(("AGENTS.md",),),
@@ -325,6 +333,8 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
             "skills",
             "solver",
             "judge",
+            "__default__",
+            "__default__",
             "response_only",
         ),
         checkboxes=(("AGENTS.md",),),

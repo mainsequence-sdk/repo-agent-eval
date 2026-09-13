@@ -296,10 +296,11 @@ Write the candidate responses yourself as controlled reference-labelled test
 inputs. They are not solver outputs, judge outputs, demonstrations, expected
 responses copied blindly, or judge training data. Make every candidate specific
 to its referenced prompt, expected response, rubric criteria, and hard failures.
-Use non-overlapping ranges that permit the required runtime ordering: every
+Use separated positive tiers that permit the required runtime ordering: every
 strong score is strictly above every partial score, and every partial score is
-strictly above every incorrect, contradictory, and adversarial score. A strong
-fixture must pass; every other label must fail.
+strictly above every incorrect, contradictory, and adversarial score. The
+negative failure-mode ranges may overlap because they are categories, not an
+ordinal ranking. A strong fixture must pass; every other label must fail.
 
 When the workspace includes optimization, calibration may reference only
 train/development cases. It must never reference test/challenge cases or use

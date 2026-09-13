@@ -43,6 +43,30 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
 
 
+def _pilot_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
+    repository = create_workspace(tmp_path / "workspace")
+    catalog_file = repository.capability_catalog_path
+    catalog = yaml.safe_load(catalog_file.read_text(encoding="utf-8"))
+    catalog["default_minimum_primary_cases"] = 2
+    catalog_file.write_text(yaml.safe_dump(catalog, sort_keys=False), encoding="utf-8")
+    lock, directory = create_snapshot(
+        repository, create_checkout(tmp_path), tmp_path / "external"
+    )
+    seed_cases_and_calibration(
+        repository,
+        authoring_instructions_hash=sha256_file(repository.case_authoring_path),
+        source_snapshot_hash=lock.content_hash,
+    )
+    with pytest.raises(PreflightError, match="case bank does not satisfy"):
+        compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
+    return compile_workspace(
+        repository,
+        snapshot=lock,
+        snapshot_directory=directory,
+        allow_incomplete_coverage=True,
+    )
+
+
 def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Path) -> None:
     compiled = _compiled(tmp_path)
     responses = {
@@ -96,6 +120,67 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
     resumed = runner.resume(run.run_id, environment=_environment())
     assert resumed.status == "completed"
     assert factory_calls == before_resume
+
+
+def test_pilot_runs_only_train_and_development_without_benchmark_metrics(
+    tmp_path: Path,
+) -> None:
+    compiled = _pilot_compiled(tmp_path)
+    responses = {
+        "solver": [solver_response(), solver_response()],
+        "judge": [
+            judge_response(1.0),
+            judge_response(0.5),
+            judge_response(0.0),
+            judge_response(0.0),
+            judge_response(0.0),
+            judge_response(1.0),
+            judge_response(1.0),
+        ],
+    }
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return FixedObservedLM(observer, responses[model.role], model=model.role)
+
+    runner = ExperimentRunner(compiled, lm_factory=factory)
+    run = runner.run("baseline", environment=_environment(), pilot=True)
+    assert run.status == "pilot_completed"
+    assert run.execution_mode == "pilot"
+    assert run.benchmark_valid is False
+    assert run.coverage_status == "incomplete"
+    assert run.result is not None
+    assert run.result["diagnostic_only"] is True
+    assert run.result["benchmark_metrics"] is None
+    assert "mean_score" not in run.result
+    assert "pass_rate" not in run.result
+    assert run.result["case_count"] == 2
+    assert run.result["evaluated_splits"] == ["development", "train"]
+
+    solve_splits = {
+        runner.coordinator._input(item.packet, "case")["split"]
+        for item in runner.coordinator.ledger.list(run.run_id)
+        if item.packet.stage is StageKind.SOLVE
+    }
+    assert solve_splits == {"train", "development"}
+    stored = runner.coordinator.ledger.load_run(run.run_id)
+    assert stored["execution_mode"] == "pilot"
+    assert stored["benchmark_valid"] is False
+    assert stored["selected_splits"] == ["train", "development"]
+    assert stored["judge_repetitions"] == 1
+
+
+def test_pilot_rejects_optimization_experiment(tmp_path: Path) -> None:
+    compiled = _pilot_compiled(tmp_path)
+    runner = ExperimentRunner(compiled)
+    with pytest.raises(PreflightError, match="evaluate experiments only"):
+        runner.run("optimize", environment=_environment(), pilot=True)
 
 
 def test_optimization_publishes_json_state_before_held_out_test(tmp_path: Path) -> None:

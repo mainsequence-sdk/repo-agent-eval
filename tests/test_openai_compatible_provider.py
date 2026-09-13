@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -32,6 +33,7 @@ def _model() -> ResolvedRoleModel:
         model="solver-model",
         base_url="http://localhost:8000/v1",
         api_key_env="OPENAI_API_KEY",
+        reasoning_effort=None,
         parameters={"temperature": 0.2},
         configured_cost_per_call=0.0,
         content_hash="sha256:model",
@@ -117,6 +119,23 @@ def test_provider_supports_an_unauthenticated_openai_compatible_server(
     assert lm.model == "openai/solver-model"
     assert "api_key" not in lm.observed_parameters
     assert "not-needed" not in repr(lm)
+
+
+def test_provider_allows_configured_reasoning_effort_for_custom_models(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    observer = ModelCallObserver(store, role="solver")
+    model = replace(
+        _model(),
+        reasoning_effort="none",
+        parameters={"temperature": 0.0},
+    )
+
+    lm = create_observed_lm(model, observer)
+
+    assert lm.observed_parameters["reasoning_effort"] == "none"
+    assert lm.observed_parameters["allowed_openai_params"] == ["reasoning_effort"]
 
 
 def test_provider_redacts_secret_before_exception_leaves_lm(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

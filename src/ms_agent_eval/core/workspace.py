@@ -26,13 +26,24 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 7
+WORKSPACE_SCHEMA_VERSION = 8
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PINNED_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 _DOCKER_NETWORK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SPLITS = {"train", "development", "test", "challenge"}
+REASONING_EFFORTS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+_REASONING_EFFORTS = frozenset(REASONING_EFFORTS)
 _PROGRAM_FIELDS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "solver": {
         "inputs": ("global_context", "skill_context", "task"),
@@ -382,6 +393,7 @@ class DspyProgramConfiguration:
 @dataclass(frozen=True)
 class ModelConfiguration:
     model: str
+    reasoning_effort: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
 
@@ -391,6 +403,7 @@ class ModelConfiguration:
             payload,
             {
                 "name",
+                "reasoning_effort",
                 "parameters",
                 "configured_cost_per_call",
             },
@@ -399,11 +412,28 @@ class ModelConfiguration:
         parameters = MappingProxyType(
             dict(_mapping(payload.get("parameters", {}), f"{field}.parameters"))
         )
+        if "reasoning_effort" in parameters:
+            raise ConfigurationError(
+                f"{field}.reasoning_effort is a first-class model field; "
+                "remove it from parameters"
+            )
+        raw_reasoning_effort = payload.get("reasoning_effort")
+        reasoning_effort = (
+            None
+            if raw_reasoning_effort is None
+            else _string(raw_reasoning_effort, f"{field}.reasoning_effort")
+        )
+        if reasoning_effort is not None and reasoning_effort not in _REASONING_EFFORTS:
+            raise ConfigurationError(
+                f"{field}.reasoning_effort must be one of "
+                f"{sorted(_REASONING_EFFORTS)}"
+            )
         cost = payload.get("configured_cost_per_call", 0.0)
         if not isinstance(cost, (int, float)) or isinstance(cost, bool) or float(cost) < 0:
             raise ConfigurationError(f"{field}.configured_cost_per_call must be non-negative")
         return cls(
             _string(payload.get("name"), f"{field}.name"),
+            reasoning_effort,
             parameters,
             float(cost),
         )
@@ -1226,6 +1256,7 @@ class ResolvedRoleModel:
     model: str
     base_url: str
     api_key_env: str | None
+    reasoning_effort: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
     content_hash: str
@@ -1246,6 +1277,7 @@ class ResolvedRoleModel:
             "model": configuration.model,
             "base_url": executor.base_url or "",
             "api_key_env": executor.api_key_env,
+            "reasoning_effort": configuration.reasoning_effort,
             "parameters": configuration.parameters,
             "configured_cost_per_call": configuration.configured_cost_per_call,
         }

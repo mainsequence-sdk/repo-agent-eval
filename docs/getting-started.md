@@ -37,13 +37,15 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
   --cases cases \
   --api-base-url http://127.0.0.1:8000/v1 \
   --solver-model solver-model \
-  --judge-model judge-model
+  --solver-reasoning-effort high \
+  --judge-model judge-model \
+  --judge-reasoning-effort none
 ```
 
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v7 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v8 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-calibration manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -117,6 +119,7 @@ executors:
 models:
   shared-runtime:
     name: qwen3.6:27b-coding
+    reasoning_effort: medium
 stages:
   solve: {executor: remote-models, model: shared-runtime, budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}}
   judge: {executor: remote-models, model: shared-runtime, budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}}
@@ -131,6 +134,11 @@ OPENAI_API_KEY=your-secret
 
 Model selection and API URLs belong in `workspace.yaml`, not environment
 variables.
+
+`reasoning_effort` is an optional first-class model setting. Choose it in the
+setup wizard or set it to `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`, or `ultra` when supported by that model and executor. Omit it to use the
+provider/model default. Do not place it inside `parameters`.
 
 ## 5. Review the authored judge calibration
 
@@ -167,6 +175,21 @@ Inspection reports source commits/snapshots, exact skills, authoring policy and
 source-set hashes, case/split coverage, solver/judge identities, calibration,
 runtime, projected calls, and experiment lock hashes. An incomplete result
 lists the remaining readiness blockers without making model calls.
+
+To exercise an incomplete bank without weakening scored-run validation, run a
+diagnostic pilot:
+
+```bash
+uv run --project /path/to/ms-agent-eval ms-agent-eval run baseline --pilot \
+  --workspace workspace.yaml
+```
+
+The pilot executes judge calibration and the train/development solver and judge
+packets. It excludes test/challenge cases, rejects optimization experiments,
+uses one diagnostic judge vote per calibration fixture and case, stores
+per-case diagnostics under the external data root, records `benchmark_valid:
+false`, and emits no aggregate benchmark metrics. Use `--pilot` again when
+resuming or operating a pilot's stage packets.
 
 ## 7. Evaluate, then optimize separately
 

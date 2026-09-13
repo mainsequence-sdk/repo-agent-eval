@@ -294,6 +294,9 @@ def test_codex_executor_transforms_solver_output_and_records_provenance(
                 if value == "--mount" and "dst=/run/codex" in arguments[index + 1]
             )
             source = next(part.removeprefix("src=") for part in mount.split(",") if part.startswith("src="))
+            assert 'model_reasoning_effort = "high"' in (
+                Path(source) / "config.toml"
+            ).read_text(encoding="utf-8")
             (Path(source) / "result.json").write_text(
                 json.dumps({"response": "The isolated answer."}), encoding="utf-8"
             )
@@ -305,7 +308,7 @@ def test_codex_executor_transforms_solver_output_and_records_provenance(
 
     workspace_configuration = SimpleNamespace(
         stages={"solve": SimpleNamespace(model="solver")},
-        models={"solver": SimpleNamespace(parameters={})},
+        models={"solver": SimpleNamespace(parameters={}, reasoning_effort="high")},
     )
     compiled = SimpleNamespace(
         repository=SimpleNamespace(workspace=workspace_configuration)

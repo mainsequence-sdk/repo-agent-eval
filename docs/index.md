@@ -40,7 +40,7 @@ they are not part of the core architecture or required workflow.
 
 Numbered files under [implementation_tasks](implementation_tasks/) are the
 historical implementation record, not the active architecture. Current behavior
-is defined by this documentation, schema-v7 workspaces, and the repository-local
+is defined by this documentation, schema-v8 workspaces, and the repository-local
 case-authoring skill.
 
 Generated snapshots, model calls, results, compiled programs, and

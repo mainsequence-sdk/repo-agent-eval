@@ -339,6 +339,7 @@ def compile_workspace(
     *,
     snapshot: SnapshotLock | None = None,
     snapshot_directory: Path | None = None,
+    allow_incomplete_coverage: bool = False,
 ) -> CompiledWorkspace:
     if (snapshot is None) != (snapshot_directory is None):
         raise IntegrityError("snapshot and snapshot_directory must be supplied together")
@@ -369,7 +370,16 @@ def compile_workspace(
             repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
         ),
     )
-    if validation["status"] != "valid":
+    if allow_incomplete_coverage:
+        if capability_catalog.status != "complete":
+            raise PreflightError("pilot runs require a complete capability catalog")
+        if validation["missing_catalog_skills"]:
+            raise PreflightError(
+                "pilot runs require capability entries for every configured skill"
+            )
+        if not case_bank.cases:
+            raise PreflightError("pilot runs require at least one authored case")
+    elif validation["status"] != "valid":
         raise PreflightError(
             "case bank does not satisfy the complete capability catalog and configured "
             "per-skill case/group minima"
@@ -616,6 +626,7 @@ def _unresolved_model(
         "name": configuration.model,
         "base_url": executor.base_url,
         "api_key_env": executor.api_key_env,
+        "reasoning_effort": configuration.reasoning_effort,
         "parameters": dict(configuration.parameters),
     }
 

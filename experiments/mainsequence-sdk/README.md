@@ -53,8 +53,10 @@ cases: two distinct cases and two leakage groups for each of the 11 configured s
 the completed bank. `workspace.yaml` requires at least 12 reviewed cases and 6
 distinct leakage groups for every one of the 11 skills before the workspace is
 ready for a scored run. That produces a minimum bank of 132 cases across at
-least 66 semantic families; it is a bootstrap floor, not a claim that the bank
-is automatically sufficient for a production fine-tune.
+least 66 semantic families. The stricter current capability catalog requires
+three primary cases for each of 95 capabilities, so its effective target is 285
+cases. These are coverage rules, not a claim that the bank is automatically
+sufficient for a production fine-tune.
 
 `case-authoring.md` is the long-lived
 policy that tells Codex how to ground cases, construct solver-facing
@@ -102,9 +104,11 @@ the same provider/model pair.
 
 The included `workspace.yaml` uses `gpt-5.6-sol` for case authoring and
 `qwen3.6:27b-coding` for both the solver and judge stages. No environment
-variables are required by its unauthenticated local API configuration. For an
-authenticated provider, configure `api_key_env` on the applicable executor and
-keep only the credential value in `.env`.
+variables are required by its unauthenticated local API configuration. The
+solver uses the model's default reasoning level; the judge sets the first-class
+`reasoning_effort: none` so structured rubric output is not consumed by a hidden
+thinking trace. For an authenticated provider, configure `api_key_env` on the
+applicable executor and keep only the credential value in `.env`.
 The author stage is intentionally `artifact_exchange`: the active Codex session
 authors and reviews files in Git. To automate it or any other model-driven stage
 with subscription-backed Codex, configure the isolated `codex_cli` executor in
@@ -143,6 +147,10 @@ manual follow-up. Review the complete authoring deliverable, then validate until
 ```bash
 uv run ms-agent-eval inspect \
   --workspace experiments/mainsequence-sdk/workspace.yaml
+# Diagnostic execution while coverage remains incomplete:
+uv run ms-agent-eval run baseline --pilot \
+  --workspace experiments/mainsequence-sdk/workspace.yaml
+# Scored execution after the readiness gate passes:
 uv run ms-agent-eval run baseline \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 uv run ms-agent-eval run optimize-few-shot \
@@ -155,4 +163,7 @@ corpus is configured and uses the train-split
 cases and four remaining leakage groups per skill, plus capability-depth gaps,
 as explicit blockers. `run` remains strict and cannot start the solver until
 source, authoring provenance, coverage, splits, configured runtime stages,
-and judge calibration are complete.
+and judge calibration are complete. `run --pilot` is the explicit exception for
+diagnostics: it runs only train/development cases, never optimization or held-out
+splits, uses one diagnostic judge vote per fixture/case, records
+`benchmark_valid: false`, and omits aggregate benchmark metrics.

@@ -11,11 +11,20 @@ from ms_agent_eval.ui import QuestionaryPromptBackend
 from .errors import AgentEvalError, ConfigurationError
 from .hashing import json_value
 from .setup import run_guided_setup
-from .workspace import WorkspaceConfiguration, WorkspaceRepository
+from .workspace import REASONING_EFFORTS, WorkspaceConfiguration, WorkspaceRepository
 from .workspace_templates import build_workspace_template, write_workspace_template
+
 
 def _workspace_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", type=Path, default=Path("workspace.yaml"))
+
+
+def _pilot_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--pilot",
+        action="store_true",
+        help="Operate an explicitly incomplete diagnostic pilot run.",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
     setup.add_argument("--workspace", type=Path)
 
-    init = commands.add_parser("init", help="Create a schema-v7 staged DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v8 staged DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -42,6 +51,8 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--api-key-env")
     init.add_argument("--solver-model", required=True)
     init.add_argument("--judge-model", required=True)
+    init.add_argument("--solver-reasoning-effort", choices=REASONING_EFFORTS)
+    init.add_argument("--judge-reasoning-effort", choices=REASONING_EFFORTS)
     init.add_argument("--author-model", default="gpt-5.6-sol")
 
     codex = commands.add_parser(
@@ -84,12 +95,14 @@ def _parser() -> argparse.ArgumentParser:
             "aggregate",
         ),
     )
+    _pilot_argument(run)
     _workspace_argument(run)
 
     stage = commands.add_parser("stage", help="Operate portable stage packets.")
     stage_commands = stage.add_subparsers(dest="stage_command", required=True)
     stage_list = stage_commands.add_parser("list", help="List packet states for a run.")
     stage_list.add_argument("--run", required=True)
+    _pilot_argument(stage_list)
     _workspace_argument(stage_list)
     prepare = stage_commands.add_parser("prepare", help="Prepare a stage independently.")
     prepare.add_argument(
@@ -106,16 +119,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     prepare.add_argument("--run", required=True)
     prepare.add_argument("--campaign")
+    _pilot_argument(prepare)
     _workspace_argument(prepare)
     claim = stage_commands.add_parser("claim", help="Claim a prepared packet lease.")
     claim.add_argument("packet_id")
     claim.add_argument("--executor", required=True)
     claim.add_argument("--worker", required=True)
     claim.add_argument("--lease-seconds", type=float, default=600)
+    _pilot_argument(claim)
     _workspace_argument(claim)
     execute = stage_commands.add_parser("execute", help="Execute a packet automatically.")
     execute.add_argument("packet_id")
     execute.add_argument("--executor")
+    _pilot_argument(execute)
     _workspace_argument(execute)
     submit = stage_commands.add_parser("submit", help="Submit and validate harness output.")
     submit.add_argument("packet_id")
@@ -123,9 +139,11 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--executor", required=True)
     submit.add_argument("--worker", required=True)
     submit.add_argument("--lease", required=True)
+    _pilot_argument(submit)
     _workspace_argument(submit)
     retry = stage_commands.add_parser("retry", help="Prepare a new immutable attempt.")
     retry.add_argument("packet_id")
+    _pilot_argument(retry)
     _workspace_argument(retry)
     return parser
 
@@ -155,6 +173,8 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         api_key_env=arguments.api_key_env,
         solver_model=arguments.solver_model,
         judge_model=arguments.judge_model,
+        solver_reasoning_effort=arguments.solver_reasoning_effort,
+        judge_reasoning_effort=arguments.judge_reasoning_effort,
         author_model=arguments.author_model,
     )
     WorkspaceConfiguration.from_mapping(template.payload)
@@ -240,7 +260,8 @@ def _run(arguments: argparse.Namespace) -> object:
     from .coordinator import StageCoordinator
     from .stages import StageKind
 
-    compiled = compile_workspace(repository)
+    pilot = bool(getattr(arguments, "pilot", False))
+    compiled = compile_workspace(repository, allow_incomplete_coverage=pilot)
     coordinator = StageCoordinator(compiled)
     if arguments.command == "run":
         if arguments.target == "resume":
@@ -260,6 +281,7 @@ def _run(arguments: argparse.Namespace) -> object:
                 arguments.target,
                 environment=environment,
                 through=arguments.through,
+                pilot=pilot,
             )
         )
     if arguments.stage_command == "list":

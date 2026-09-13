@@ -129,10 +129,12 @@ uv run ms-agent-eval init \
   --cases cases \
   --api-base-url http://127.0.0.1:8000/v1 \
   --solver-model solver-model \
-  --judge-model judge-model
+  --solver-reasoning-effort high \
+  --judge-model judge-model \
+  --judge-reasoning-effort none
 ```
 
-The generated schema-v7 `workspace.yaml` has these top-level concerns:
+The generated schema-v8 `workspace.yaml` has these top-level concerns:
 
 1. `executors` and `models`: reusable transport and model definitions.
 2. `stages`: the executor, model, and budget assigned to each portable stage.
@@ -186,9 +188,11 @@ executors:
 models:
   solver:
     name: qwen3.6:27b-coding
+    reasoning_effort: high
     parameters: {temperature: 0.2}
   judge:
     name: qwen3.6:27b-coding
+    reasoning_effort: none
     parameters: {temperature: 0.0}
 
 stages:
@@ -214,9 +218,19 @@ another external path.
 uv run ms-agent-eval validate --workspace workspace.yaml
 # Ask Codex to use the case-authoring skill with this workspace and campaign goal.
 uv run ms-agent-eval inspect --workspace workspace.yaml
+# While coverage is incomplete, exercise calibration, solving, and judging on
+# train/development cases without producing benchmark metrics.
+uv run ms-agent-eval run baseline --pilot --workspace workspace.yaml
+# After validation reports ready_for_scored_run: true:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 ```
+
+A pilot is immutable and explicitly records `benchmark_valid: false`. It never
+loads test or challenge cases, cannot run optimization, retains per-case judge
+diagnostics, uses one diagnostic judge vote per fixture/case, and omits
+aggregate mean-score and pass-rate fields. Resume or operate its packets with
+the same `--pilot` flag.
 
 Every full run is resumable orchestration over the same public stage commands:
 

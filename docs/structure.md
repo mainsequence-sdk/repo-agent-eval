@@ -6,7 +6,7 @@
 
 ```text
 core/
-  workspace.py             schema-v7 target, executor, model, and stage manifest
+  workspace.py             schema-v8 target, executor, model, and stage manifest
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring

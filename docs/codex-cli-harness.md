@@ -76,8 +76,16 @@ stages:
 The image must be digest-pinned, and `version` must match `codex --version`
 inside it. `authentication` has exactly one supported value:
 `chatgpt_subscription`. There is no API-key fallback.
-For a model assigned to this executor, the only accepted `parameters` key is
-`reasoning_effort`; endpoint-only controls such as `temperature` fail closed.
+For a model assigned to this executor, set `reasoning_effort` as a first-class
+field beside `name`. Generic endpoint parameters such as `temperature` fail
+closed:
+
+```yaml
+models:
+  judge:
+    name: gpt-5.6-sol
+    reasoning_effort: high
+```
 
 Verify the deployment without making a model request:
 

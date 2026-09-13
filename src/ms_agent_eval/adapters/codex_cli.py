@@ -21,7 +21,7 @@ from ms_agent_eval.core.planning import CompiledWorkspace, ExperimentLock
 from ms_agent_eval.core.stage_executors import AutomaticExecutionFailed, ExecutorOutput
 from ms_agent_eval.core.stage_views import StageViewMaterializer
 from ms_agent_eval.core.stages import StageKind, StageLedger, StagePacket
-from ms_agent_eval.core.workspace import ExecutorConfiguration
+from ms_agent_eval.core.workspace import REASONING_EFFORTS, ExecutorConfiguration
 
 
 @dataclass(frozen=True)
@@ -299,7 +299,7 @@ class CodexCliExecutor:
             raise ConfigurationError(f"codex_cli cannot execute {packet.stage.value!r}")
         if packet.model.id is None:
             raise ConfigurationError("codex_cli packets require a configured model")
-        model_parameters = self._model_parameters(packet)
+        model_configuration = self._model_configuration(packet)
         deadline = time.monotonic() + packet.budget.wall_seconds
         auth_identity = self.auth_store.identity()
         preflight = self.runner.preflight(
@@ -349,12 +349,11 @@ class CodexCliExecutor:
             }
         elif packet.stage is StageKind.JUDGE:
             evaluation = _input_mapping(packet, ledger, "evaluation")
+            repetitions = _judge_repetitions(packet, ledger, self.workspace)
             case = self._case(str(evaluation.get("case_id")))
             raw_votes = [
                 invoke()
-                for _ in range(
-                    self.workspace.repository.workspace.evaluation.judge.repetitions
-                )
+                for _ in range(repetitions)
             ]
             iterator = iter(raw_votes)
             record = LlmJudge(
@@ -377,15 +376,14 @@ class CodexCliExecutor:
                 "repetition": evaluation["repetition"],
             }
         else:
+            repetitions = _judge_repetitions(packet, ledger, self.workspace)
             fixture_scores: dict[str, float] = {}
             fixture_passes: dict[str, bool] = {}
             for fixture in self.workspace.calibration.fixtures:
                 case = self._case(fixture.case_id)
                 raw_votes = [
                     invoke(fixture.id)
-                    for _ in range(
-                        self.workspace.repository.workspace.evaluation.judge.repetitions
-                    )
+                    for _ in range(repetitions)
                 ]
                 iterator = iter(raw_votes)
                 record = LlmJudge(
@@ -430,7 +428,7 @@ class CodexCliExecutor:
                 "instruction_policy": self.codex.instruction_policy,
                 "workspace_access": "read",
                 "resources": json_value(self.codex.resources),
-                "model_parameters": model_parameters,
+                "model_configuration": model_configuration,
                 "invocations": invocations,
             },
         )
@@ -459,7 +457,9 @@ class CodexCliExecutor:
             self.auth_store.install_into(codex_home)
             config = _codex_config(
                 self.codex.permission_profile,
-                reasoning_effort=self._model_parameters(packet).get("reasoning_effort"),
+                reasoning_effort=self._model_configuration(packet).get(
+                    "reasoning_effort"
+                ),
             )
             config_path = codex_home / "config.toml"
             config_path.write_text(config, encoding="utf-8")
@@ -641,27 +641,21 @@ class CodexCliExecutor:
             raise IntegrityError(f"Codex packet references unknown case {case_id!r}")
         return case
 
-    def _model_parameters(self, packet: StagePacket) -> Mapping[str, object]:
+    def _model_configuration(self, packet: StagePacket) -> Mapping[str, object]:
         stage = self.workspace.repository.workspace.stages[packet.stage.value]
         if stage.model is None:
             raise IntegrityError("Codex stage has no configured model")
-        parameters = dict(self.workspace.repository.workspace.models[stage.model].parameters)
-        unknown = sorted(set(parameters) - {"reasoning_effort"})
-        if unknown:
+        model = self.workspace.repository.workspace.models[stage.model]
+        parameters = dict(model.parameters)
+        if parameters:
             raise ConfigurationError(
-                "codex_cli supports only the reasoning_effort model parameter; "
-                f"unsupported parameters: {unknown}"
+                "codex_cli does not accept endpoint model parameters; "
+                f"unsupported parameters: {sorted(parameters)}"
             )
-        effort = parameters.get("reasoning_effort")
-        if effort is not None and effort not in {
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        }:
+        effort = model.reasoning_effort
+        if effort is not None and effort not in REASONING_EFFORTS:
             raise ConfigurationError("codex_cli reasoning_effort is invalid")
-        return parameters
+        return {} if effort is None else {"reasoning_effort": effort}
 
 
 def _docker_environment() -> Mapping[str, str]:
@@ -758,6 +752,13 @@ def _input_mapping(
     if not isinstance(value, Mapping):
         raise IntegrityError(f"Codex packet input {input_id!r} must be a mapping")
     return {str(key): item for key, item in value.items()}
+
+
+def _judge_repetitions(packet: StagePacket, ledger: StageLedger, workspace) -> int:  # type: ignore[no-untyped-def]
+    run = ledger.load_run(packet.run_id)
+    if run.get("execution_mode") == "pilot":
+        return 1
+    return workspace.repository.workspace.evaluation.judge.repetitions
 
 
 def _version_number(value: str) -> str:
