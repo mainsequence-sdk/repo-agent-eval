@@ -34,6 +34,7 @@ models:
   solver:
     name: qwen3.6:27b-coding
     deployment_revision: qwen3.6-27b-coding-local-2026-09-13
+    reasoning_effort: none
     parameters:
       temperature: 0.2
       max_tokens: 4096
