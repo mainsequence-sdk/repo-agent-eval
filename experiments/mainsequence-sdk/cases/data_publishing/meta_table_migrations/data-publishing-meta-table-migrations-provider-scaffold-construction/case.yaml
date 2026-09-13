@@ -1,0 +1,25 @@
+schema_version: 5
+id: data-publishing-meta-table-migrations-provider-scaffold-construction
+title: 'Establish a migration provider: design'
+skill: data_publishing/meta_table_migrations
+group: data-publishing-meta-table-migrations-provider-scaffold
+coverage:
+  primary: provider-scaffold
+  supporting:
+  - provider-scope-metadata
+  - revision-lifecycle
+  archetype: construction
+  difficulty: easy
+source_paths:
+- agent_scaffold/skills/data_publishing/meta_table_migrations/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:723fa2e7019b5e94c3e054350a069636c25c2aec129fc7366fbb23876c5a7b23
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

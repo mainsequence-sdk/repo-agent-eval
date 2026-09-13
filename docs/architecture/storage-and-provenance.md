@@ -31,7 +31,8 @@ flowchart TB
 │   ├── snapshots/              immutable target and reference repositories
 │   ├── blobs/sha256/           requests, responses, state, traces, and evidence
 │   ├── manifests/              revisions, work graph, attempts, runs, and results
-│   ├── locks/work/             bounded single-flight lock buckets
+│   ├── locks/work/             bounded single-flight work lock buckets
+│   ├── locks/executors/        per-pool, per-endpoint request slots
 │   └── tmp/                    atomic staging and disposable attempts
 └── summary/
     └── runs/<run-id>/          derived Markdown, CSV, JSON, and case reports
@@ -52,9 +53,9 @@ run-specific packets under `graph/attempts/`, validated outputs under
 identity and eligibility rules.
 
 Each schema-v4 run manifest directly references three immutable revision
-records: the experiment lock, the revision bundle, and a schema-v2 experiment
+records: the experiment lock, the revision bundle, and a schema-v3 experiment
 definition stored as a content-addressed blob. The definition, in turn,
-references the exact local case, calibration, catalog, split, and authoring
+references the exact local case, judge-validation, catalog, split, and authoring
 files needed to reconstruct the run. Repository content remains in verified
 external snapshots and is referenced by snapshot hash. This allows an old run
 to resume from its own definition after `workspace.yaml` or the versioned case
@@ -65,10 +66,14 @@ bank changes, without copying mutable paths into the run.
 A comparable result binds at least:
 
 - requested repository ref, resolved commit, snapshot hash, and selected files;
+- imported instruction manifest, origin metadata, selected file inventory, and
+  exact content hashes;
 - authoring source-set, policy, capability-catalog, case-bank, and split hashes;
 - solver and judge program/model identities, deployment revisions, and parameters;
-- calibration corpus, runtime, executor, budgets, and compiled program; and
-- packet dependencies, outputs, model usage, and timestamps.
+- judge-validation set, runtime, executor, budgets, and compiled program; and
+- packet dependencies, outputs, model usage, and timestamps; and
+- selected endpoint id, pool/replica hashes, configured capacity, queue wait,
+  observed concurrency, and latency for endpoint-backed attempts.
 
 Credentials are deliberately excluded from hashes, locks, reports, and error
 messages. Configuration records only the environment-variable name or dedicated

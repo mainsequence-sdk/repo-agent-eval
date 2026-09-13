@@ -27,8 +27,14 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
             "skills",
             "--cases",
             "cases",
-            "--api-base-url",
+            "--endpoint",
+            "lan-a",
             "http://localhost:8000/v1",
+            "6",
+            "--endpoint",
+            "lan-b",
+            "http://localhost:8001/v1",
+            "4",
             "--api-key-env",
             "OPENAI_API_KEY",
             "--solver-model",
@@ -47,9 +53,14 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 9
+    assert repository.workspace.schema_version == 11
     assert repository.workspace.models["solver"].reasoning_effort == "high"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
+    assert repository.workspace.executors["remote-models"].total_concurrency == 10
+    assert [
+        endpoint.id
+        for endpoint in repository.workspace.executors["remote-models"].endpoints
+    ] == ["lan-a", "lan-b"]
     assert set(repository.workspace.executors) == {
         "remote-models",
         "authoring-harness",
@@ -59,22 +70,22 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     assert repository.case_authoring_path == tmp_path / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
     assert "`error_identification`" in repository.case_authoring_instructions()
-    assert "Mandatory judge-calibration deliverable" in (
+    assert "Mandatory judge-validation deliverable" in (
         repository.case_authoring_instructions()
     )
-    assert "Author, solver, and judge responsibilities" in (
+    assert "Keep author, solver, and judge inputs" in (
         repository.case_authoring_instructions()
     )
-    assert "If any calibration condition fails" in (
+    assert "strict ordinal relation" in (
         repository.case_authoring_instructions()
     )
-    assert "Do not stop after writing cases" in repository.case_authoring_instructions()
+    assert "not a later manual" in repository.case_authoring_instructions()
     for label in ("strong", "partial", "incorrect", "contradictory", "adversarial"):
         assert f"`{label}`" in repository.case_authoring_instructions()
     case_bank_readme = (tmp_path / "cases" / "README.md").read_text(encoding="utf-8")
     assert "Case Bank and Coverage Contract" in case_bank_readme
     assert "Only primary cases count" in case_bank_readme
-    assert "sibling `judge-calibration/`" in case_bank_readme
+    assert "sibling `judge-validation/`" in case_bank_readme
     assert payload["case_bank_readme"].endswith("cases/README.md")
     assert "Mandatory semantic coverage contract" in (
         tmp_path / "cases" / "coverage.yaml"
@@ -127,10 +138,10 @@ def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatc
         tmp_path / "external",
     )
     (repository.cases_root / "splits.yaml").write_text(
-        "schema_version: 2\ngroups: {}\n", encoding="utf-8"
+        "schema_version: 3\ngroups: {}\n", encoding="utf-8"
     )
-    (repository.calibration_root / "manifest.yaml").write_text(
-        "schema_version: 2\nfixtures: []\n", encoding="utf-8"
+    (repository.judge_validation_root / "manifest.yaml").write_text(
+        "schema_version: 3\nfixtures: []\n", encoding="utf-8"
     )
     monkeypatch.setattr(
         planning,

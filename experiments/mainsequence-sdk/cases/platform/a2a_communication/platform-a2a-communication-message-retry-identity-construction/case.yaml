@@ -1,0 +1,25 @@
+schema_version: 5
+id: platform-a2a-communication-message-retry-identity-construction
+title: 'Preserve message identity on retry: design'
+skill: platform/a2a_communication
+group: platform-a2a-communication-message-retry-identity
+coverage:
+  primary: message-retry-identity
+  supporting:
+  - task-lifecycle
+  - credential-secrecy
+  archetype: construction
+  difficulty: easy
+source_paths:
+- instructions/mainsequence-platform/skills/agents/a2a_communication/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:a330b3034e3ca61a7d198dbd72215903a9813551c8b2abd5570e270cd466a01d
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

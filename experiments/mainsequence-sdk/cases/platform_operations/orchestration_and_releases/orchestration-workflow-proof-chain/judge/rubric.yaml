@@ -1,4 +1,3 @@
-passing_score: 0.75
 criteria:
   - id: declaration_location
     weight: 0.25

@@ -1,25 +1,7 @@
-Keep `sdk_code_repository_execution` responsible for the agreed success
-condition, docs/read order, verified Git-derived context, and coordination only.
-Route the implementation as follows:
+The review should reject the proposal because it violates the **Route specialized work** boundary. The required behavior is: Delegate domain behavior to the exact owning skill instead of absorbing it into repository execution.
 
-1. `data_publishing/meta_tables` owns `AlertRule` grain, keys, logical/physical
-   identity, relationships, descriptions, and provider placement. If its
-   platform-managed schema changes, `data_publishing/meta_table_migrations`
-   owns the reviewed provider-scoped revision and upgrade evidence.
-2. `application_surfaces/api_surfaces` owns per-endpoint classification,
-   trusted request identity, service delegation, the pinned Command Center SDK
-   manifest/schema/fixtures, route conformance, release, and deployed frontend
-   evidence.
-3. `platform_operations/orchestration_and_releases` owns the nightly Job or
-   versioned workflow, schedule, exact pinned image, JobRun, terminal status,
-   and owner-scoped logs. It does not define alert calculations.
-4. `platform_operations/access_control_and_sharing` owns the real output
-   resource boundary, analyst-team public UID, least-privilege `view` grant,
-   preservation of unrelated access, and effective consumer verification.
+The corrected design should start from explicit repository, environment, resource, and actor identities, then follow the owning skill's supported sequence. The governing boundary is: read repository instructions first, derive remote/branch/worktree context from Git, freeze it before operations, route specialized work, define success evidence, and stop on material ambiguity. It must preserve unrelated state and must not substitute a convenient local assumption for an authoritative resource or lifecycle observation.
 
-Before starting, write one integrated observable outcome: the model and
-migration are valid, the exact tested API contract is consumed through the
-deployed frontend, the nightly Job runs the intended pushed commit, and the
-team can read—but not edit—the intended result resource. Each claim remains
-open until its owning skill returns the specified evidence. Do not let the
-bootstrap skill substitute its own rules for those domain contracts.
+The answer should call out this concrete anti-pattern: The current proposal takes branch and environment from ad-hoc environment variables, skips nested instructions, absorbs domain-specific work, and equates command exit zero with task success. A semantically equivalent correction is acceptable when it preserves the same ownership, identity, lifecycle, and safety boundaries.
+
+The review can prove only that the corrected design is aligned with the supplied contract. A success claim additionally requires Git-native identity, applied instruction chain, selected skill route, bounded commands, and the observations in the task's success definition.

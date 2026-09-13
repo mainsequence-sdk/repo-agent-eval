@@ -1,81 +1,39 @@
 # Evaluation
 
-Evaluation answers a narrow question: how well does one locked solver candidate
-perform against one locked correctness contract? A valid result binds the
-source revision, cases, split assignments, judge, calibration corpus, solver,
-runtime, and model identities.
+Evaluation measures one locked solver against one locked semantic scoring
+contract. A comparable result binds the source snapshot, cases, grouped splits,
+judge-validation set, solver and judge programs, runtime, and model identities.
 
-## Readiness gates
+## Readiness
 
-```mermaid
-flowchart TB
-    Start[Workspace configuration] --> Source{Sources resolve and hashes match?}
-    Source -->|No| Blocked[Scored run blocked]
-    Source -->|Yes| Catalog{Capability catalog complete?}
-    Catalog -->|No| Blocked
-    Catalog -->|Yes| Depth{Every capability reaches primary-case depth?}
-    Depth -->|No| Blocked
-    Depth -->|Yes| Diversity{Case and leakage-group floors met?}
-    Diversity -->|No| Blocked
-    Diversity -->|Yes| Splits{Grouped splits valid?}
-    Splits -->|No| Blocked
-    Splits -->|Yes| Provenance{Case provenance matches active inputs?}
-    Provenance -->|No| Blocked
-    Provenance -->|Yes| Judge{Judge calibration passes?}
-    Judge -->|No| Blocked
-    Judge -->|Yes| Ready[Scored solver calls allowed]
-```
+A scored run requires resolvable immutable sources, a complete capability
+catalog, sufficient primary-case and leakage-group coverage, valid case
+provenance, a valid train/test/challenge split manifest, resolved model
+identities, and a complete judge-validation set.
 
-`ms-agent-eval validate` checks the complete contract. `inspect` exposes the
-resolved identities, hashes, coverage totals, split assignments, projected
-calls, and exact blockers without making solver calls.
+The judge-validation stage checks ordinal consistency on reviewed training-case
+fixtures before solver work begins. It does not classify evaluation cases or
+define a numerical acceptance rule.
 
-## Three run types
+## Run types
 
-| Run | Cases available | Optimization | Output status |
-| --- | --- | --- | --- |
-| Diagnostic pilot | Train and validation only | Prohibited | `benchmark_valid: false`; per-case diagnostics; no aggregate benchmark metrics. |
-| Baseline benchmark | The evaluation experiment's configured cases | None | Comparable only with the same locked evaluation identity. |
-| Optimization benchmark | Train for compilation, validation before final evaluation, test after candidate publication | DSPy `LabeledFewShot` | Held-out test metrics for the published compiled candidate. |
+| Run | Data use | Result |
+| --- | --- | --- |
+| Diagnostic pilot | Training cases only | Per-case diagnostics with `benchmark_valid: false`; no benchmark mean. |
+| Baseline benchmark | Untouched test cases | Continuous held-out scores for the unfitted solver. |
+| Optimization benchmark | Grouped K-fold selection within train, refit on all train, then test once | Continuous held-out scores plus the complete selection record. |
 
-A pilot helps exercise calibration, solver, and judge wiring while authoring is
-incomplete. It is not a weaker validation mode and must never be presented as a
-benchmark.
+The solver receives only its task, attachments, global instructions, and skill
+context. The judge separately receives the candidate, rubric, expected
+evidence, and skill context. It emits criterion scores, named critical
+violations, and feedback. The framework validates and aggregates those outputs.
 
-## What the solver and judge can see
+Reports contain per-case continuous scores, criterion details, critical
+violations, the benchmark mean, model usage, execution/reuse evidence, and all
+relevant identities. They contain no framework-defined case verdict or pass
+rate.
 
-The canonical case package is projected into separate immutable views:
-
-```mermaid
-flowchart LR
-    Case[Canonical case package] --> SolverView[Solver view]
-    Case --> JudgeView[Judge view]
-    SolverView -->|task + global and skill context + attachments| Solver[Solver LLM]
-    Solver --> Candidate[Candidate response]
-    Candidate --> JudgeView
-    JudgeView -->|rubric + expected evidence + candidate| Judge[Judge LLM]
-    Judge --> Scores[Criterion scores, failures, and feedback]
-```
-
-The solver never receives the rubric or expected result. The judge receives the
-candidate and correctness evidence but not private pass thresholds. Calibration
-invocations receive one candidate fixture without its label or accepted range.
-
-## Evaluation outputs
-
-The append-only external data plane records:
-
-- the immutable experiment lock and run manifest;
-- stage packets, attempts, transitions, and validated results;
-- per-case criterion scores, hard failures, feedback, and final score;
-- solver and judge call counts, token usage, latency, and configured cost;
-- benchmark mean score and pass rate for valid benchmark runs; and
-- hashes for every source, case, program, model, calibration corpus, and
-  compiled artifact involved.
-
-Read the [capability coverage contract](capability-coverage.md) to build the
-case bank and [judging and calibration](judging-and-calibration.md) for the
-semantic scoring boundary. Training-specific split rules are documented under
-[Training and optimization](../training/index.md). See
-[Pilot versus scored runs](pilot-vs-scored-runs.md) and
-[Interpreting results](interpreting-results.md) for operational guidance.
+See [Capability coverage](capability-coverage.md),
+[judging and judge validation](judging-and-validation.md),
+[pilot versus scored runs](pilot-vs-scored-runs.md), and
+[interpreting results](interpreting-results.md).

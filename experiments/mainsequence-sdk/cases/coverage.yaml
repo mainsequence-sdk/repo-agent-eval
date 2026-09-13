@@ -1,6 +1,6 @@
 schema_version: 1
 status: complete
-default_minimum_primary_cases: 3
+default_minimum_primary_cases: 2
 skills:
   a2a_sdk_execution:
     capabilities:
@@ -225,6 +225,318 @@ skills:
       - id: validation-and-reporting
         title: Validate and report maintenance
         description: Run proportionate checks and report exact changed state, evidence, and unresolved blockers.
+  platform/a2a_communication:
+    capabilities:
+      - id: environment-scoped-discovery
+        title: Discover agents in the target environment
+        description: Resolve an existing Agent within the intended environment before opening a session.
+      - id: constrained-sender-contract
+        title: Preserve constrained sender behavior
+        description: Use the platform communication surface without bypassing its identity and authorization boundary.
+      - id: caller-session-proof
+        title: Prove caller and session identity
+        description: Keep private caller identity and stable session identity distinct and evidence-backed.
+      - id: runtime-update-remediation
+        title: Remediate runtime communication capability
+        description: Diagnose and apply the supported runtime update when a deployed Agent cannot communicate.
+      - id: session-provenance-reuse
+        title: Reuse sessions with provenance
+        description: Reuse only sessions whose caller, target, environment, and purpose match the request.
+      - id: atomic-runtime-access
+        title: Preserve atomic runtime access
+        description: Treat runtime access, credential, and communication changes as one consistent operation.
+      - id: response-kind-extension
+        title: Extend response kinds safely
+        description: Negotiate or extend response kinds without violating advertised capabilities or wire roles.
+      - id: message-retry-identity
+        title: Preserve message identity on retry
+        description: Retry safely without turning one logical message into duplicate work.
+      - id: task-lifecycle
+        title: Manage asynchronous task lifecycle
+        description: Distinguish immediate messages from task creation, polling, completion, and failure.
+      - id: credential-secrecy
+        title: Protect communication credentials
+        description: Use credentials through supported boundaries without exposing secret values in prompts or output.
+  platform/code_repository_design:
+    capabilities:
+      - id: intent-and-success
+        title: Define repository intent and success
+        description: Translate the requested outcome into observable repository and platform success criteria.
+      - id: ontology-identities
+        title: Resolve platform ontology identities
+        description: Keep repository, branch, environment, resource, release, and runtime identities distinct.
+      - id: branch-environment-partition
+        title: Partition branch and environment behavior
+        description: Design branch-owned code and environment-owned state without cross-environment leakage.
+      - id: connected-blueprint
+        title: Produce a connected implementation blueprint
+        description: Connect data, execution, application, deployment, and evidence components into one coherent graph.
+      - id: metatable-design
+        title: Design MetaTable resources
+        description: Define governed relational storage, keys, relationships, ownership, and migration boundaries.
+      - id: updater-design
+        title: Design time-index updaters
+        description: Define updater identity, dependencies, incremental windows, and canonical time-series output.
+      - id: job-design
+        title: Design Jobs and schedules
+        description: Define Job, schedule, image, inputs, outputs, and execution-evidence responsibilities.
+      - id: api-design
+        title: Design application APIs
+        description: Define thin FastAPI surfaces aligned with authenticated platform and frontend contracts.
+      - id: cli-design
+        title: Design command-line operations
+        description: Provide bounded, composable CLI entry points with explicit context and success evidence.
+      - id: coding-agent-design
+        title: Design repository coding agents
+        description: Define repository preparation, runtime instructions, and automatic coding-agent deployment.
+      - id: static-site-design
+        title: Design static applications
+        description: Define static build, routing, navigation, API delegation, CORS, and release responsibilities.
+      - id: automatic-deployment-matrix
+        title: Design the automatic-deployment matrix
+        description: Apply target-specific automatic deployment, image ownership, and redeployment rules across every supported target type.
+  platform/code_repository_local_setup:
+    capabilities:
+      - id: readiness-selection
+        title: Select a ready repository and branch
+        description: Resolve the exact CodeRepository and compatible branch before local setup.
+      - id: provisioning-state
+        title: Respect provisioning state
+        description: Stop or recover safely when repository bindings, branch state, or credentials are not ready.
+      - id: binding-clone-source
+        title: Use the binding clone source
+        description: Clone from the platform-provided repository binding rather than reconstructing a URL.
+      - id: safe-destination
+        title: Select a safe local destination
+        description: Avoid unrelated checkouts, ambiguous roots, and destructive replacement of existing work.
+      - id: existing-checkout-verification
+        title: Verify an existing checkout
+        description: Confirm remote, branch, cleanliness, and identity before reusing a local repository.
+      - id: deploy-key-boundary
+        title: Protect deploy keys
+        description: Handle repository credentials without printing, persisting, or broadening their scope.
+      - id: clone-verification
+        title: Verify clone results
+        description: Prove that the intended commit, branch, and remote were materialized successfully.
+      - id: authentication-lanes
+        title: Separate authentication lanes
+        description: Keep Git clone authentication, CLI user authentication, and runtime credentials distinct.
+      - id: env-rendering
+        title: Render minimal local environment configuration
+        description: Write only supported identifiers and configuration keys without embedding secret values.
+      - id: partial-failure
+        title: Recover partial local setup
+        description: Diagnose and safely resume a setup that failed after only some resources were created.
+  platform/code_repository_to_agent:
+    capabilities:
+      - id: repository-capability-audit
+        title: Audit repository agent readiness
+        description: Determine whether a repository has the code, instructions, and interfaces needed to become an Agent.
+      - id: repository-instruction-boundary
+        title: Establish repository instructions
+        description: Keep durable repository guidance separate from runtime prompts and platform metadata.
+      - id: repository-owned-skill-design
+        title: Design repository-owned skills
+        description: Add focused skills for repository-specific operations without copying unrelated platform behavior.
+      - id: source-card-contract
+        title: Define the source Agent card
+        description: Describe repository-owned capabilities and inputs without confusing source metadata with a deployed runtime.
+      - id: runtime-card-boundary
+        title: Separate runtime Agent metadata
+        description: Keep deployed endpoint, runtime capability, and environment facts out of the source card.
+      - id: executor-runtime-command-boundary
+        title: Define a stable runtime command
+        description: Start the Agent predictably without mutating dependencies or virtual environments at runtime.
+      - id: preparation-vs-deployment
+        title: Separate preparation from deployment
+        description: Distinguish repository changes and validation from platform workflow declaration and release evidence.
+      - id: coding-agent-workflow-declaration
+        title: Declare a coding-agent workflow target
+        description: Express the CodeRepository Coding Agent target with the required repository and environment context.
+      - id: automatic-redeployment-intent
+        title: Configure automatic coding-agent redeployment
+        description: Apply branch-driven automatic deployment deliberately and verify the resulting deployment run.
+      - id: environment-and-session-provenance
+        title: Preserve environment and session provenance
+        description: Tie deployed Agent sessions to the intended repository revision, environment, and runtime identity.
+  platform/code_repository_workflows:
+    capabilities:
+      - id: template-validation
+        title: Render and validate workflow templates
+        description: Use the current workflow template and backend validation contract before deployment.
+      - id: direct-file-contract
+        title: Maintain the direct workflow file contract
+        description: Keep workflow declarations in the supported repository location and schema.
+      - id: image-orchestration
+        title: Apply target-specific image ownership
+        description: Supply exact images only where the target and deployment mode require them.
+      - id: target-env-vars
+        title: Configure target environment variables
+        description: Bind supported non-secret target configuration without leaking credentials into workflow files.
+      - id: navigation-authorization
+        title: Configure navigation authorization
+        description: Declare application navigation access separately from runtime and resource access.
+      - id: icon-mask
+        title: Define icon and mask assets
+        description: Supply valid application icon and mask metadata for Command Center navigation.
+      - id: workflow-job-automatic-deployment
+        title: Automatically deploy workflow Jobs
+        description: Configure branch-driven Job deployment with backend-owned exact image construction.
+      - id: cron-timezone
+        title: Define cron and timezone behavior
+        description: Make schedule cadence and timezone explicit and distinct from Job identity.
+      - id: coding-agent-automatic-deployment
+        title: Automatically deploy Coding Agents
+        description: Configure a CodeRepository Coding Agent target whose image is built by the backend.
+      - id: fastapi-automatic-deployment
+        title: Automatically deploy FastAPI resources
+        description: Configure combined REST and WebSocket FastAPI release behavior without a client-supplied image.
+      - id: manual-runtime-image
+        title: Configure manual runtime releases
+        description: Require an exact ready image when automatic runtime deployment is disabled.
+      - id: application-removal-semantics
+        title: Remove workflow applications safely
+        description: Distinguish declaration removal, release cleanup, and protected resource deletion.
+  platform/model_provider_credentials:
+    capabilities:
+      - id: catalog-discovery
+        title: Discover providers and models
+        description: List authoritative provider and model capabilities before selecting a runtime model.
+      - id: builtin-custom-distinction
+        title: Distinguish built-in and custom providers
+        description: Apply the correct configuration and ownership path for platform-managed versus custom providers.
+      - id: model-capability-selection
+        title: Select a compatible model
+        description: Match model modalities and capabilities to the requested Agent or application behavior.
+      - id: credential-status
+        title: Inspect credential status
+        description: Determine whether usable provider credentials already exist without exposing their values.
+      - id: signin-preconditions
+        title: Establish sign-in preconditions
+        description: Resolve provider, environment, and requested account state before initiating sign-in.
+      - id: durable-signin-attempt
+        title: Create a durable sign-in attempt
+        description: Treat provider authentication as a resumable platform operation rather than a transient prompt exchange.
+      - id: signin-next-action
+        title: Follow sign-in next actions
+        description: Present and process the supported next action while preserving secrets and attempt identity.
+      - id: terminal-status-verification
+        title: Verify terminal credential state
+        description: Poll or resume until an explicit success, failure, expiration, or cancellation state is observed.
+      - id: secret-boundary
+        title: Protect provider secrets
+        description: Never return, log, or embed provider credential values in repository or experiment artifacts.
+      - id: cancellation-and-revocation
+        title: Cancel or revoke safely
+        description: Terminate obsolete attempts or credentials explicitly without damaging unrelated provider access.
+  platform/organization_environments:
+    capabilities:
+      - id: organization-owned-partition
+        title: Preserve organization ownership
+        description: Treat environments as organization-owned partitions rather than local labels.
+      - id: branch-compatibility
+        title: Enforce branch-environment compatibility
+        description: Verify that the selected branch is valid for the target environment before operating.
+      - id: explicit-human-selection
+        title: Require explicit human environment selection
+        description: Make interactive or local operations select the environment deliberately.
+      - id: target-derived-runtime-scope
+        title: Derive runtime environment from the target
+        description: Use deployed target context rather than user-provided selectors inside runtime code.
+      - id: exact-resource-isolation
+        title: Isolate resources by environment
+        description: Resolve MetaTables, Jobs, releases, and other resources within the exact target environment.
+      - id: secrets-constants-isolation
+        title: Isolate secrets and constants
+        description: Prevent configuration and credential values from crossing environment boundaries.
+      - id: datasource-routing-boundary
+        title: Preserve datasource routing boundaries
+        description: Keep environment selection distinct from datasource or provider routing decisions.
+      - id: agent-delegation-scope
+        title: Scope delegated Agent work
+        description: Ensure delegated actions inherit the authorized environment rather than selecting another implicitly.
+      - id: code-promotion
+        title: Promote code between environments
+        description: Promote repository revisions through supported branch and release paths.
+      - id: configuration-data-promotion
+        title: Separate configuration and data promotion
+        description: Do not treat secrets, constants, or environment data as if they were source code.
+      - id: lifecycle-transition
+        title: Manage environment lifecycle transitions
+        description: Handle creation, readiness, transition, and decommissioning with explicit evidence and safeguards.
+  platform/resource_release:
+    capabilities:
+      - id: release-kinds
+        title: Select the resource release kind
+        description: Distinguish Agent, FastAPI, and Static Site release contracts.
+      - id: release-revision-lifecycle
+        title: Manage release revisions
+        description: Keep resource identity, release configuration, revision, and deployment run state distinct.
+      - id: direct-runtime-image
+        title: Supply images for direct runtime creation
+        description: Require an exact ready image for direct Agent or FastAPI release creation, even when automatic redeployment is enabled.
+      - id: workflow-runtime-image
+        title: Apply workflow runtime image rules
+        description: Omit a related image for automatically deployed workflow Agent or FastAPI targets and require one when automation is disabled.
+      - id: static-site-image
+        title: Preserve static-site image semantics
+        description: Let the backend build Static Site assets without attaching a runtime image.
+      - id: automatic-redeployment-policy
+        title: Configure automatic resource redeployment
+        description: Bind redeployment to supported repository events and verify new revisions and deployment runs.
+      - id: fastapi-rest-websocket
+        title: Configure REST and WebSocket FastAPI release
+        description: Model the combined FastAPI runtime surface and its health and routing evidence.
+      - id: cors-policy
+        title: Configure CORS deliberately
+        description: Authorize only the intended frontend origins, methods, and headers, including preflight behavior.
+      - id: delegated-static-api
+        title: Connect Static Sites to delegated APIs
+        description: Keep static delivery separate from authenticated dynamic operations delegated to FastAPI.
+      - id: configuration-update
+        title: Update release configuration
+        description: Create a new auditable release revision instead of mutating deployed state opaquely.
+      - id: deployment-observation
+        title: Observe deployment evidence
+        description: Use revision and DeploymentRun state, logs, health, and behavior before claiming success.
+      - id: deletion-protection
+        title: Protect release deletion
+        description: Distinguish stopping automation, retiring a release, and deleting underlying resources.
+  platform/static_site:
+    capabilities:
+      - id: capability-discovery
+        title: Discover Static Site capabilities
+        description: Inspect current platform and frontend capabilities before choosing a build and deployment path.
+      - id: installed-sdk-handoff
+        title: Use the installed Command Center SDK
+        description: Consume the pinned frontend SDK contract instead of reconstructing request and response shapes.
+      - id: branch-owned-create
+        title: Create a branch-owned Static Site
+        description: Tie the site declaration to the correct CodeRepository branch and environment.
+      - id: build-environment
+        title: Define the static build environment
+        description: Configure build command, output directory, and supported non-secret build values.
+      - id: opaque-routing
+        title: Preserve opaque platform routing
+        description: Avoid hard-coding deployment URLs or assuming local route structure in frontend code.
+      - id: fastapi-delegation
+        title: Delegate dynamic behavior to FastAPI
+        description: Keep Static Sites static and route authenticated dynamic operations through a release API.
+      - id: cors-preflight
+        title: Prove browser CORS behavior
+        description: Validate origin, preflight, credentials, and response headers for the deployed site/API pair.
+      - id: automatic-redeployment
+        title: Configure automatic Static Site deployment
+        description: Build a new site revision from supported repository changes and inspect the deployment run.
+      - id: navigation-placement
+        title: Place the site in navigation
+        description: Register the application in the intended Command Center navigation scope.
+      - id: icon-mask
+        title: Configure site icon and mask
+        description: Provide valid visual metadata without confusing it with authorization or runtime configuration.
+      - id: deployment-observation
+        title: Verify Static Site deployment
+        description: Check build state, deployed assets, routing, navigation, and user-visible behavior.
   platform_operations/access_control_and_sharing:
     capabilities:
       - id: resource-boundary

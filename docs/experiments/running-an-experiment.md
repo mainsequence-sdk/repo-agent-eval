@@ -9,7 +9,7 @@ uv run ms-agent-eval inspect --workspace workspace.yaml
 
 `inspect` reports resolved commits and snapshots, selected instructions,
 coverage gaps, case projection hashes, split integrity, model deployment
-identities, reuse policies, calibration configuration, budgets, and experiment
+identities, reuse policies, judge-validation configuration, budgets, and experiment
 revision hashes.
 
 ## Choose a run
@@ -26,7 +26,7 @@ Valid baseline benchmark after readiness passes:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 ```
 
-DSPy optimization followed by validation and held-out test evaluation:
+Grouped K-fold model selection followed by one held-out test evaluation:
 
 ```bash
 uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml

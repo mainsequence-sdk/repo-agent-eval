@@ -6,11 +6,13 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -35,19 +37,30 @@ from .errors import (
     PreflightError,
     ResolutionError,
 )
-from .authoring import SnapshotContext, SnapshotSourceIdentity
+from .authoring import (
+    InstructionImportIdentity,
+    InstructionUnitIdentity,
+    SnapshotContext,
+    SnapshotSourceIdentity,
+)
 from .evaluation import (
-    CalibrationCorpus,
     CapabilityCatalog,
     CaseBank,
+    CaseDefinition,
+    JudgeValidationCorpus,
+    JudgeValidationFixture,
+    JudgeVote,
     LlmJudge,
     SplitManifest,
-    calibrate_judge,
-    calibration_result_from_scores,
+    aggregate_judge_votes,
+    deterministic_group_k_fold,
+    judge_validation_result_from_scores,
+    validate_judge,
 )
+from .endpoint_pool import EndpointLease, EndpointPool, endpoint_provenance_routes
 from .garbage_collection import collect_artifact_garbage
 from .hashing import canonical_json_bytes, content_hash, json_value
-from .models import ArtifactReference, SnapshotLock
+from .models import ArtifactReference, ProgramResult, SnapshotLock
 from .planning import CompiledWorkspace, ExperimentLock, lock_as_dict
 from .progress import ProgressEvent, ProgressSink
 from .providers import ModelCallObserver
@@ -73,6 +86,7 @@ from .storage import FilesystemArtifactStore
 from .snapshots import ExternalSnapshotStore
 from .workspace import (
     ExecutorConfiguration,
+    ExecutorType,
     ExperimentMode,
     ResolvedRoleModel,
     RoleBudget,
@@ -110,6 +124,18 @@ class RunProgress:
     result: Mapping[str, object] | None
 
 
+@dataclass(frozen=True)
+class _JudgeValidationVoteExecution:
+    position: int
+    fixture_id: str
+    repetition: int
+    vote: JudgeVote | None
+    endpoint_lease: EndpointLease
+    usage: Mapping[str, object]
+    duration_seconds: float
+    error: Exception | None
+
+
 class _ExecutionSession:
     def __init__(
         self,
@@ -121,9 +147,20 @@ class _ExecutionSession:
         self.lock = lock
         self.environment = environment
         self.observers: dict[str, list[ModelCallObserver]] = {}
+        self.endpoints: dict[str, EndpointLease] = {}
+        self.budgets: dict[str, BudgetLedger] = {}
+        self._lock = Lock()
+
+    def bind_endpoint(self, packet_id: str, lease: EndpointLease) -> None:
+        with self._lock:
+            self.endpoints[packet_id] = lease
 
     def lm(
-        self, role: str, packet: StagePacket
+        self,
+        role: str,
+        packet: StagePacket,
+        *,
+        endpoint_lease: EndpointLease | None = None,
     ) -> tuple[dspy.BaseLM, ModelCallObserver]:
         model = self.lock.models.get(role) or resolve_stage_model(
             self.coordinator.workspace.repository.workspace,
@@ -133,6 +170,12 @@ class _ExecutionSession:
         if model is None:
             raise ConfigurationError(f"stage {packet.stage.value!r} has no model")
         executor = self.coordinator.workspace.repository.workspace.executors[model.executor_id]
+        with self._lock:
+            endpoint = endpoint_lease or self.endpoints.get(packet.packet_id)
+        if executor.type is ExecutorType.ENDPOINT:
+            if endpoint is None:
+                raise IntegrityError("endpoint-backed model call has no acquired endpoint permit")
+            model = model.bind_endpoint(endpoint.endpoint)
         observer = ModelCallObserver(
             self.coordinator.artifacts,
             role=role,
@@ -143,17 +186,30 @@ class _ExecutionSession:
             experiment_revision_id=packet.experiment_revision_id,
             stage=packet.stage.value,
         )
-        self.observers.setdefault(packet.packet_id, []).append(observer)
+        with self._lock:
+            self.observers.setdefault(packet.packet_id, []).append(observer)
+            budget = self.budgets.get(packet.packet_id)
+            if budget is None:
+                budget = self.coordinator._budget_ledger(
+                    packet.stage,
+                    concurrency=(
+                        executor.total_concurrency
+                        if executor.type is ExecutorType.ENDPOINT
+                        else 1
+                    ),
+                )
+                self.budgets[packet.packet_id] = budget
         lm = self.coordinator.lm_factory(
             model,
             observer,
-            self.coordinator._budget_ledger(packet.stage),
-            executor.api_key(self.environment),
+            budget,
+            endpoint.endpoint.api_key(self.environment) if endpoint is not None else None,
         )
         return lm, observer
 
     def evidence(self, packet_id: str) -> Mapping[str, object]:
-        observers = self.observers.get(packet_id, [])
+        with self._lock:
+            observers = tuple(self.observers.get(packet_id, ()))
         records = [record for observer in observers for record in observer.records]
         traces = [artifact for observer in observers for artifact in observer.trace_artifacts]
         if not records and not traces:
@@ -164,10 +220,12 @@ class _ExecutionSession:
         }
 
     def usage(self, packet_id: str) -> Mapping[str, object]:
+        with self._lock:
+            observers = tuple(self.observers.get(packet_id, ()))
         return _usage(
             [
                 record
-                for observer in self.observers.get(packet_id, [])
+                for observer in observers
                 for record in observer.records
             ]
         )
@@ -197,6 +255,13 @@ class StageCoordinator:
         self.dspy = DspyExecutor(self.artifacts)
         self.lm_factory = lm_factory
         self.progress_sink = progress_sink
+        self._progress_lock = Lock()
+        executor_lock_root = self.artifacts.operations_root / "locks" / "executors"
+        self.endpoint_pools = {
+            executor.id: EndpointPool(executor, executor_lock_root)
+            for executor in repository.workspace.executors.values()
+            if executor.type is ExecutorType.ENDPOINT
+        }
 
     def build_report(self, run_id: str, *, replace: bool = False) -> PublishedReport:
         """Build a deterministic derived report without executing a model."""
@@ -235,7 +300,7 @@ class StageCoordinator:
         lock = self.workspace.experiment_lock(experiment_id, environment=resolved_environment)
         if pilot and lock.configuration.mode is not ExperimentMode.EVALUATE:
             raise PreflightError("pilot execution supports evaluate experiments only")
-        self._validate_calibration_split(lock, pilot=pilot)
+        self._validate_judge_validation_split(lock, pilot=pilot)
         run_id = str(uuid4())
         execution_mode = "pilot" if pilot else "benchmark"
         revision_digest = lock.content_hash.removeprefix("sha256:")
@@ -257,7 +322,7 @@ class StageCoordinator:
                 "source_snapshot_hash": lock.source_snapshot_hash,
                 "case_bank_hash": lock.case_bank_hash,
                 "split_hash": lock.split_hash,
-                "calibration_hash": lock.calibration_hash,
+                "judge_validation_hash": lock.judge_validation_hash,
                 "case_ids": [item.id for item in lock.cases],
             },
         )
@@ -271,7 +336,7 @@ class StageCoordinator:
                 "benchmark_valid": not pilot,
                 "coverage_status": self.workspace.validation["status"],
                 "selected_splits": (
-                    ["train", "validation"] if pilot else ["configured"]
+                    ["train"] if pilot else ["test"]
                 ),
                 "judge_repetitions": (
                     1
@@ -324,7 +389,7 @@ class StageCoordinator:
 
         file_inventory = self._workspace_file_inventory()
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "experiment_family": lock.configuration.id,
             "experiment_revision_id": lock.content_hash,
             "lock": lock_as_dict(lock),
@@ -338,7 +403,14 @@ class StageCoordinator:
                 "global": self.workspace.context.global_context,
                 "skills": dict(self.workspace.context.skill_contexts),
                 "sources": json_value(self.workspace.context.sources),
+                "instruction_imports": json_value(
+                    self.workspace.context.instruction_imports
+                ),
+                "instruction_units": json_value(self.workspace.context.instruction_units),
                 "source_paths": list(self.workspace.context.source_paths),
+                "workspace_source_paths": list(
+                    self.workspace.context.workspace_source_paths
+                ),
             },
             "authoring": {
                 "instructions": self.workspace.repository.case_authoring_instructions(),
@@ -356,7 +428,6 @@ class StageCoordinator:
                     "expected_response": case.expected_response,
                     "expected_artifacts": dict(case.expected_artifacts()),
                     "rubric": json.loads(case.rubric.prompt_text()),
-                    "passing_score": case.rubric.passing_score,
                     "source_paths": list(case.source_paths),
                     "solver_view_hash": case.solver_view_hash,
                     "judge_view_hash": case.judge_view_hash,
@@ -365,8 +436,8 @@ class StageCoordinator:
                 }
                 for case in self.workspace.case_bank.cases
             ],
-            "calibration": {
-                "content_hash": self.workspace.calibration.content_hash,
+            "judge_validation": {
+                "content_hash": self.workspace.judge_validation.content_hash,
                 "fixtures": [
                     {
                         "id": fixture.id,
@@ -375,12 +446,8 @@ class StageCoordinator:
                             encoding="utf-8"
                         ),
                         "label": fixture.label,
-                        "score_range": [
-                            fixture.minimum_score,
-                            fixture.maximum_score,
-                        ],
                     }
-                    for fixture in self.workspace.calibration.fixtures
+                    for fixture in self.workspace.judge_validation.fixtures
                 ],
             },
         }
@@ -435,8 +502,12 @@ class StageCoordinator:
             repository.case_authoring_path,
             repository.capability_catalog_path,
             repository.split_file,
-            repository.calibration_root / "manifest.yaml",
-            *(fixture.candidate_path for fixture in self.workspace.calibration.fixtures),
+            repository.judge_validation_root / "manifest.yaml",
+            *(fixture.candidate_path for fixture in self.workspace.judge_validation.fixtures),
+            *(
+                repository.root / relative
+                for relative in self.workspace.context.workspace_source_paths
+            ),
         }
         for case in self.workspace.case_bank.cases:
             candidates.update(
@@ -505,8 +576,8 @@ class StageCoordinator:
                     f"experiment definition is invalid for run {run_id}"
                 ) from error
         definition = _mapping(loaded, "experiment definition")
-        if definition.get("schema_version") != 2:
-            raise IntegrityError("experiment definition schema_version must be 2")
+        if definition.get("schema_version") != 3:
+            raise IntegrityError("experiment definition schema_version must be 3")
         if (
             definition.get("experiment_family") != family
             or definition.get("experiment_revision_id") != revision
@@ -550,13 +621,14 @@ class StageCoordinator:
             context = self._frozen_context(
                 _mapping(definition.get("context"), "frozen context"),
                 snapshot_store,
+                workspace_root=root,
             )
             case_bank = CaseBank.discover(repository.cases_root)
             capability_catalog = CapabilityCatalog.load(
                 repository.capability_catalog_path
             )
             splits = SplitManifest.load(repository.split_file, case_bank)
-            calibration = CalibrationCorpus.load(repository.calibration_root, case_bank)
+            judge_validation = JudgeValidationCorpus.load(repository.judge_validation_root, case_bank)
             validation = _mapping(
                 definition.get("validation"), "frozen validation"
             )
@@ -568,7 +640,7 @@ class StageCoordinator:
                 capability_catalog,
                 case_bank,
                 splits,
-                calibration,
+                judge_validation,
                 MappingProxyType(validation),
             )
             frozen_lock = frozen.experiment_lock(family, environment=environment)
@@ -638,6 +710,8 @@ class StageCoordinator:
         self,
         payload: Mapping[str, object],
         store: ExternalSnapshotStore,
+        *,
+        workspace_root: Path,
     ) -> SnapshotContext:
         raw_sources = _list(payload.get("sources"), "frozen context sources")
         sources: list[SnapshotSourceIdentity] = []
@@ -688,6 +762,22 @@ class StageCoordinator:
                     store.directory(source_lock) / locked_file.snapshot_path
                 )
             sources.append(source)
+        workspace_source_paths = tuple(
+            sorted(
+                self._safe_bundle_path(item)
+                for item in _list(
+                    payload.get("workspace_source_paths"),
+                    "frozen context workspace_source_paths",
+                )
+            )
+        )
+        for relative in workspace_source_paths:
+            if relative in source_files:
+                raise IntegrityError(f"frozen workspace source path collision: {relative}")
+            candidate = workspace_root / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                raise IntegrityError(f"frozen workspace source is missing or unsafe: {relative}")
+            source_files[relative] = candidate
         declared_paths = tuple(
             sorted(
                 _string(item, "frozen context source_paths[]")
@@ -699,6 +789,71 @@ class StageCoordinator:
         if declared_paths != tuple(sorted(source_files)):
             raise IntegrityError("frozen context source inventory is incomplete")
         skills = _mapping(payload.get("skills"), "frozen context skills")
+        instruction_units = tuple(
+            InstructionUnitIdentity(
+                id=_string(item.get("id"), "frozen instruction unit id"),
+                source_id=_string(
+                    item.get("source_id"), "frozen instruction unit source_id"
+                ),
+                source_type=_string(
+                    item.get("source_type"), "frozen instruction unit source_type"
+                ),
+                source_path=self._safe_bundle_path(item.get("source_path")),
+                content_hash=_string(
+                    item.get("content_hash"), "frozen instruction unit content_hash"
+                ),
+            )
+            for item in (
+                _mapping(raw, "frozen instruction units[]")
+                for raw in _list(
+                    payload.get("instruction_units"), "frozen instruction units"
+                )
+            )
+        )
+        if {item.id for item in instruction_units} != set(skills):
+            raise IntegrityError("frozen instruction units do not match frozen skill contexts")
+        instruction_imports: list[InstructionImportIdentity] = []
+        for raw_import in _list(
+            payload.get("instruction_imports"), "frozen instruction imports"
+        ):
+            item = _mapping(raw_import, "frozen instruction imports[]")
+            imported_units = tuple(
+                InstructionUnitIdentity(
+                    id=_string(unit.get("id"), "frozen imported unit id"),
+                    source_id=_string(
+                        unit.get("source_id"), "frozen imported unit source_id"
+                    ),
+                    source_type=_string(
+                        unit.get("source_type"), "frozen imported unit source_type"
+                    ),
+                    source_path=self._safe_bundle_path(unit.get("source_path")),
+                    content_hash=_string(
+                        unit.get("content_hash"), "frozen imported unit content_hash"
+                    ),
+                )
+                for unit in (
+                    _mapping(raw_unit, "frozen imported units[]")
+                    for raw_unit in _list(item.get("units"), "frozen imported units")
+                )
+            )
+            instruction_imports.append(
+                InstructionImportIdentity(
+                    id=_string(item.get("id"), "frozen instruction import id"),
+                    source=_string(item.get("source"), "frozen instruction import source"),
+                    note=_string(item.get("note"), "frozen instruction import note"),
+                    manifest_path=self._safe_bundle_path(item.get("manifest_path")),
+                    manifest_hash=_string(
+                        item.get("manifest_hash"), "frozen instruction import manifest_hash"
+                    ),
+                    source_metadata=MappingProxyType(
+                        _mapping(
+                            item.get("source_metadata"),
+                            "frozen instruction import source_metadata",
+                        )
+                    ),
+                    units=imported_units,
+                )
+            )
         return SnapshotContext(
             snapshot_hash=_string(
                 payload.get("snapshot_hash"), "frozen context snapshot_hash"
@@ -707,6 +862,8 @@ class StageCoordinator:
                 payload.get("resolved_commit"), "frozen context resolved_commit"
             ),
             sources=tuple(sources),
+            instruction_imports=tuple(instruction_imports),
+            instruction_units=instruction_units,
             global_context=_text(payload.get("global"), "frozen global context"),
             skill_contexts=MappingProxyType(
                 {
@@ -716,6 +873,7 @@ class StageCoordinator:
             ),
             source_paths=declared_paths,
             source_files=MappingProxyType(source_files),
+            workspace_source_paths=workspace_source_paths,
         )
 
     def resume(
@@ -739,7 +897,7 @@ class StageCoordinator:
                     through=through,
                 )
         lock = self.workspace.experiment_lock(experiment_id, environment=resolved_environment)
-        self._validate_calibration_split(lock, pilot=pilot)
+        self._validate_judge_validation_split(lock, pilot=pilot)
         self._emit(
             "run_resumed",
             run_id,
@@ -779,38 +937,46 @@ class StageCoordinator:
         lock = self.workspace.experiment_lock(experiment_id, environment=environment)
         if stage is StageKind.AUTHOR:
             return (self._author_packet(run_id, lock, campaign=campaign),)
-        if stage is StageKind.CALIBRATE_JUDGE:
-            return (self._calibration_packet(run_id, lock),)
-        calibration = self._persisted_packet(run_id, StageKind.CALIBRATE_JUDGE)
-        if calibration is None or not self._calibration_passed(calibration):
-            raise PreflightError("judge calibration must pass before this stage is prepared")
-        if stage is StageKind.OPTIMIZE:
+        if stage is StageKind.VALIDATE_JUDGE:
+            return (self._judge_validation_packet(run_id, lock),)
+        judge_validation = self._persisted_packet(run_id, StageKind.VALIDATE_JUDGE)
+        if judge_validation is None or not self._judge_validation_succeeded(judge_validation):
+            raise PreflightError("judge validation must succeed before this stage is prepared")
+        if stage is StageKind.FIT:
             if pilot:
-                raise PreflightError("pilot runs cannot prepare optimization")
-            return (self._optimize_packet(run_id, lock, calibration),)
+                raise PreflightError("pilot runs cannot prepare fitting")
+            if lock.configuration.mode is not ExperimentMode.OPTIMIZE:
+                raise PreflightError("fit is valid only for optimization experiments")
+            selection = self._persisted_packet(run_id, StageKind.SELECT)
+            if selection is not None:
+                return (
+                    self._final_fit_packet(run_id, lock, judge_validation, selection),
+                )
+            return self._cross_validation_fit_packets(run_id, lock, judge_validation)
         if stage is StageKind.SOLVE:
-            program_dependency: StagePacket | None = None
-            selected = None
             if lock.configuration.mode is ExperimentMode.OPTIMIZE:
-                program_dependency = self._persisted_packet(run_id, StageKind.OPTIMIZE)
-                if program_dependency is None:
-                    raise PreflightError("optimize must persist before solve is prepared")
-                final = self._persisted_packet(run_id, StageKind.FINAL_EVALUATE)
-                selected = "test" if final is not None else "validation"
-                if final is not None:
-                    program_dependency = final
-            selected_splits = (
-                ("train", "validation")
-                if pilot and lock.configuration.mode is ExperimentMode.EVALUATE
-                else None
-            )
+                fits = self._persisted_fit_packets(run_id, phase="final_fit")
+                if fits:
+                    return self._solve_packets(
+                        run_id,
+                        lock,
+                        judge_validation,
+                        selected_split="test",
+                        program_dependency=fits[0],
+                        evaluation_phase="test",
+                    )
+                fits = self._persisted_fit_packets(run_id, phase="cross_validation")
+                if not fits:
+                    raise PreflightError("cross-validation fits must persist before solve")
+                return self._cross_validation_solve_packets(
+                    run_id, lock, judge_validation, fits
+                )
             return self._solve_packets(
                 run_id,
                 lock,
-                calibration,
-                selected_split=selected,
-                selected_splits=selected_splits,
-                program_dependency=program_dependency,
+                judge_validation,
+                selected_split="train" if pilot else "test",
+                evaluation_phase="pilot" if pilot else "test",
             )
         if stage is StageKind.JUDGE:
             solves = tuple(
@@ -820,22 +986,19 @@ class StageCoordinator:
             )
             if not solves:
                 raise PreflightError("at least one solve result must persist before judge")
-            return self._judge_packets(run_id, lock, calibration, solves)
-        if stage is StageKind.FINAL_EVALUATE:
-            if pilot:
-                raise PreflightError("pilot runs cannot open held-out final evaluation")
-            optimize = self._persisted_packet(run_id, StageKind.OPTIMIZE)
-            if optimize is None:
-                raise PreflightError("optimize must persist before final_evaluate")
-            validation = self._persisted_judges(run_id, split="validation")
-            if not validation:
-                raise PreflightError("validation judgments must persist before final_evaluate")
-            return (self._final_packet(run_id, lock, optimize, validation),)
+            return self._judge_packets(run_id, lock, judge_validation, solves)
+        if stage is StageKind.SELECT:
+            if lock.configuration.mode is not ExperimentMode.OPTIMIZE:
+                raise PreflightError("select is valid only for optimization experiments")
+            judges = self._persisted_judges(run_id, phase="cross_validation")
+            if not judges:
+                raise PreflightError("cross-validation judgments must persist before selection")
+            return (self._selection_packet(run_id, lock, judge_validation, judges),)
         if stage is StageKind.AGGREGATE:
             judges = self._persisted_judges(run_id)
             if not judges:
                 raise PreflightError("judgments must persist before aggregate")
-            return (self._aggregate_packet(run_id, lock, calibration, judges),)
+            return (self._aggregate_packet(run_id, lock, judge_validation, judges),)
         raise ResolutionError(f"unsupported stage: {stage.value}")
 
     def execute_packet(
@@ -910,8 +1073,8 @@ class StageCoordinator:
             usage={},
             provenance={
                 "cache_eligible": not (
-                    packet.stage is StageKind.CALIBRATE_JUDGE
-                    and payload.get("passed") is not True
+                    packet.stage is StageKind.VALIDATE_JUDGE
+                    and payload.get("ordering_consistent") is not True
                 )
             },
             started_at=now,
@@ -959,67 +1122,71 @@ class StageCoordinator:
             if not self._ensure_executed(author, lock, session):
                 return self._blocked_progress(run_id, lock.configuration.id, author)
             return self._progress(run_id, lock.configuration.id, "paused", author.stage)
-        calibration = self._calibration_packet(run_id, lock)
-        if not self._ensure_executed(calibration, lock, session):
-            return self._blocked_progress(run_id, lock.configuration.id, calibration)
-        if not self._calibration_passed(calibration):
+        judge_validation = self._judge_validation_packet(run_id, lock)
+        if not self._ensure_executed(judge_validation, lock, session):
+            return self._blocked_progress(run_id, lock.configuration.id, judge_validation)
+        if not self._judge_validation_succeeded(judge_validation):
             return self._terminal_progress(
                 run_id,
                 lock.configuration.id,
-                "calibration_failed",
-                calibration,
+                "judge_validation_failed",
+                judge_validation,
             )
-        if through == StageKind.CALIBRATE_JUDGE.value:
-            return self._progress(run_id, lock.configuration.id, "paused", calibration.stage)
+        if through == StageKind.VALIDATE_JUDGE.value:
+            return self._progress(
+                run_id, lock.configuration.id, "paused", judge_validation.stage
+            )
 
-        program_dependency: StagePacket | None = None
         if lock.configuration.mode is ExperimentMode.OPTIMIZE:
             if pilot:
                 raise IntegrityError("pilot execution cannot enter optimization")
-            optimize = self._optimize_packet(run_id, lock, calibration)
-            if not self._ensure_executed(optimize, lock, session):
-                return self._blocked_progress(run_id, lock.configuration.id, optimize)
-            if through == StageKind.OPTIMIZE.value:
-                return self._progress(run_id, lock.configuration.id, "paused", optimize.stage)
-            validation_solves = self._solve_packets(
-                run_id,
-                lock,
-                calibration,
-                selected_split="validation",
-                program_dependency=optimize,
+            cv_fits = self._cross_validation_fit_packets(run_id, lock, judge_validation)
+            pending = self._execute_all(cv_fits, lock, session)
+            if pending is not None:
+                return self._blocked_progress(run_id, lock.configuration.id, pending)
+            if through == StageKind.FIT.value:
+                return self._progress(run_id, lock.configuration.id, "paused", StageKind.FIT)
+            cv_solves = self._cross_validation_solve_packets(
+                run_id, lock, judge_validation, cv_fits
             )
-            pending = self._execute_all(validation_solves, lock, session)
+            pending = self._execute_all(cv_solves, lock, session)
             if pending is not None:
                 return self._blocked_progress(run_id, lock.configuration.id, pending)
             if through == StageKind.SOLVE.value:
                 return self._progress(run_id, lock.configuration.id, "paused", StageKind.SOLVE)
-            validation_judges = self._judge_packets(
-                run_id, lock, calibration, validation_solves
-            )
-            pending = self._execute_all(validation_judges, lock, session)
+            cv_judges = self._judge_packets(run_id, lock, judge_validation, cv_solves)
+            pending = self._execute_all(cv_judges, lock, session)
             if pending is not None:
                 return self._blocked_progress(run_id, lock.configuration.id, pending)
             if through == StageKind.JUDGE.value:
                 return self._progress(run_id, lock.configuration.id, "paused", StageKind.JUDGE)
-            final = self._final_packet(run_id, lock, optimize, validation_judges)
-            if not self._ensure_executed(final, lock, session):
-                return self._blocked_progress(run_id, lock.configuration.id, final)
-            if through == StageKind.FINAL_EVALUATE.value:
-                return self._progress(run_id, lock.configuration.id, "paused", final.stage)
-            program_dependency = final
+            selection = self._selection_packet(
+                run_id, lock, judge_validation, cv_judges
+            )
+            if not self._ensure_executed(selection, lock, session):
+                return self._blocked_progress(run_id, lock.configuration.id, selection)
+            if through == StageKind.SELECT.value:
+                return self._progress(run_id, lock.configuration.id, "paused", selection.stage)
+            final_fit = self._final_fit_packet(
+                run_id, lock, judge_validation, selection
+            )
+            if not self._ensure_executed(final_fit, lock, session):
+                return self._blocked_progress(run_id, lock.configuration.id, final_fit)
             solves = self._solve_packets(
                 run_id,
                 lock,
-                calibration,
+                judge_validation,
                 selected_split="test",
-                program_dependency=program_dependency,
+                program_dependency=final_fit,
+                evaluation_phase="test",
             )
         else:
             solves = self._solve_packets(
                 run_id,
                 lock,
-                calibration,
-                selected_splits=("train", "validation") if pilot else None,
+                judge_validation,
+                selected_split="train" if pilot else "test",
+                evaluation_phase="pilot" if pilot else "test",
             )
 
         pending = self._execute_all(solves, lock, session)
@@ -1027,14 +1194,14 @@ class StageCoordinator:
             return self._blocked_progress(run_id, lock.configuration.id, pending)
         if through == StageKind.SOLVE.value:
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.SOLVE)
-        judges = self._judge_packets(run_id, lock, calibration, solves)
+        judges = self._judge_packets(run_id, lock, judge_validation, solves)
         pending = self._execute_all(judges, lock, session)
         if pending is not None:
             return self._blocked_progress(run_id, lock.configuration.id, pending)
         if through == StageKind.JUDGE.value:
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.JUDGE)
         all_judges = self._persisted_judges(run_id)
-        aggregate = self._aggregate_packet(run_id, lock, calibration, all_judges)
+        aggregate = self._aggregate_packet(run_id, lock, judge_validation, all_judges)
         if not self._ensure_executed(aggregate, lock, session):
             return self._blocked_progress(run_id, lock.configuration.id, aggregate)
         if through == StageKind.AGGREGATE.value:
@@ -1057,15 +1224,75 @@ class StageCoordinator:
         lock: ExperimentLock,
         session: _ExecutionSession,
     ) -> StagePacket | None:
-        for position, packet in enumerate(packets, start=1):
-            if not self._ensure_executed(
+        if not packets:
+            return None
+        configurations = [self._executor(packet) for packet in packets]
+        first = configurations[0]
+        if (
+            first.type is not ExecutorType.ENDPOINT
+            or any(configuration.id != first.id for configuration in configurations)
+            or first.total_concurrency <= 1
+        ):
+            for position, packet in enumerate(packets, start=1):
+                if not self._ensure_executed(
+                    packet,
+                    lock,
+                    session,
+                    position=position,
+                    total=len(packets),
+                ):
+                    return packet
+            return None
+
+        total = len(packets)
+        maximum_workers = min(total, first.total_concurrency)
+
+        def execute(position: int, packet: StagePacket) -> bool:
+            worker_session = _ExecutionSession(self, lock, session.environment)
+            return self._ensure_executed(
                 packet,
                 lock,
-                session,
+                worker_session,
                 position=position,
-                total=len(packets),
-            ):
-                return packet
+                total=total,
+            )
+
+        failures: list[tuple[int, StagePacket]] = []
+        errors: list[tuple[int, Exception]] = []
+        next_index = 0
+        futures: dict[Future[bool], tuple[int, StagePacket]] = {}
+        stopped = False
+        with ThreadPoolExecutor(
+            max_workers=maximum_workers,
+            thread_name_prefix=f"ms-agent-eval-{first.id}",
+        ) as pool:
+            while next_index < maximum_workers:
+                position = next_index + 1
+                packet = packets[next_index]
+                futures[pool.submit(execute, position, packet)] = (position, packet)
+                next_index += 1
+            while futures:
+                completed, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    position, packet = futures.pop(future)
+                    try:
+                        succeeded = future.result()
+                    except Exception as error:
+                        errors.append((position, error))
+                        stopped = True
+                    else:
+                        if not succeeded:
+                            failures.append((position, packet))
+                            stopped = True
+                while not stopped and next_index < total and len(futures) < maximum_workers:
+                    position = next_index + 1
+                    packet = packets[next_index]
+                    futures[pool.submit(execute, position, packet)] = (position, packet)
+                    next_index += 1
+        if errors:
+            raise min(errors, key=lambda item: item[0])[1]
+        if failures:
+            return min(failures, key=lambda item: item[0])[1]
         return None
 
     def _ensure_executed(
@@ -1190,27 +1417,33 @@ class StageCoordinator:
         value = dict(source)
         if packet.stage is StageKind.SOLVE:
             current = _mapping(self._input(packet, "case"), "solve input")
-            for field in ("case_id", "split", "repetition", "program_hash"):
+            for field in (
+                "case_id",
+                "split",
+                "repetition",
+                "program_hash",
+                "evaluation_phase",
+                "fold",
+                "candidate_id",
+                "candidate_k",
+            ):
                 value[field] = current[field]
         elif packet.stage is StageKind.JUDGE:
             current = _mapping(self._input(packet, "evaluation"), "judge input")
             value["case_id"] = current["case_id"]
             value["split"] = current["split"]
             value["repetition"] = current["repetition"]
-        elif packet.stage is StageKind.CALIBRATE_JUDGE:
+            value["evaluation_phase"] = current["evaluation_phase"]
+            value["fold"] = current["fold"]
+            value["candidate_id"] = current["candidate_id"]
+            value["candidate_k"] = current["candidate_k"]
+        elif packet.stage is StageKind.VALIDATE_JUDGE:
             scores = _mapping(value.get("fixture_scores"), "fixture_scores")
-            passes = _mapping(value.get("fixture_passes"), "fixture_passes")
-            rebound = calibration_result_from_scores(
-                self.workspace.calibration,
+            rebound = judge_validation_result_from_scores(
+                self.workspace.judge_validation,
                 {key: float(score) for key, score in scores.items()},
-                fixture_passes={key: bool(passed) for key, passed in passes.items()},
             )
             value = dict(json_value(rebound))
-        elif packet.stage is StageKind.FINAL_EVALUATE:
-            current = _mapping(
-                self._input(packet, "publication_gate"), "publication gate"
-            )
-            value.update(current)
         elif packet.stage is StageKind.AGGREGATE:
             value = dict(self._execute_local(packet, self._lock_for_packet(packet)))
             execution = dict(_mapping(value.get("execution"), "aggregate execution"))
@@ -1263,26 +1496,62 @@ class StageCoordinator:
             )
             return None
         started_clock = time.monotonic()
-        self._emit_packet(
-            "packet_started",
-            packet,
-            position=position,
-            total=total,
-        )
-        claim = self.ledger.claim(
-            packet.packet_id,
-            executor_id=configuration.id,
-            worker_id=f"coordinator-{uuid4()}",
-            lease_seconds=packet.budget.wall_seconds,
-        )
         started = _timestamp()
+        endpoint_provenance: Mapping[str, object] = {}
+        endpoint_lease: EndpointLease | None = None
+        internal_endpoint_fanout = (
+            configuration.type is ExecutorType.ENDPOINT
+            and packet.stage is StageKind.VALIDATE_JUDGE
+            and configuration.total_concurrency > 1
+        )
+        claim = None
         try:
-            output = self._automatic_output(packet, lock, session, configuration)
+            with self._endpoint_lease(
+                configuration,
+                acquire=not internal_endpoint_fanout,
+            ) as endpoint_lease:
+                if endpoint_lease is not None:
+                    session.bind_endpoint(packet.packet_id, endpoint_lease)
+                    endpoint_provenance = endpoint_lease.provenance()
+                endpoint_details: dict[str, object] = {}
+                if endpoint_lease is not None:
+                    endpoint_details = {
+                        "endpoint_id": endpoint_lease.endpoint.id,
+                        "pool_capacity": configuration.total_concurrency,
+                    }
+                elif internal_endpoint_fanout:
+                    endpoint_details = {
+                        "pool_capacity": configuration.total_concurrency,
+                        "request_count": (
+                            len(self.workspace.judge_validation.fixtures)
+                            * self._judge_repetitions(packet.run_id)
+                        ),
+                    }
+                self._emit_packet(
+                    "packet_started",
+                    packet,
+                    position=position,
+                    total=total,
+                    details=endpoint_details,
+                )
+                claim = self.ledger.claim(
+                    packet.packet_id,
+                    executor_id=configuration.id,
+                    worker_id=f"coordinator-{uuid4()}",
+                    lease_seconds=packet.budget.wall_seconds,
+                )
+                started = _timestamp()
+                output = self._automatic_output(packet, lock, session, configuration)
+            assert claim is not None
             artifact = self.ledger.put_json("result", output.value)
-            provenance = {**dict(output.provenance), **dict(session.evidence(packet.packet_id))}
+            provenance = {
+                **dict(output.provenance),
+                **dict(session.evidence(packet.packet_id)),
+                **dict(endpoint_provenance),
+            }
             if (
-                packet.stage is StageKind.CALIBRATE_JUDGE
-                and output.value.get("passed") is not True
+                packet.stage is StageKind.VALIDATE_JUDGE
+                and output.value.get("ordering_consistent") is not True
             ):
                 provenance["cache_eligible"] = False
             result = StageResult.create(
@@ -1307,13 +1576,19 @@ class StageCoordinator:
             )
             return None
         except AutomaticExecutionFailed as error:
+            if claim is None:
+                raise
             failed = StageResult.create(
                 packet=packet,
                 status="failed",
                 executor_version=error.version or configuration.version,
                 worker_id=claim.worker_id,
                 usage=error.usage,
-                provenance=error.provenance,
+                provenance={
+                    **dict(error.provenance),
+                    **dict(session.evidence(packet.packet_id)),
+                    **dict(endpoint_provenance),
+                },
                 started_at=started,
                 completed_at=_timestamp(),
                 observed_model=error.observed_model or packet.model.id,
@@ -1329,17 +1604,29 @@ class StageCoordinator:
                 position=position,
                 total=total,
                 duration_seconds=time.monotonic() - started_clock,
-                details={"error": failed.error.message if failed.error else error.kind},
+                details={
+                    "error": failed.error.message if failed.error else error.kind,
+                    **(
+                        {"endpoint_id": endpoint_lease.endpoint.id}
+                        if endpoint_lease is not None
+                        else {}
+                    ),
+                },
             )
             return None
         except Exception as error:
+            if claim is None:
+                raise
             failed = StageResult.create(
                 packet=packet,
                 status="failed",
                 executor_version=configuration.version,
                 worker_id=claim.worker_id,
                 usage=session.usage(packet.packet_id),
-                provenance=session.evidence(packet.packet_id),
+                provenance={
+                    **dict(session.evidence(packet.packet_id)),
+                    **dict(endpoint_provenance),
+                },
                 started_at=started,
                 completed_at=_timestamp(),
                 observed_model=packet.model.id,
@@ -1355,7 +1642,14 @@ class StageCoordinator:
                 position=position,
                 total=total,
                 duration_seconds=time.monotonic() - started_clock,
-                details={"error": failed.error.message if failed.error else str(error)},
+                details={
+                    "error": failed.error.message if failed.error else str(error),
+                    **(
+                        {"endpoint_id": endpoint_lease.endpoint.id}
+                        if endpoint_lease is not None
+                        else {}
+                    ),
+                },
             )
             return None
         self.ledger.submit(result, lease_id=claim.lease_id)
@@ -1372,13 +1666,37 @@ class StageCoordinator:
             )
             return None
         persisted = self.ledger.persist(packet.packet_id)
+        completion_endpoint_details: dict[str, object] = {}
+        if endpoint_lease is not None:
+            completion_endpoint_details = {
+                "endpoint_id": endpoint_lease.endpoint.id,
+                "pool_capacity": configuration.total_concurrency,
+            }
+        elif internal_endpoint_fanout:
+            raw_pool = output.provenance.get("endpoint_pool")
+            raw_routes = raw_pool.get("routes") if isinstance(raw_pool, Mapping) else ()
+            completion_endpoint_details = {
+                "pool_capacity": configuration.total_concurrency,
+                "endpoint_ids": [
+                    route["endpoint_id"]
+                    for route in raw_routes
+                    if isinstance(route, Mapping)
+                    and isinstance(route.get("endpoint_id"), str)
+                ]
+                if isinstance(raw_routes, Sequence)
+                and not isinstance(raw_routes, (str, bytes, bytearray))
+                else [],
+            }
         self._emit_packet(
             "packet_completed",
             packet,
             position=position,
             total=total,
             duration_seconds=time.monotonic() - started_clock,
-            details=self._output_event_details(packet.stage, output.value),
+            details={
+                **self._output_event_details(packet.stage, output.value),
+                **completion_endpoint_details,
+            },
         )
         return persisted
 
@@ -1392,9 +1710,9 @@ class StageCoordinator:
             return False
         if packet.stage is StageKind.AGGREGATE:
             return True
-        if packet.stage is StageKind.CALIBRATE_JUDGE:
-            output = _mapping(self.ledger.read_output(result), "calibration output")
-            return output.get("passed") is False
+        if packet.stage is StageKind.VALIDATE_JUDGE:
+            output = _mapping(self.ledger.read_output(result), "judge validation output")
+            return output.get("ordering_consistent") is False
         return False
 
     def _finalize_run(
@@ -1435,6 +1753,20 @@ class StageCoordinator:
         experiment_id: str,
         packet: StagePacket,
     ) -> RunProgress:
+        packet_status = self.ledger.status(packet.packet_id)
+        if packet_status.state in {StageState.FAILED, StageState.REJECTED}:
+            error = packet_status.result.error if packet_status.result is not None else None
+            return self._progress(
+                run_id,
+                experiment_id,
+                "execution_failed",
+                packet.stage,
+                result={
+                    "packet_id": packet.packet_id,
+                    "error_kind": error.kind if error is not None else packet_status.state.value,
+                    "error": error.message if error is not None else packet_status.state.value,
+                },
+            )
         return self._progress(run_id, experiment_id, "awaiting_execution", packet.stage)
 
     def _terminal_progress(
@@ -1523,29 +1855,30 @@ class StageCoordinator:
     ) -> None:
         if self.progress_sink is None:
             return
-        self.progress_sink(
-            ProgressEvent(
-                kind=kind,
-                run_id=run_id,
-                experiment_id=experiment_id,
-                stage=stage,
-                packet_id=packet_id,
-                work_id=work_id,
-                attempt_id=attempt_id,
-                experiment_revision_id=experiment_revision_id,
-                case_id=case_id,
-                case_title=case_title,
-                skill=skill,
-                split=split,
-                repetition=repetition,
-                position=position,
-                total=total,
-                model=model,
-                executor=executor,
-                duration_seconds=duration_seconds,
-                details=dict(details or {}),
+        with self._progress_lock:
+            self.progress_sink(
+                ProgressEvent(
+                    kind=kind,
+                    run_id=run_id,
+                    experiment_id=experiment_id,
+                    stage=stage,
+                    packet_id=packet_id,
+                    work_id=work_id,
+                    attempt_id=attempt_id,
+                    experiment_revision_id=experiment_revision_id,
+                    case_id=case_id,
+                    case_title=case_title,
+                    skill=skill,
+                    split=split,
+                    repetition=repetition,
+                    position=position,
+                    total=total,
+                    model=model,
+                    executor=executor,
+                    duration_seconds=duration_seconds,
+                    details=dict(details or {}),
+                )
             )
-        )
 
     def _packet_event_context(self, packet: StagePacket) -> dict[str, object]:
         input_id = {
@@ -1573,16 +1906,16 @@ class StageCoordinator:
                     else None
                 ),
             }
-        if packet.stage is StageKind.CALIBRATE_JUDGE:
-            value = _mapping(self._input(packet, "calibration"), "calibration input")
+        if packet.stage is StageKind.VALIDATE_JUDGE:
+            value = _mapping(self._input(packet, "judge_validation"), "judge_validation input")
             fixtures = value.get("fixtures")
             return {
                 "details": {
                     "fixture_count": len(fixtures) if isinstance(fixtures, list) else 0
                 }
             }
-        if packet.stage is StageKind.OPTIMIZE:
-            value = _mapping(self._input(packet, "training_set"), "optimization input")
+        if packet.stage is StageKind.FIT:
+            value = _mapping(self._input(packet, "training_set"), "fit input")
             cases = value.get("cases")
             return {
                 "details": {"training_case_count": len(cases) if isinstance(cases, list) else 0}
@@ -1590,13 +1923,8 @@ class StageCoordinator:
         return {}
 
     def _run_case_count(self, mode: ExperimentMode, *, pilot: bool) -> int:
-        if not pilot and mode is ExperimentMode.EVALUATE:
-            return len(self.workspace.case_bank.cases)
-        selected_splits = (
-            {"train", "validation"}
-            if pilot
-            else {"train", "validation", "test"}
-        )
+        del mode
+        selected_splits = {"train"} if pilot else {"test"}
         return sum(
             self.workspace.splits.split_for(case) in selected_splits
             for case in self.workspace.case_bank.cases
@@ -1616,21 +1944,27 @@ class StageCoordinator:
                     if isinstance(item, Mapping) and isinstance(item.get("id"), str)
                 ]
                 return {"produced_count": len(packages), "case_ids": case_ids}
-        if stage is StageKind.CALIBRATE_JUDGE:
-            return {"passed": output.get("passed") is True}
+        if stage is StageKind.VALIDATE_JUDGE:
+            return {"ordering_consistent": output.get("ordering_consistent") is True}
         if stage is StageKind.JUDGE:
-            return {
-                "score": output.get("score"),
-                "passed": output.get("passed"),
-            }
+            return {"score": output.get("score")}
         if stage is StageKind.AGGREGATE:
             return {
                 key: output[key]
-                for key in ("case_count", "mean_score", "pass_rate", "diagnostic_only")
+                for key in ("case_count", "mean_score", "diagnostic_only")
                 if key in output
             }
-        if stage in {StageKind.OPTIMIZE, StageKind.FINAL_EVALUATE}:
-            return {"published": output.get("published") is True}
+        if stage is StageKind.FIT:
+            return {
+                "candidate_id": output.get("candidate_id"),
+                "phase": output.get("phase"),
+                "fold": output.get("fold"),
+            }
+        if stage is StageKind.SELECT:
+            return {
+                "selected_candidate_id": output.get("selected_candidate_id"),
+                "selected_mean_score": output.get("selected_mean_score"),
+            }
         return {}
 
     def _automatic_output(
@@ -1654,8 +1988,8 @@ class StageCoordinator:
             raise ConfigurationError(f"unsupported executor adapter: {executor.adapter}")
         if packet.stage is StageKind.AUTHOR:
             return self._execute_author(packet, session)
-        if packet.stage is StageKind.CALIBRATE_JUDGE:
-            return self._execute_calibration(packet, lock, session)
+        if packet.stage is StageKind.VALIDATE_JUDGE:
+            return self._execute_judge_validation(packet, lock, session)
         if packet.stage is StageKind.SOLVE:
             return self._execute_solve(packet, lock, session)
         if packet.stage is StageKind.JUDGE:
@@ -1687,7 +2021,7 @@ class StageCoordinator:
             observer=observer,
         )
         if result.status != "completed":
-            raise IntegrityError(f"author DSPy call failed: {result.error_kind}")
+            raise _dspy_execution_failure("author", result)
         packages = _list(result.outputs.get("candidate_packages"), "candidate_packages")
         return ExecutorOutput(
             {"candidate_packages": list(packages)},
@@ -1696,12 +2030,23 @@ class StageCoordinator:
             packet.model.id,
         )
 
-    def _execute_calibration(
+    def _execute_judge_validation(
         self,
         packet: StagePacket,
         lock: ExperimentLock,
         session: _ExecutionSession,
     ) -> ExecutorOutput:
+        configuration = self._executor(packet)
+        if (
+            configuration.type is ExecutorType.ENDPOINT
+            and configuration.total_concurrency > 1
+        ):
+            return self._execute_parallel_judge_validation(
+                packet,
+                lock,
+                session,
+                configuration,
+            )
         judge, observer = self._judge(
             lock,
             session,
@@ -1709,9 +2054,9 @@ class StageCoordinator:
             repetitions=self._judge_repetitions(packet.run_id),
         )
         start = len(observer.records)
-        result = calibrate_judge(
+        result = validate_judge(
             judge,
-            self.workspace.calibration,
+            self.workspace.judge_validation,
             self.workspace.case_bank,
             self.workspace.context.skill,
         )
@@ -1724,6 +2069,261 @@ class StageCoordinator:
             lock.models["judge"].model,
         )
 
+    def _execute_parallel_judge_validation(
+        self,
+        packet: StagePacket,
+        lock: ExperimentLock,
+        session: _ExecutionSession,
+        configuration: ExecutorConfiguration,
+    ) -> ExecutorOutput:
+        repetitions = self._judge_repetitions(packet.run_id)
+        cases = {case.id: case for case in self.workspace.case_bank.cases}
+        jobs: list[
+            tuple[int, JudgeValidationFixture, CaseDefinition, str, str, int]
+        ] = []
+        position = 0
+        for fixture in self.workspace.judge_validation.fixtures:
+            case = cases[fixture.case_id]
+            candidate_response = fixture.candidate_path.read_text(encoding="utf-8")
+            skill_context = self.workspace.context.skill(case.skill)
+            for repetition in range(1, repetitions + 1):
+                position += 1
+                jobs.append(
+                    (
+                        position,
+                        fixture,
+                        case,
+                        candidate_response,
+                        skill_context,
+                        repetition,
+                    )
+                )
+
+        pool = self.endpoint_pools[configuration.id]
+        progress_lock = Lock()
+        completed = 0
+
+        def execute_vote(
+            job: tuple[int, JudgeValidationFixture, CaseDefinition, str, str, int],
+        ) -> _JudgeValidationVoteExecution:
+            nonlocal completed
+            job_position, fixture, case, candidate, context, repetition = job
+            started = time.monotonic()
+            observer: ModelCallObserver | None = None
+            vote: JudgeVote | None = None
+            error: Exception | None = None
+            with pool.lease() as lease:
+                try:
+                    judge, observer = self._judge(
+                        lock,
+                        session,
+                        packet,
+                        repetitions=1,
+                        endpoint_lease=lease,
+                    )
+                    vote = judge.evaluate_vote(
+                        case,
+                        candidate,
+                        skill_context=context,
+                    )
+                except Exception as caught:
+                    error = caught
+                duration = time.monotonic() - started
+                usage = _usage(observer.records) if observer is not None else _usage(())
+                with progress_lock:
+                    completed += 1
+                    completion_position = completed
+                fixture_id = fixture.id
+                self._emit_packet(
+                    (
+                        "judge_validation_vote_completed"
+                        if error is None
+                        else "judge_validation_vote_failed"
+                    ),
+                    packet,
+                    position=completion_position,
+                    total=len(jobs),
+                    duration_seconds=duration,
+                    details={
+                        "fixture_id": fixture_id,
+                        "vote": repetition,
+                        "endpoint_id": lease.endpoint.id,
+                        "request_position": job_position,
+                        **(
+                            {
+                                "error": self._redacted_error(
+                                    error,
+                                    session.environment,
+                                )
+                            }
+                            if error is not None
+                            else {}
+                        ),
+                    },
+                )
+                return _JudgeValidationVoteExecution(
+                    job_position,
+                    fixture_id,
+                    repetition,
+                    vote,
+                    lease,
+                    usage,
+                    duration,
+                    error,
+                )
+
+        maximum_workers = min(len(jobs), configuration.total_concurrency)
+        with ThreadPoolExecutor(
+            max_workers=maximum_workers,
+            thread_name_prefix=f"ms-agent-eval-{configuration.id}-judge-validation",
+        ) as workers:
+            next_index = 0
+            futures: dict[Future[_JudgeValidationVoteExecution], int] = {}
+            completed_executions: list[_JudgeValidationVoteExecution] = []
+            stopped = False
+            while next_index < maximum_workers:
+                future = workers.submit(execute_vote, jobs[next_index])
+                futures[future] = next_index
+                next_index += 1
+            while futures:
+                finished, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in finished:
+                    futures.pop(future)
+                    execution = future.result()
+                    completed_executions.append(execution)
+                    if execution.error is not None:
+                        stopped = True
+                while (
+                    not stopped
+                    and next_index < len(jobs)
+                    and len(futures) < maximum_workers
+                ):
+                    future = workers.submit(execute_vote, jobs[next_index])
+                    futures[future] = next_index
+                    next_index += 1
+            executions = tuple(
+                sorted(completed_executions, key=lambda item: item.position)
+            )
+
+        provenance = self._judge_validation_endpoint_provenance(
+            configuration,
+            executions,
+        )
+        failed = next(
+            (item for item in sorted(executions, key=lambda item: item.position) if item.error),
+            None,
+        )
+        if failed is not None:
+            error = failed.error
+            assert error is not None
+            if isinstance(error, AutomaticExecutionFailed):
+                raise AutomaticExecutionFailed(
+                    error.kind,
+                    str(error),
+                    usage=session.usage(packet.packet_id),
+                    provenance=provenance,
+                    version=error.version,
+                    observed_model=error.observed_model,
+                )
+            raise AutomaticExecutionFailed(
+                "judge_validation_error",
+                self._redacted_error(error, session.environment),
+                usage=session.usage(packet.packet_id),
+                provenance=provenance,
+                observed_model=lock.models["judge"].model,
+            )
+
+        by_fixture: dict[str, list[JudgeVote]] = {}
+        for execution in sorted(executions, key=lambda item: item.position):
+            assert execution.vote is not None
+            by_fixture.setdefault(execution.fixture_id, []).append(execution.vote)
+        fixture_scores: dict[str, float] = {}
+        for fixture in self.workspace.judge_validation.fixtures:
+            case = cases[fixture.case_id]
+            evaluation = aggregate_judge_votes(
+                case,
+                by_fixture[fixture.id],
+                model_hash=lock.models["judge"].content_hash,
+                program_hash=lock.judge_program_hash,
+            )
+            fixture_scores[fixture.id] = evaluation.score
+        result = judge_validation_result_from_scores(
+            self.workspace.judge_validation,
+            fixture_scores,
+        )
+        value = json_value(result)
+        assert isinstance(value, Mapping)
+        return ExecutorOutput(
+            value,
+            session.usage(packet.packet_id),
+            None,
+            lock.models["judge"].model,
+            provenance=provenance,
+        )
+
+    @staticmethod
+    def _judge_validation_endpoint_provenance(
+        configuration: ExecutorConfiguration,
+        executions: Sequence[_JudgeValidationVoteExecution],
+    ) -> Mapping[str, object]:
+        routes: dict[str, dict[str, object]] = {}
+        for execution in executions:
+            lease = execution.endpoint_lease
+            endpoint = routes.setdefault(
+                lease.endpoint.id,
+                {
+                    "endpoint_id": lease.endpoint.id,
+                    "endpoint_configuration_hash": lease.endpoint.configuration_hash,
+                    "max_concurrent_requests": lease.endpoint.max_concurrent_requests,
+                    "requests": 0,
+                    "completed_requests": 0,
+                    "failed_requests": 0,
+                    "model_calls": 0,
+                    "completed_calls": 0,
+                    "failed_calls": 0,
+                    "tokens": 0,
+                    "configured_cost": 0.0,
+                    "latency_seconds": 0.0,
+                    "queue_wait_seconds": 0.0,
+                    "peak_observed_endpoint_concurrency": 0,
+                    "peak_observed_pool_concurrency": 0,
+                },
+            )
+            endpoint["requests"] = int(endpoint["requests"]) + 1
+            outcome = (
+                "completed_requests" if execution.error is None else "failed_requests"
+            )
+            endpoint[outcome] = int(endpoint[outcome]) + 1
+            for key in ("model_calls", "completed_calls", "failed_calls", "tokens"):
+                value = execution.usage.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    endpoint[key] = int(endpoint[key]) + value
+            for key in ("configured_cost", "latency_seconds"):
+                value = execution.usage.get(key, 0.0)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    endpoint[key] = float(endpoint[key]) + float(value)
+            endpoint["queue_wait_seconds"] = float(endpoint["queue_wait_seconds"]) + float(
+                lease.queue_wait_seconds
+            )
+            endpoint["peak_observed_endpoint_concurrency"] = max(
+                int(endpoint["peak_observed_endpoint_concurrency"]),
+                lease.endpoint_active_at_start,
+            )
+            endpoint["peak_observed_pool_concurrency"] = max(
+                int(endpoint["peak_observed_pool_concurrency"]),
+                lease.pool_active_at_start,
+            )
+        return {
+            "endpoint_pool": {
+                "pool_hash": configuration.pool_hash,
+                "total_concurrency": configuration.total_concurrency,
+                "requests": len(executions),
+                "completed_requests": sum(item.error is None for item in executions),
+                "failed_requests": sum(item.error is not None for item in executions),
+                "routes": [routes[key] for key in sorted(routes)],
+            }
+        }
+
     def _execute_solve(
         self,
         packet: StagePacket,
@@ -1732,9 +2332,9 @@ class StageCoordinator:
     ) -> ExecutorOutput:
         values = _mapping(self._input(packet, "case"), "solve input")
         program = create_solver_program()
-        compiled = next((item for item in packet.inputs if item.id == "compiled_state"), None)
-        if compiled is not None:
-            reference = self.artifacts.reference(compiled.content_id, compiled.media_type)
+        fitted = next((item for item in packet.inputs if item.id == "fitted_state"), None)
+        if fitted is not None:
+            reference = self.artifacts.reference(fitted.content_id, fitted.media_type)
             with tempfile.TemporaryDirectory() as directory:
                 state_file = Path(directory) / "state.json"
                 with self.artifacts.get_blob(reference) as source:
@@ -1759,7 +2359,7 @@ class StageCoordinator:
             observer=observer,
         )
         if result.status != "completed" or result.primary_response is None:
-            raise IntegrityError(f"solver DSPy call failed: {result.error_kind}")
+            raise _dspy_execution_failure("solver", result)
         return ExecutorOutput(
             {
                 "case_id": values["case_id"],
@@ -1767,6 +2367,10 @@ class StageCoordinator:
                 "repetition": values["repetition"],
                 "response": result.primary_response,
                 "program_hash": program_hash(program),
+                "evaluation_phase": values["evaluation_phase"],
+                "fold": values["fold"],
+                "candidate_id": values["candidate_id"],
+                "candidate_k": values["candidate_k"],
                 "call_ids": [item.call_id for item in result.calls],
             },
             _usage(observer.records[start:]),
@@ -1800,7 +2404,15 @@ class StageCoordinator:
         value = json_value(result)
         assert isinstance(value, Mapping)
         return ExecutorOutput(
-            {**value, "split": values["split"], "repetition": values["repetition"]},
+            {
+                **value,
+                "split": values["split"],
+                "repetition": values["repetition"],
+                "evaluation_phase": values["evaluation_phase"],
+                "fold": values["fold"],
+                "candidate_id": values["candidate_id"],
+                "candidate_k": values["candidate_k"],
+            },
             _usage(observer.records[start:]),
             None,
             lock.models["judge"].model,
@@ -1809,62 +2421,140 @@ class StageCoordinator:
     def _execute_local(
         self, packet: StagePacket, lock: ExperimentLock
     ) -> Mapping[str, object]:
-        if packet.stage is StageKind.OPTIMIZE:
+        if packet.stage is StageKind.FIT:
             experiment = lock.configuration
             if experiment.optimizer is None:
-                raise IntegrityError("optimization stage has no optimizer")
-            by_split = self._cases_by_split()
-            for split in ("train", "validation", "test"):
-                if not by_split[split]:
-                    raise PreflightError(f"optimization requires a non-empty {split} split")
-            raw_k = experiment.optimizer.parameters.get("k", 2)
-            raw_seed = experiment.optimizer.parameters.get("seed", 0)
-            if not isinstance(raw_k, int) or isinstance(raw_k, bool) or raw_k < 1:
-                raise PreflightError("LabeledFewShot k must be a positive integer")
-            if not isinstance(raw_seed, int) or isinstance(raw_seed, bool):
-                raise PreflightError("LabeledFewShot seed must be an integer")
+                raise IntegrityError("fit stage has no optimizer")
+            configuration = _mapping(packet.work_spec.get("candidate"), "fit candidate")
+            raw_k = _integer(configuration.get("k"), "fit candidate k")
+            candidate_id = _string(configuration.get("id"), "fit candidate id")
+            phase = _string(packet.work_spec.get("phase"), "fit phase")
+            raw_fold = packet.work_spec.get("fold")
+            fold = None if raw_fold is None else _integer(raw_fold, "fit fold")
+            cross_validation = experiment.cross_validation
+            if cross_validation is None:
+                raise IntegrityError("fit stage has no cross-validation configuration")
+            training_input = _mapping(self._input(packet, "training_set"), "training set")
+            training_cases = _list(training_input.get("cases"), "training cases")
+            if raw_k > len(training_cases):
+                raise PreflightError(
+                    f"LabeledFewShot k={raw_k} exceeds the {len(training_cases)} fit cases"
+                )
             train = [
                 dspy.Example(
-                    global_context=self.workspace.context.global_context,
-                    skill_context=self.workspace.context.skill(case.skill),
-                    task=case.prompt,
-                    response=case.expected_response,
+                    global_context=_string(case.get("global_context"), "global context"),
+                    skill_context=_string(case.get("skill_context"), "skill context"),
+                    task=_string(case.get("task"), "training task"),
+                    response=_string(case.get("expected_response"), "training response"),
                 ).with_inputs("global_context", "skill_context", "task")
-                for case in by_split["train"]
+                for raw_case in training_cases
+                for case in [_mapping(raw_case, "training case")]
             ]
+            compiled = create_solver_program()
             previous = random.getstate()
             try:
-                random.seed(raw_seed)
-                compiled = dspy.LabeledFewShot(k=raw_k).compile(
-                    create_solver_program(), trainset=train, sample=True
-                )
+                random.seed(f"{cross_validation.seed}:{candidate_id}:{fold}")
+                if raw_k:
+                    compiled = dspy.LabeledFewShot(k=raw_k).compile(
+                        compiled, trainset=train, sample=True
+                    )
             finally:
                 random.setstate(previous)
             state = self.dspy.save_state_artifact(compiled)
             return {
                 "state_artifact": json_value(state),
-                "compiled_program_hash": program_hash(compiled),
-                "train_case_hash": content_hash(
-                    tuple((case.id, case.content_hash) for case in by_split["train"])
+                "fitted_program_hash": program_hash(compiled),
+                "training_case_hash": content_hash(packet.work_spec.get("training_cases")),
+                "fold_assignment_hash": _string(
+                    packet.work_spec.get("fold_assignment_hash"), "fold assignment hash"
                 ),
-                "validation_assignment_hash": content_hash(
-                    tuple((case.id, case.content_hash) for case in by_split["validation"])
-                ),
+                "candidate_id": candidate_id,
+                "candidate_k": raw_k,
+                "phase": phase,
+                "fold": fold,
                 "state_format": "json",
-                "published": True,
             }
-        if packet.stage is StageKind.FINAL_EVALUATE:
-            gate = _mapping(
-                self._input(packet, "publication_gate"), "publication gate"
+        if packet.stage is StageKind.SELECT:
+            cross_validation = _mapping(
+                self._input(packet, "cross_validation"), "cross-validation input"
+            )
+            raw_results = _list(cross_validation.get("results"), "cross-validation results")
+            by_candidate: dict[str, list[Mapping[str, object]]] = {}
+            for raw_result in raw_results:
+                result = _mapping(raw_result, "cross-validation result")
+                candidate_id = _string(result.get("candidate_id"), "candidate id")
+                by_candidate.setdefault(candidate_id, []).append(result)
+            expected_cases = {
+                _string(case_id, "training case id")
+                for case_id in _list(
+                    cross_validation.get("training_case_ids"), "training case ids"
+                )
+            }
+            summaries = []
+            for candidate_id, results in sorted(by_candidate.items()):
+                case_ids = [_string(item.get("case_id"), "case id") for item in results]
+                if len(case_ids) != len(set(case_ids)) or set(case_ids) != expected_cases:
+                    raise IntegrityError(
+                        f"candidate {candidate_id!r} must have exactly one out-of-fold score per training case"
+                    )
+                k_values = {_integer(item.get("k"), "candidate k") for item in results}
+                if len(k_values) != 1:
+                    raise IntegrityError("candidate cross-validation results disagree on k")
+                scores = [_number(item.get("score"), "cross-validation score") for item in results]
+                summaries.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "k": next(iter(k_values)),
+                        "mean_score": sum(scores) / len(scores),
+                        "case_count": len(scores),
+                    }
+                )
+            if not summaries:
+                raise IntegrityError("cross-validation selection requires candidate results")
+            selected = min(
+                summaries,
+                key=lambda item: (
+                    -float(item["mean_score"]),
+                    int(item["k"]),
+                    str(item["candidate_id"]),
+                ),
             )
             return {
-                "published": True,
-                **dict(gate),
+                "metric": "mean_score",
+                "fold_assignment_hash": _string(
+                    cross_validation.get("fold_assignment_hash"), "fold assignment hash"
+                ),
+                "candidates": summaries,
+                "selected_candidate_id": selected["candidate_id"],
+                "selected_k": selected["k"],
+                "selected_mean_score": selected["mean_score"],
             }
         if packet.stage is StageKind.AGGREGATE:
             cases = []
             graph_nodes = []
             execution_by_stage: dict[str, Counter[str]] = {}
+            workspace = self.workspace.repository.workspace
+            endpoint_execution: dict[str, dict[str, object]] = {
+                f"{executor.id}/{endpoint.id}": {
+                    "executor_id": executor.id,
+                    "endpoint_id": endpoint.id,
+                    "base_url": endpoint.base_url,
+                    "pool_hash": executor.pool_hash,
+                    "endpoint_configuration_hash": endpoint.configuration_hash,
+                    "configured_capacity": endpoint.max_concurrent_requests,
+                    "packets": 0,
+                    "model_calls": 0,
+                    "completed_calls": 0,
+                    "failed_calls": 0,
+                    "latency_seconds": 0.0,
+                    "queue_wait_seconds": 0.0,
+                    "peak_observed_endpoint_concurrency": 0,
+                    "peak_observed_pool_concurrency": 0,
+                }
+                for executor in workspace.executors.values()
+                if executor.type is ExecutorType.ENDPOINT
+                for endpoint in executor.endpoints
+            }
             role_usage: dict[str, Counter[str]] = {
                 "solver": Counter(),
                 "judge": Counter(),
@@ -1887,29 +2577,89 @@ class StageCoordinator:
                 execution_by_stage.setdefault(
                     status.packet.stage.value, Counter()
                 )[disposition] += 1
+                raw_endpoint = status.result.provenance.get("endpoint_pool")
+                if isinstance(raw_endpoint, Mapping):
+                    for route in endpoint_provenance_routes(
+                        raw_endpoint,
+                        status.result.usage,
+                    ):
+                        endpoint_id = _string(
+                            route.get("endpoint_id"), "endpoint provenance id"
+                        )
+                        key = f"{status.packet.executor.id}/{endpoint_id}"
+                        endpoint = endpoint_execution.setdefault(
+                            key,
+                            {
+                                "executor_id": status.packet.executor.id,
+                                "endpoint_id": endpoint_id,
+                                "pool_hash": raw_endpoint.get("pool_hash"),
+                                "endpoint_configuration_hash": route.get(
+                                    "endpoint_configuration_hash"
+                                ),
+                                "configured_capacity": route.get(
+                                    "max_concurrent_requests"
+                                ),
+                                "packets": 0,
+                                "model_calls": 0,
+                                "completed_calls": 0,
+                                "failed_calls": 0,
+                                "latency_seconds": 0.0,
+                                "queue_wait_seconds": 0.0,
+                                "peak_observed_endpoint_concurrency": 0,
+                                "peak_observed_pool_concurrency": 0,
+                            },
+                        )
+                        endpoint["packets"] = int(endpoint["packets"]) + 1
+                        for usage_key in (
+                            "model_calls",
+                            "completed_calls",
+                            "failed_calls",
+                        ):
+                            raw_usage = route.get(usage_key, 0)
+                            if isinstance(raw_usage, int) and not isinstance(
+                                raw_usage, bool
+                            ):
+                                endpoint[usage_key] = int(endpoint[usage_key]) + raw_usage
+                        for duration_key in (
+                            "latency_seconds",
+                            "queue_wait_seconds",
+                        ):
+                            raw_duration = route.get(duration_key, 0.0)
+                            if isinstance(raw_duration, (int, float)) and not isinstance(
+                                raw_duration, bool
+                            ):
+                                endpoint[duration_key] = float(
+                                    endpoint[duration_key]
+                                ) + float(raw_duration)
+                        for peak_key in (
+                            "peak_observed_endpoint_concurrency",
+                            "peak_observed_pool_concurrency",
+                        ):
+                            raw_peak = route.get(peak_key, 0)
+                            if isinstance(raw_peak, int) and not isinstance(raw_peak, bool):
+                                endpoint[peak_key] = max(
+                                    int(endpoint[peak_key]),
+                                    raw_peak,
+                                )
                 role = None
                 if status.packet.stage is StageKind.SOLVE:
                     role = "solver"
-                elif status.packet.stage in {StageKind.CALIBRATE_JUDGE, StageKind.JUDGE}:
+                elif status.packet.stage in {StageKind.VALIDATE_JUDGE, StageKind.JUDGE}:
                     role = "judge"
                 if status.packet.stage is StageKind.JUDGE:
                     evaluation = _mapping(
                         self.ledger.read_output(status.result), "judge output"
                     )
-                    if (
-                        lock.configuration.mode is not ExperimentMode.OPTIMIZE
-                        or evaluation.get("split") == "test"
-                    ):
+                    if evaluation.get("evaluation_phase") in {"test", "pilot"}:
                         cases.append(dict(evaluation))
                 if role is not None:
                     for key, value in status.result.usage.items():
                         if isinstance(value, (int, float)) and not isinstance(value, bool):
                             role_usage[role][key] += value
-            workspace = self.workspace.repository.workspace
             run = self.ledger.load_run(packet.run_id)
             execution_mode = _execution_mode(run)
             value: dict[str, object] = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "run_id": packet.run_id,
                 "experiment_id": packet.experiment_id,
                 "lock_hash": lock.content_hash,
@@ -1964,6 +2714,16 @@ class StageCoordinator:
                         },
                     },
                 },
+                "endpoint_execution": {
+                    "configured_capacity": sum(
+                        executor.total_concurrency
+                        for executor in workspace.executors.values()
+                        if executor.type is ExecutorType.ENDPOINT
+                    ),
+                    "endpoints": [
+                        endpoint_execution[key] for key in sorted(endpoint_execution)
+                    ],
+                },
                 "independent": (
                     workspace.stages["solve"].executor
                     != workspace.stages["judge"].executor
@@ -1972,11 +2732,6 @@ class StageCoordinator:
             if execution_mode == "benchmark":
                 value["mean_score"] = (
                     sum(float(item["score"]) for item in cases) / len(cases)
-                    if cases
-                    else 0.0
-                )
-                value["pass_rate"] = (
-                    sum(bool(item["passed"]) for item in cases) / len(cases)
                     if cases
                     else 0.0
                 )
@@ -1993,8 +2748,13 @@ class StageCoordinator:
         packet: StagePacket,
         *,
         repetitions: int | None = None,
+        endpoint_lease: EndpointLease | None = None,
     ) -> tuple[LlmJudge, ModelCallObserver]:
-        lm, observer = session.lm("judge", packet)
+        lm, observer = session.lm(
+            "judge",
+            packet,
+            endpoint_lease=endpoint_lease,
+        )
         program = create_judge_program()
 
         def observed(**inputs: object) -> Mapping[str, object]:
@@ -2011,7 +2771,7 @@ class StageCoordinator:
                 observer=observer,
             )
             if result.status != "completed":
-                raise IntegrityError(f"judge DSPy call failed: {result.error_kind}")
+                raise _dspy_execution_failure("judge", result)
             return {**result.outputs, "call_ids": [item.call_id for item in result.calls]}
 
         return (
@@ -2059,18 +2819,18 @@ class StageCoordinator:
             StageKind.AUTHOR,
             inputs=(self.ledger.put_json("authoring_context", value),),
             instructions={
-                "task": "Produce candidate case packages only; review and promotion remain explicit.",
+                "task": "Produce candidate case packages for explicit review.",
                 "output": {"candidate_packages": "list[case-package]"},
             },
             dependencies=(),
             output_schema="authored-cases-v1",
         )
 
-    def _calibration_packet(self, run_id: str, lock: ExperimentLock) -> StagePacket:
+    def _judge_validation_packet(self, run_id: str, lock: ExperimentLock) -> StagePacket:
         cases = {item.id: item for item in self.workspace.case_bank.cases}
         fixtures = []
         semantic_fixtures = []
-        for fixture in self.workspace.calibration.fixtures:
+        for fixture in self.workspace.judge_validation.fixtures:
             case = cases[fixture.case_id]
             candidate_response = fixture.candidate_path.read_text(encoding="utf-8")
             judge_case = self._judge_case_input(case)
@@ -2092,24 +2852,24 @@ class StageCoordinator:
                     },
                 }
             )
-        calibration_input = self.ledger.put_json(
-            "calibration",
+        judge_validation_input = self.ledger.put_json(
+            "judge_validation",
             {
-                "corpus_hash": self.workspace.calibration.content_hash,
+                "corpus_hash": self.workspace.judge_validation.content_hash,
                 "fixtures": fixtures,
             },
         )
         return self._packet(
             run_id,
             lock,
-            StageKind.CALIBRATE_JUDGE,
-            inputs=(calibration_input,),
+            StageKind.VALIDATE_JUDGE,
+            inputs=(judge_validation_input,),
             instructions={
-                "task": "Judge every locked fixture and report whether all calibration checks pass.",
-                "output": "CalibrationResult",
+                "task": "Score every locked anchor response for ordinal judge validation.",
+                "output": "JudgeValidationResult",
             },
             dependencies=(),
-            output_schema="judge-calibration-v1",
+            output_schema="judge-validation-v1",
             work_spec={
                 "fixtures": semantic_fixtures,
                 "judge_program_hash": lock.judge_program_hash,
@@ -2117,8 +2877,47 @@ class StageCoordinator:
             },
         )
 
-    def _optimize_packet(
-        self, run_id: str, lock: ExperimentLock, calibration: StagePacket
+    def _candidate_configurations(
+        self, lock: ExperimentLock
+    ) -> tuple[Mapping[str, object], ...]:
+        optimizer = lock.configuration.optimizer
+        if optimizer is None:
+            raise IntegrityError("optimization experiment has no optimizer")
+        return (
+            {"id": "baseline", "k": 0},
+            *(
+                {"id": f"labeled-few-shot-k-{k}", "k": k}
+                for k in optimizer.k_values
+            ),
+        )
+
+    def _fold_assignment(
+        self, lock: ExperimentLock
+    ) -> tuple[Mapping[str, int], str]:
+        cross_validation = lock.configuration.cross_validation
+        if cross_validation is None:
+            raise IntegrityError("optimization experiment has no cross-validation configuration")
+        train = self._cases_by_split()["train"]
+        assignments = deterministic_group_k_fold(
+            train,
+            folds=cross_validation.folds,
+            seed=cross_validation.seed,
+        )
+        mapping = {item.group: item.fold for item in assignments}
+        return mapping, content_hash(assignments)
+
+    def _fit_packet(
+        self,
+        run_id: str,
+        lock: ExperimentLock,
+        judge_validation: StagePacket,
+        *,
+        cases: Sequence[object],
+        candidate: Mapping[str, object],
+        phase: str,
+        fold: int | None,
+        fold_assignment_hash: str,
+        selection: StagePacket | None = None,
     ) -> StagePacket:
         train = [
             {
@@ -2129,35 +2928,194 @@ class StageCoordinator:
                 "task": case.prompt,
                 "expected_response": case.expected_response,
             }
-            for case in self._cases_by_split()["train"]
+            for case in cases
         ]
+        dependencies = [judge_validation.packet_id]
+        work_dependencies: tuple[str, ...] = ()
+        if selection is not None:
+            dependencies.append(selection.packet_id)
+            selection_status = self.ledger.status(selection.packet_id)
+            assert selection_status.result is not None
+            work_dependencies = (selection_status.result.outputs[0].content_id,)
         return self._packet(
             run_id,
             lock,
-            StageKind.OPTIMIZE,
+            StageKind.FIT,
             inputs=(self.ledger.put_json("training_set", {"cases": train}),),
             instructions={
-                "task": "Compile and publish a state-only DSPy artifact from train cases.",
-                "optimizer": json_value(lock.configuration.optimizer),
+                "task": "Fit a state-only DSPy program using only the supplied training cases.",
+                "candidate": dict(candidate),
+                "phase": phase,
                 "forbidden_splits": ["test", "challenge"],
             },
-            dependencies=(calibration.packet_id,),
-            output_schema="compiled-program-v1",
-            work_dependencies=(),
+            dependencies=tuple(dependencies),
+            output_schema="fitted-program-v1",
+            work_spec={
+                "training_cases": [
+                    (case.id, case.content_hash) for case in cases
+                ],
+                "candidate": dict(candidate),
+                "phase": phase,
+                "fold": fold,
+                "fold_assignment_hash": fold_assignment_hash,
+                "selection": work_dependencies[0] if work_dependencies else None,
+            },
+            work_dependencies=work_dependencies,
+        )
+
+    def _cross_validation_fit_packets(
+        self, run_id: str, lock: ExperimentLock, judge_validation: StagePacket
+    ) -> tuple[StagePacket, ...]:
+        train = self._cases_by_split()["train"]
+        fold_by_group, assignment_hash = self._fold_assignment(lock)
+        folds = lock.configuration.cross_validation
+        assert folds is not None
+        packets = []
+        for candidate in self._candidate_configurations(lock):
+            for fold in range(folds.folds):
+                fit_cases = (
+                    ()
+                    if candidate["k"] == 0
+                    else tuple(case for case in train if fold_by_group[case.group] != fold)
+                )
+                packets.append(
+                    self._fit_packet(
+                        run_id,
+                        lock,
+                        judge_validation,
+                        cases=fit_cases,
+                        candidate=candidate,
+                        phase="cross_validation",
+                        fold=fold,
+                        fold_assignment_hash=assignment_hash,
+                    )
+                )
+        return tuple(packets)
+
+    def _cross_validation_solve_packets(
+        self,
+        run_id: str,
+        lock: ExperimentLock,
+        judge_validation: StagePacket,
+        fits: Sequence[StagePacket],
+    ) -> tuple[StagePacket, ...]:
+        train = self._cases_by_split()["train"]
+        fold_by_group, _ = self._fold_assignment(lock)
+        packets = []
+        for fit in fits:
+            status = self.ledger.status(fit.packet_id)
+            assert status.result is not None
+            output = _mapping(self.ledger.read_output(status.result), "fitted program")
+            fold = _integer(output.get("fold"), "fitted program fold")
+            candidate_id = _string(output.get("candidate_id"), "fitted program candidate_id")
+            held_out = tuple(
+                case.id for case in train if fold_by_group[case.group] == fold
+            )
+            packets.extend(
+                self._solve_packets(
+                    run_id,
+                    lock,
+                    judge_validation,
+                    selected_case_ids=held_out,
+                    program_dependency=fit,
+                    evaluation_phase="cross_validation",
+                    fold=fold,
+                    candidate_id=candidate_id,
+                )
+            )
+        return tuple(packets)
+
+    def _selection_packet(
+        self,
+        run_id: str,
+        lock: ExperimentLock,
+        judge_validation: StagePacket,
+        judges: Sequence[StagePacket],
+    ) -> StagePacket:
+        results = []
+        output_ids = []
+        for judge in sorted(judges, key=self._judge_packet_key):
+            status = self.ledger.status(judge.packet_id)
+            assert status.result is not None
+            output_ids.append(status.result.outputs[0].content_id)
+            output = _mapping(self.ledger.read_output(status.result), "cross-validation judgment")
+            results.append(
+                {
+                    "candidate_id": _string(output.get("candidate_id"), "candidate_id"),
+                    "k": _integer(output.get("candidate_k"), "candidate_k"),
+                    "fold": _integer(output.get("fold"), "fold"),
+                    "case_id": _string(output.get("case_id"), "case_id"),
+                    "score": _number(output.get("score"), "score"),
+                }
+            )
+        _, assignment_hash = self._fold_assignment(lock)
+        selection_input = {
+            "metric": "mean_score",
+            "fold_assignment_hash": assignment_hash,
+            "training_case_ids": [case.id for case in self._cases_by_split()["train"]],
+            "results": results,
+        }
+        return self._packet(
+            run_id,
+            lock,
+            StageKind.SELECT,
+            inputs=(self.ledger.put_json("cross_validation", selection_input),),
+            instructions={
+                "task": "Select the candidate with the highest mean out-of-fold score.",
+                "tie_break": "prefer smaller k, then candidate id",
+            },
+            dependencies=(judge_validation.packet_id, *(item.packet_id for item in judges)),
+            output_schema="cross-validation-selection-v1",
+            work_spec=selection_input,
+            work_dependencies=tuple(output_ids),
+        )
+
+    def _final_fit_packet(
+        self,
+        run_id: str,
+        lock: ExperimentLock,
+        judge_validation: StagePacket,
+        selection: StagePacket,
+    ) -> StagePacket:
+        status = self.ledger.status(selection.packet_id)
+        assert status.result is not None
+        selected = _mapping(self.ledger.read_output(status.result), "cross-validation selection")
+        candidate = {
+            "id": _string(selected.get("selected_candidate_id"), "selected candidate id"),
+            "k": _integer(selected.get("selected_k"), "selected k"),
+        }
+        _, assignment_hash = self._fold_assignment(lock)
+        return self._fit_packet(
+            run_id,
+            lock,
+            judge_validation,
+            cases=self._cases_by_split()["train"] if candidate["k"] else (),
+            candidate=candidate,
+            phase="final_fit",
+            fold=None,
+            fold_assignment_hash=assignment_hash,
+            selection=selection,
         )
 
     def _solve_packets(
         self,
         run_id: str,
         lock: ExperimentLock,
-        calibration: StagePacket,
+        judge_validation: StagePacket,
         *,
         selected_split: str | None = None,
         selected_splits: Sequence[str] | None = None,
+        selected_case_ids: Sequence[str] | None = None,
         program_dependency: StagePacket | None = None,
+        evaluation_phase: str = "test",
+        fold: int | None = None,
+        candidate_id: str | None = None,
     ) -> tuple[StagePacket, ...]:
-        if selected_split is not None and selected_splits is not None:
-            raise IntegrityError("solve selection cannot use singular and plural splits")
+        selectors = sum(
+            item is not None for item in (selected_split, selected_splits, selected_case_ids)
+        )
+        if selectors > 1:
+            raise IntegrityError("solve selection must use exactly one selection mechanism")
         split_selection = (
             None
             if selected_split is None and selected_splits is None
@@ -2169,28 +3127,34 @@ class StageCoordinator:
             raise IntegrityError("solve split selection must not be empty")
         if split_selection is not None and not split_selection <= {
             "train",
-            "validation",
             "test",
             "challenge",
         }:
             raise IntegrityError("solve split selection contains an unknown split")
+        case_selection = None if selected_case_ids is None else frozenset(selected_case_ids)
+        if case_selection is not None and not case_selection:
+            raise IntegrityError("solve case selection must not be empty")
         state_artifact = None
         solver_program_hash = lock.solver_program_hash
-        dependencies = [calibration.packet_id]
+        dependencies = [judge_validation.packet_id]
+        candidate_k = 0
         if program_dependency is not None:
             dependencies.append(program_dependency.packet_id)
-            optimize = self._persisted_packet(run_id, StageKind.OPTIMIZE)
-            if optimize is None:
-                raise IntegrityError("compiled program dependency is missing")
-            status = self.ledger.status(optimize.packet_id)
+            if program_dependency.stage is not StageKind.FIT:
+                raise IntegrityError("program dependency must be a fitted program")
+            status = self.ledger.status(program_dependency.packet_id)
+            if status.state is not StageState.PERSISTED or status.result is None:
+                raise IntegrityError("fitted program dependency is missing")
             assert status.result is not None
-            output = _mapping(self.ledger.read_output(status.result), "optimize output")
-            state = _mapping(output.get("state_artifact"), "compiled state artifact")
+            output = _mapping(self.ledger.read_output(status.result), "fit output")
+            state = _mapping(output.get("state_artifact"), "fitted state artifact")
             solver_program_hash = _string(
-                output.get("compiled_program_hash"), "compiled program hash"
+                output.get("fitted_program_hash"), "fitted program hash"
             )
+            candidate_id = _string(output.get("candidate_id"), "candidate id")
+            candidate_k = _integer(output.get("candidate_k"), "candidate k")
             state_artifact = StageArtifact(
-                "compiled_state",
+                "fitted_state",
                 _string(state.get("content_id"), "compiled state content_id"),
                 _string(state.get("media_type"), "compiled state media_type"),
             )
@@ -2198,7 +3162,7 @@ class StageCoordinator:
         reuse = self.workspace.repository.workspace.stages["solve"].reuse
         repetitions = (
             1
-            if selected_split is not None
+            if evaluation_phase == "cross_validation"
             else (
                 reuse.samples
                 if reuse.policy.value == "replicate"
@@ -2208,6 +3172,8 @@ class StageCoordinator:
         for case in self.workspace.case_bank.cases:
             split = self.workspace.splits.split_for(case)
             if split_selection is not None and split not in split_selection:
+                continue
+            if case_selection is not None and case.id not in case_selection:
                 continue
             for repetition in range(1, repetitions + 1):
                 inputs = [
@@ -2224,6 +3190,10 @@ class StageCoordinator:
                             "task": case.prompt,
                             "solver_attachments": dict(case.solver_attachments()),
                             "program_hash": solver_program_hash,
+                            "evaluation_phase": evaluation_phase,
+                            "fold": fold,
+                            "candidate_id": candidate_id or "baseline",
+                            "candidate_k": candidate_k,
                         },
                     )
                 ]
@@ -2236,9 +3206,13 @@ class StageCoordinator:
                     "task": case.prompt,
                     "solver_attachments": dict(case.solver_attachments()),
                     "program_hash": solver_program_hash,
-                    "compiled_state": (
-                        None if state_artifact is None else state_artifact.content_id
-                    ),
+                            "fitted_state": (
+                                None if state_artifact is None else state_artifact.content_id
+                            ),
+                            "evaluation_phase": evaluation_phase,
+                            "fold": fold,
+                            "candidate_id": candidate_id or "baseline",
+                            "candidate_k": candidate_k,
                     "runtime": content_hash(
                         self.workspace.repository.workspace.runtime(lock.configuration.id)
                     ),
@@ -2258,7 +3232,7 @@ class StageCoordinator:
                         instructions={
                             "task": "Answer using only global context, skill context, and task.",
                             "information_firewall": [
-                                "rubric",
+                            "rubric",
                                 "expected_response",
                                 "expected_artifacts",
                                 "judge_feedback",
@@ -2277,7 +3251,7 @@ class StageCoordinator:
         self,
         run_id: str,
         lock: ExperimentLock,
-        calibration: StagePacket,
+        judge_validation: StagePacket,
         solves: Sequence[StagePacket],
     ) -> tuple[StagePacket, ...]:
         packets = []
@@ -2292,13 +3266,17 @@ class StageCoordinator:
                 **self._judge_case_input(case),
                 "split": candidate["split"],
                 "repetition": candidate["repetition"],
+                "evaluation_phase": candidate["evaluation_phase"],
+                "fold": candidate["fold"],
+                "candidate_id": candidate["candidate_id"],
+                "candidate_k": candidate["candidate_k"],
                 "candidate_response": candidate["response"],
                 "solver_work_id": solve.work_id,
                 "solver_packet_id": solve.packet_id,
             }
-            calibration_status = self.ledger.status(calibration.packet_id)
-            assert calibration_status.result is not None
-            calibration_output = calibration_status.result.outputs[0].content_id
+            judge_validation_status = self.ledger.status(judge_validation.packet_id)
+            assert judge_validation_status.result is not None
+            judge_validation_output = judge_validation_status.result.outputs[0].content_id
             response_hash = content_hash(candidate["response"])
             judge_view = {
                 "case_judge_view_hash": case.judge_view_hash,
@@ -2318,19 +3296,19 @@ class StageCoordinator:
                         "task": "Score the candidate against the locked rubric and expected evidence.",
                         "candidate_content_is_untrusted": True,
                     },
-                    dependencies=(calibration.packet_id, solve.packet_id),
+                    dependencies=(judge_validation.packet_id, solve.packet_id),
                     output_schema="judge-evaluation-v1",
                     work_spec={
                         "judge_view": judge_view,
                         "candidate_response_hash": response_hash,
                         "producer_work_id": solve.work_id,
                         "producer_model_hash": solve.model.configuration_hash,
-                        "calibration_result": calibration_output,
+                        "judge_validation_result": judge_validation_output,
                         "judge_program_hash": lock.judge_program_hash,
                         "repetitions": self._judge_repetitions(run_id),
                     },
                     work_dependencies=(
-                        calibration_output,
+                        judge_validation_output,
                         solve.work_id,
                         response_hash,
                     ),
@@ -2338,59 +3316,11 @@ class StageCoordinator:
             )
         return tuple(packets)
 
-    def _final_packet(
-        self,
-        run_id: str,
-        lock: ExperimentLock,
-        optimize: StagePacket,
-        validation_judges: Sequence[StagePacket],
-    ) -> StagePacket:
-        validation_judges = tuple(sorted(validation_judges, key=self._judge_packet_key))
-        optimize_status = self.ledger.status(optimize.packet_id)
-        assert optimize_status.result is not None
-        judgment_outputs = []
-        for judge in validation_judges:
-            status = self.ledger.status(judge.packet_id)
-            assert status.result is not None
-            judgment_outputs.append(status.result.outputs[0].content_id)
-        optimize_output = optimize_status.result.outputs[0].content_id
-        gate = {
-            "compiled_result": optimize_output,
-            "validation_judgments": judgment_outputs,
-            "test_assignment_hash": content_hash(
-                tuple(
-                    (case.id, case.content_hash)
-                    for case in self._cases_by_split()["test"]
-                )
-            ),
-        }
-        return self._packet(
-            run_id,
-            lock,
-            StageKind.FINAL_EVALUATE,
-            inputs=(
-                self.ledger.put_json(
-                    "publication_gate",
-                    gate,
-                ),
-            ),
-            instructions={
-                "task": "Open the held-out test gate only after state publication and validation-set evaluation."
-            },
-            dependencies=(
-                optimize.packet_id,
-                *(item.packet_id for item in validation_judges),
-            ),
-            output_schema="final-evaluation-gate-v1",
-            work_spec={"publication_gate": gate},
-            work_dependencies=(optimize_output, *judgment_outputs),
-        )
-
     def _aggregate_packet(
         self,
         run_id: str,
         lock: ExperimentLock,
-        calibration: StagePacket,
+        judge_validation: StagePacket,
         judges: Sequence[StagePacket],
     ) -> StagePacket:
         judges = tuple(sorted(judges, key=self._judge_packet_key))
@@ -2423,18 +3353,20 @@ class StageCoordinator:
                     else "Aggregate validated judgments deterministically."
                 )
             },
-            dependencies=(calibration.packet_id, *(item.packet_id for item in judges)),
-            output_schema="run-summary-v2",
+            dependencies=(judge_validation.packet_id, *(item.packet_id for item in judges)),
+            output_schema="run-summary-v3",
             work_spec={
                 "evaluation_index": evaluation_index,
-                "aggregation_implementation": "run-summary-v2",
+                "aggregation_implementation": "run-summary-v3",
             },
             work_dependencies=tuple(judgment_outputs),
         )
 
-    def _judge_packet_key(self, packet: StagePacket) -> tuple[str, str, int]:
+    def _judge_packet_key(self, packet: StagePacket) -> tuple[str, int, str, str, int]:
         value = _mapping(self._input(packet, "evaluation"), "judge input")
         return (
+            _string(value.get("candidate_id", "baseline"), "judge candidate id"),
+            int(value.get("fold") if value.get("fold") is not None else -1),
             _string(value.get("case_id"), "judge case_id"),
             _string(value.get("split"), "judge split"),
             int(value.get("repetition", 0)),
@@ -2460,7 +3392,7 @@ class StageCoordinator:
         model = resolve_stage_model(
             workspace,
             stage.value,
-            role="judge" if stage in {StageKind.CALIBRATE_JUDGE, StageKind.JUDGE} else None,
+            role="judge" if stage in {StageKind.VALIDATE_JUDGE, StageKind.JUDGE} else None,
         )
         dependency_artifacts: tuple[str, ...]
         if work_dependencies is not None:
@@ -2533,7 +3465,7 @@ class StageCoordinator:
 
     def _validate_packet(self, packet: StagePacket) -> None:
         if packet.stage is StageKind.SOLVE:
-            if {item.id for item in packet.inputs} - {"case", "compiled_state"}:
+            if {item.id for item in packet.inputs} - {"case", "fitted_state"}:
                 raise IntegrityError("solve packet contains an unauthorized input")
             forbidden = {
                 "rubric",
@@ -2544,15 +3476,15 @@ class StageCoordinator:
             }
             if _contains_key(self._input(packet, "case"), forbidden):
                 raise IntegrityError("solve packet crosses the hidden judging-material firewall")
-        if packet.stage is StageKind.CALIBRATE_JUDGE:
-            forbidden = {"label", "score_range", "minimum_score", "maximum_score"}
-            if _contains_key(self._input(packet, "calibration"), forbidden):
+        if packet.stage is StageKind.VALIDATE_JUDGE:
+            forbidden = {"label"}
+            if _contains_key(self._input(packet, "judge_validation"), forbidden):
                 raise IntegrityError(
-                    "calibration packet exposes coordinator-only labels or score ranges"
+                    "judge validation packet exposes coordinator-only labels"
                 )
-        if packet.stage is StageKind.OPTIMIZE:
+        if packet.stage is StageKind.FIT:
             if _contains_value(self._input(packet, "training_set"), {"test", "challenge"}):
-                raise IntegrityError("optimization packet contains a held-out split")
+                raise IntegrityError("fit packet contains a held-out split")
 
     def _validate_result(self, packet: StagePacket, result: StageResult) -> None:
         if result.status != "completed":
@@ -2563,41 +3495,57 @@ class StageCoordinator:
         payload = _mapping(self.ledger.read_output(result), f"{packet.output_schema} output")
         if packet.output_schema == "authored-cases-v1":
             _list(payload.get("candidate_packages"), "candidate_packages")
-        elif packet.output_schema == "judge-calibration-v1":
-            if not isinstance(payload.get("passed"), bool):
-                raise IntegrityError("judge calibration output requires boolean passed")
+        elif packet.output_schema == "judge-validation-v1":
+            if not isinstance(payload.get("ordering_consistent"), bool):
+                raise IntegrityError(
+                    "judge validation output requires boolean ordering_consistent"
+                )
             scores = _mapping(payload.get("fixture_scores"), "fixture_scores")
-            passes = _mapping(payload.get("fixture_passes"), "fixture_passes")
-            calibration = _mapping(self._input(packet, "calibration"), "calibration input")
-            corpus_hash = _string(calibration.get("corpus_hash"), "calibration corpus_hash")
+            judge_validation = _mapping(self._input(packet, "judge_validation"), "judge_validation input")
+            corpus_hash = _string(judge_validation.get("corpus_hash"), "judge_validation corpus_hash")
             if payload.get("corpus_hash") != corpus_hash:
-                raise IntegrityError("judge calibration output has the wrong corpus hash")
-            expected_ids = {item.id for item in self.workspace.calibration.fixtures}
-            if set(scores) != expected_ids or set(passes) != expected_ids:
-                raise IntegrityError("judge calibration must score every fixture exactly")
-            for fixture_id, score in scores.items():
+                raise IntegrityError("judge-validation output has the wrong corpus hash")
+            expected_ids = {item.id for item in self.workspace.judge_validation.fixtures}
+            if set(scores) != expected_ids:
+                raise IntegrityError("judge validation must score every fixture exactly")
+            for score in scores.values():
                 if not isinstance(score, (int, float)) or isinstance(score, bool):
-                    raise IntegrityError("judge calibration scores must be numeric")
+                    raise IntegrityError("judge validation scores must be numeric")
                 if not 0 <= float(score) <= 1:
-                    raise IntegrityError("judge calibration scores must be in [0, 1]")
-                if not isinstance(passes[fixture_id], bool):
-                    raise IntegrityError("judge calibration pass decisions must be boolean")
-            expected_result = calibration_result_from_scores(
-                self.workspace.calibration,
+                    raise IntegrityError("judge validation scores must be in [0, 1]")
+            expected_result = judge_validation_result_from_scores(
+                self.workspace.judge_validation,
                 {key: float(value) for key, value in scores.items()},
-                fixture_passes={key: bool(value) for key, value in passes.items()},
             )
-            if payload.get("passed") is not expected_result.passed:
-                raise IntegrityError("judge calibration pass decision was not deterministic")
+            if payload.get("ordering_consistent") is not expected_result.ordering_consistent:
+                raise IntegrityError("judge validation ordering result was not deterministic")
             if payload.get("content_hash") != expected_result.content_hash:
-                raise IntegrityError("judge calibration result identity hash is invalid")
+                raise IntegrityError("judge-validation result identity hash is invalid")
         elif packet.output_schema == "solver-response-v1":
-            for field in ("case_id", "split", "response", "program_hash"):
+            for field in (
+                "case_id",
+                "split",
+                "response",
+                "program_hash",
+                "evaluation_phase",
+                "candidate_id",
+            ):
                 _string(payload.get(field), f"solver response {field}")
-            if not isinstance(payload.get("repetition"), int):
+            if not isinstance(payload.get("repetition"), int) or not isinstance(
+                payload.get("candidate_k"), int
+            ):
                 raise IntegrityError("solver response repetition must be an integer")
             case_input = _mapping(self._input(packet, "case"), "solve case input")
-            for field in ("case_id", "split", "repetition", "program_hash"):
+            for field in (
+                "case_id",
+                "split",
+                "repetition",
+                "program_hash",
+                "evaluation_phase",
+                "fold",
+                "candidate_id",
+                "candidate_k",
+            ):
                 if payload.get(field) != case_input.get(field):
                     raise IntegrityError(f"solver response {field} does not match its packet")
         elif packet.output_schema == "judge-evaluation-v1":
@@ -2609,22 +3557,33 @@ class StageCoordinator:
                 or not 0 <= score <= 1
             ):
                 raise IntegrityError("judge evaluation score must be in [0, 1]")
-            if not isinstance(payload.get("passed"), bool):
-                raise IntegrityError("judge evaluation passed must be boolean")
             _list(payload.get("votes"), "judge evaluation votes")
-        elif packet.output_schema == "compiled-program-v1":
-            if payload.get("state_format") != "json" or payload.get("published") is not True:
-                raise IntegrityError("compiled program must be published state-only JSON")
+            evaluation_input = _mapping(self._input(packet, "evaluation"), "judge input")
+            for field in (
+                "case_id",
+                "split",
+                "repetition",
+                "evaluation_phase",
+                "fold",
+                "candidate_id",
+                "candidate_k",
+            ):
+                if payload.get(field) != evaluation_input.get(field):
+                    raise IntegrityError(f"judge evaluation {field} does not match its packet")
+        elif packet.output_schema == "fitted-program-v1":
+            if payload.get("state_format") != "json":
+                raise IntegrityError("fitted program must be state-only JSON")
             state = _mapping(payload.get("state_artifact"), "state_artifact")
             self.artifacts.reference(
                 _string(state.get("content_id"), "state artifact content_id"),
                 _string(state.get("media_type"), "state artifact media_type"),
             )
-        elif packet.output_schema == "final-evaluation-gate-v1":
-            if payload.get("published") is not True:
-                raise IntegrityError("final evaluation gate must be published")
-            _string(payload.get("test_assignment_hash"), "test assignment hash")
-        elif packet.output_schema == "run-summary-v2":
+        elif packet.output_schema == "cross-validation-selection-v1":
+            _string(payload.get("selected_candidate_id"), "selected candidate id")
+            _integer(payload.get("selected_k"), "selected k")
+            _number(payload.get("selected_mean_score"), "selected mean score")
+            _list(payload.get("candidates"), "candidate summaries")
+        elif packet.output_schema == "run-summary-v3":
             _list(payload.get("cases"), "run summary cases")
             _string(payload.get("run_graph_id"), "run summary graph id")
             if payload.get("run_id") != packet.run_id:
@@ -2689,7 +3648,24 @@ class StageCoordinator:
             raise IntegrityError("packet executor configuration has changed")
         return executor
 
-    def _budget_ledger(self, stage: StageKind) -> BudgetLedger:
+    @contextmanager
+    def _endpoint_lease(
+        self,
+        executor: ExecutorConfiguration,
+        *,
+        acquire: bool = True,
+    ):  # type: ignore[no-untyped-def]
+        if executor.type is not ExecutorType.ENDPOINT or not acquire:
+            yield None
+            return
+        try:
+            pool = self.endpoint_pools[executor.id]
+        except KeyError as error:
+            raise IntegrityError("endpoint executor pool is unavailable") from error
+        with pool.lease() as lease:
+            yield lease
+
+    def _budget_ledger(self, stage: StageKind, *, concurrency: int = 1) -> BudgetLedger:
         budget: RoleBudget = self.workspace.repository.workspace.stages[stage.value].budget
         return BudgetLedger(
             BudgetLimits(
@@ -2697,7 +3673,7 @@ class StageCoordinator:
                 configured_cost=float("inf"),
                 tokens=budget.tokens,
                 wall_seconds=budget.wall_seconds,
-                concurrency=1,
+                concurrency=concurrency,
             )
         )
 
@@ -2712,29 +3688,48 @@ class StageCoordinator:
         )
 
     def _persisted_judges(
-        self, run_id: str, *, split: str | None = None
+        self,
+        run_id: str,
+        *,
+        split: str | None = None,
+        phase: str | None = None,
     ) -> tuple[StagePacket, ...]:
         values = []
         for item in self.ledger.list(run_id):
             if item.packet.stage is not StageKind.JUDGE or item.state is not StageState.PERSISTED:
                 continue
-            if split is not None:
+            if split is not None or phase is not None:
                 assert item.result is not None
                 output = _mapping(self.ledger.read_output(item.result), "judge output")
-                if output.get("split") != split:
+                if split is not None and output.get("split") != split:
+                    continue
+                if phase is not None and output.get("evaluation_phase") != phase:
                     continue
             values.append(item.packet)
         return tuple(values)
 
-    def _calibration_passed(self, packet: StagePacket) -> bool:
+    def _persisted_fit_packets(
+        self, run_id: str, *, phase: str
+    ) -> tuple[StagePacket, ...]:
+        values = []
+        for item in self.ledger.list(run_id):
+            if item.packet.stage is not StageKind.FIT or item.state is not StageState.PERSISTED:
+                continue
+            assert item.result is not None
+            output = _mapping(self.ledger.read_output(item.result), "fit output")
+            if output.get("phase") == phase:
+                values.append(item.packet)
+        return tuple(values)
+
+    def _judge_validation_succeeded(self, packet: StagePacket) -> bool:
         status = self.ledger.status(packet.packet_id)
         if status.state is not StageState.PERSISTED or status.result is None:
             return False
-        result = _mapping(self.ledger.read_output(status.result), "calibration output")
-        return result.get("passed") is True
+        result = _mapping(self.ledger.read_output(status.result), "judge validation output")
+        return result.get("ordering_consistent") is True
 
     def _cases_by_split(self):  # type: ignore[no-untyped-def]
-        values = {key: [] for key in ("train", "validation", "test", "challenge")}
+        values = {key: [] for key in ("train", "test", "challenge")}
         for case in self.workspace.case_bank.cases:
             values[self.workspace.splits.split_for(case)].append(case)
         return {key: tuple(items) for key, items in values.items()}
@@ -2805,7 +3800,7 @@ class StageCoordinator:
         )
         return progress
 
-    def _validate_calibration_split(
+    def _validate_judge_validation_split(
         self, lock: ExperimentLock, *, pilot: bool = False
     ) -> None:
         if lock.configuration.mode is not ExperimentMode.OPTIMIZE and not pilot:
@@ -2813,13 +3808,13 @@ class StageCoordinator:
         cases = {case.id: case for case in self.workspace.case_bank.cases}
         held_out = sorted(
             fixture.id
-            for fixture in self.workspace.calibration.fixtures
+            for fixture in self.workspace.judge_validation.fixtures
             if self.workspace.splits.split_for(cases[fixture.case_id])
             in {"test", "challenge"}
         )
         if held_out:
             raise PreflightError(
-                "optimization and pilot judge calibration cannot use held-out "
+                "optimization and pilot judge validation cannot use held-out "
                 "test/challenge cases: "
                 f"{held_out}"
             )
@@ -2846,8 +3841,20 @@ def _usage(records: Sequence) -> Mapping[str, object]:  # type: ignore[type-arg]
             if isinstance(item.usage.get("total_tokens", 0), int)
         ),
         "configured_cost": round(sum(item.configured_cost for item in completed), 10),
+        "latency_seconds": round(sum(item.latency_seconds for item in records), 10),
         "error_kinds": dict(Counter(item.error_kind for item in failed)),
     }
+
+
+def _dspy_execution_failure(role: str, result: ProgramResult) -> AutomaticExecutionFailed:
+    kind = result.error_kind or "unknown_error"
+    message = result.error_message
+    detail = f": {message}" if isinstance(message, str) and message else ""
+    return AutomaticExecutionFailed(
+        kind,
+        f"{role} DSPy call failed ({kind}){detail}",
+        usage=_usage(result.calls),
+    )
 
 
 def _timestamp() -> str:
@@ -2863,8 +3870,8 @@ def _execution_mode(run: Mapping[str, object]) -> str:
     expected_validity = value == "benchmark"
     if run.get("benchmark_valid") is not expected_validity:
         raise IntegrityError("run benchmark_valid contradicts its execution_mode")
-    if value == "pilot" and run.get("selected_splits") != ["train", "validation"]:
-        raise IntegrityError("pilot run must be restricted to train/validation splits")
+    if value == "pilot" and run.get("selected_splits") != ["train"]:
+        raise IntegrityError("pilot run must be restricted to the training split")
     if value == "pilot" and run.get("judge_repetitions") != 1:
         raise IntegrityError("pilot run must use exactly one diagnostic judge repetition")
     return value
@@ -2886,6 +3893,18 @@ def _string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise IntegrityError(f"{field} must be a non-empty string")
     return value
+
+
+def _integer(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise IntegrityError(f"{field} must be an integer")
+    return value
+
+
+def _number(value: object, field: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise IntegrityError(f"{field} must be numeric")
+    return float(value)
 
 
 def _text(value: object, field: str) -> str:

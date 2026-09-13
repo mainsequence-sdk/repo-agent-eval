@@ -9,10 +9,12 @@ and judge are separate stages used later during evaluation.
 Work through a multi-case campaign whose result is a diverse corpus for
 evaluation, DSPy optimization, distillation, and possible fine-tuning. Create
 one atomic, independently reviewable case package for each campaign slot. Every
-requested count is a lower bound, never a maximum. Create at least three
-materially different cases per selected skill and expand the campaign until the
-capability catalog's primary-coverage requirements are satisfied. The same
-campaign must also create or update the complete judge-calibration corpus; it is
+requested count is a lower bound, never a maximum. Create at least 20
+materially different cases in at least 10 semantic leakage groups per selected
+skill and expand the campaign until the capability catalog's primary-coverage
+requirements are satisfied. Every capability requires at least two independent
+primary cases; skills with more than ten capabilities therefore exceed 20. The same
+campaign must also create or update the complete judge-validation corpus; it is
 not a separate manual follow-up. Do not solve an existing case, judge a solver,
 choose a split based on case content, or run an experiment.
 
@@ -22,8 +24,9 @@ the target instructions, the selected skill, or immutable source evidence.
 
 ## Hard contract
 
-- Create one atomic case package for the current slot, with one primary configured SDK
-  skill and one coherent behavior, decision boundary, or defect. This output
+- Create one atomic case package for the current slot, with one primary configured
+  SDK-owned or platform-owned skill and one coherent behavior, decision boundary,
+  or defect. This output
   shape is for provenance and review; it is not a one-case-per-skill quota.
 - Treat the case as one member of a larger portfolio. It must add a materially
   new capability, evidence pattern, constraint, source slice, failure mode, or
@@ -32,11 +35,12 @@ the target instructions, the selected skill, or immutable source evidence.
   at most two supporting capabilities from the same skill. Supporting tags do
   not satisfy primary-coverage requirements.
 - Do not finish an authoring campaign after creating only cases and splits.
-  Codex must also create or update `judge-calibration/manifest.yaml` and its
+  Codex must also create or update `judge-validation/manifest.yaml` and its
   candidate files with all five required labels.
 - Use only facts present in the locked global instructions, complete selected
-  skill, and immutable source snapshots. Never use model memory, mutable checkouts, installed
-  packages, branches, web content, or unsupported assumptions as evidence.
+  skill, immutable Git snapshots, and hash-verified imported instruction
+  manifests. Never use model memory, mutable checkouts, installed packages,
+  branches, web content, or unsupported assumptions as evidence.
 - Treat the target global instructions and complete selected skill as
   normative for SDK behavior. Reference projects demonstrate usage; they do
   not redefine the SDK.
@@ -69,26 +73,28 @@ Read:
 
 1. The configured repository-wide target instructions.
 2. The complete selected target `SKILL.md`.
-3. Bounded target/reference evidence plus an immutable source
+3. For an imported skill, its complete MCP import manifest and exact selected
+   `SKILL.md`; never substitute a retired skill from an SDK fixture or memory.
+4. Bounded target/reference evidence plus an immutable source
    manifest containing source ids, roles, refs, commits, snapshots, and include
    policies.
-4. The user's requested capability, risk, misconception, or gap.
-5. The complete `cases/coverage.yaml` capability catalog.
-6. Existing versioned cases in the campaign, to avoid duplication.
-7. The current `judge-calibration/manifest.yaml` and every referenced candidate
-   response, to create, audit, or update the calibration corpus.
+5. The user's requested capability, risk, misconception, or gap.
+6. The complete `cases/coverage.yaml` capability catalog.
+7. Existing versioned cases in the campaign, to avoid duplication.
+8. The current `judge-validation/manifest.yaml` and every referenced candidate
+   response, to create, audit, or update the judge-validation set.
 
 Read exact versions and commits from the source manifest. Do not duplicate or
 infer them from this policy, and never describe a source as merely "latest".
 
 ## Corpus objective
 
-This workspace requires at least 12 reviewed, promoted cases and 6 distinct
+This workspace requires at least 20 reviewed cases and 10 distinct
 leakage groups for every configured skill before a scored run is ready. These
-are minimum coverage gates, not a claim that 12 examples are sufficient for a
+are minimum coverage gates, not a claim that 20 examples are sufficient for a
 production fine-tune. Author additional cases when coverage audits or
 training-volume requirements show a real gap. A campaign owner may use reviewed
-train/validation outcomes to choose the next high-level capability gap, but
+train outcomes to choose the next high-level capability gap, but
 must never pass solver responses, judge feedback, or optimizer traces into your
 inputs.
 
@@ -106,22 +112,22 @@ inapplicable:
 
 | Portfolio slice | Minimum accepted cases | Purpose |
 | --- | ---: | --- |
-| Foundational application | 3 | Apply the skill correctly in direct, realistic situations rather than recall facts. |
-| Boundaries and misconceptions | 3 | Distinguish concepts that plausible but weak answers commonly conflate. |
-| Project-backed integration or architecture | 3 | Reason across interacting evidence from a tutorial or real project. |
-| Diagnosis, schema evolution, or evidence limits | 3 | Find an evidenced defect, apply a current migration contract, or state what supplied observations do and do not prove. |
+| Foundational application | 5 | Apply the skill correctly in direct, realistic situations rather than recall facts. |
+| Boundaries and misconceptions | 5 | Distinguish concepts that plausible but weak answers commonly conflate. |
+| Project-backed integration or architecture | 5 | Reason across interacting evidence from a tutorial, real project, or cross-resource design. |
+| Review, schema evolution, or evidence limits | 5 | Review a supplied proposal, apply a current lifecycle contract, or state what supplied observations do and do not prove. |
 
 Only create diagnostic cases when a real defect is present. Replace an
 unsupported diagnostic allocation with review, evidence-boundary, or edge-case
-work; never manufacture an error to satisfy the mix. Across the 12 accepted
-cases, use at least 6 semantic leakage groups and at least 3 applicable
+work; never manufacture an error to satisfy the mix. Across the 20 accepted
+cases, use at least 10 semantic leakage groups and at least 3 applicable
 archetypes. When a skill has multiple suitable references, avoid letting one
 project or one architecture slice dominate the portfolio.
 
 Raw volume is not diversity. Two prompts belong to the same leakage group when
 they expose substantially the same solution, fixture, misconception, defect,
 or expected artifact. Variants from one group are useful for robustness, but
-they do not count as independent held-out concepts. Never create 12 renamed or
+they do not count as independent held-out concepts. Never create 20 renamed or
 reworded versions of one example.
 
 A precise coverage request normally identifies:
@@ -153,6 +159,7 @@ Authority is contextual, not one global repository ordering.
 | Subject | Normative evidence | Supporting evidence | Conflict rule |
 | --- | --- | --- | --- |
 | SDK, CLI, and platform behavior | Target global instructions and selected target skill | Target docs/code | Target normative evidence wins. |
+| MCP-owned platform behavior | Selected `platform/...` imported skill and its locked MCP manifest | Target SDK integration code | The imported MCP content owns platform semantics; the SDK owns retrieval, validation, and execution mechanics. |
 | MetaTable and updater mechanics | Applicable target publishing skill | Projects and tutorial | Projects provide scenarios, not new SDK rules. |
 | FastAPI release workflow | `application_surfaces/api_surfaces` | Project API architecture | Follow the target skill for SDK/release behavior. |
 | Frontend wire shape | `command-center-sdk` reference | Project payloads/tests | Treat divergent project shapes as diagnostic evidence, never as the current contract. |
@@ -161,9 +168,9 @@ Authority is contextual, not one global repository ordering.
 | Existing Agent communication | `a2a_sdk_execution` | Concrete Agent/runtime evidence | An example agent does not prove a release or deployment. |
 
 Project-owned copied skills are reference evidence only. The case skill must be
-the exact id represented by the supplied target skill content. Never guess a
-path under `.agents/skills`, copy a tutorial skill id, or substitute a similarly
-named skill.
+the exact id represented by the supplied SDK or `platform/...` skill content.
+Never guess a path under `.agents/skills`, copy a tutorial skill id, reconstruct
+a retired MCP skill, or substitute a similarly named skill.
 
 ## Authoring procedure
 
@@ -180,9 +187,9 @@ named skill.
 8. Return material paths and a leakage-resistant group, then apply the final
    rejection gate.
 9. After all requested slots exist, update grouped splits mechanically and
-   create or update the mandatory judge-calibration corpus described below.
+   create or update the mandatory judge-validation corpus described below.
 10. Validate the complete authoring deliverable; do not return while
-    calibration is empty, missing a required label, references an ineligible
+    judge validation is empty, missing a required label, references an ineligible
     split, or is stale against a changed case or rubric.
 
 Prefer the smallest sufficient set of source paths. The selected skill is
@@ -222,6 +229,15 @@ Use every row as routing guidance, not as substitute evidence.
 | `data_publishing/time_index_table_updates` | `TimeIndexMetaTable` storage, `TimeIndexTableUpdater` execution, `TimeIndexTableUpdateConfig`, `TimeIndexTableUpdate`, update windows, and `TimeIndexTableRef` dependencies | Tutorial, Alpaca, Binance, or Markets Analytics | Conflating storage with updater execution, treating a `TimeIndexTableRef` as a producer, or requiring live execution |
 | `maintenance/bug_auditor` | Evidence-backed root cause, SDK/project boundary, upstream-versus-local classification | Any project with a concrete contradiction or failure | Vague criticism or unsupported defects |
 | `maintenance/code_repository_maintenance` | Repository context, SDK/skill pin consistency, safe maintenance sequence | Tutorial or one project's instructions/configuration | Refresh rituals without evidence or live-success claims |
+| `platform/a2a_communication` | Environment-scoped discovery, caller/session proof, runtime access, response kinds, retries, task lifecycle | Imported MCP skill plus target A2A mechanics when applicable | Exposing credentials, guessing identities, or silently switching environments |
+| `platform/code_repository_design` | Connected resource blueprint, ownership graph, success evidence, complete deployment matrix | Imported MCP skill plus one project architecture | A file list without relationships, ownership, deployment, or proof |
+| `platform/code_repository_local_setup` | Ready binding selection, safe clone/reuse, separated auth lanes, partial recovery | Imported MCP skill plus repository metadata supplied in the prompt | Reconstructed clone URLs, printed deploy keys, or destructive checkout replacement |
+| `platform/code_repository_to_agent` | Repository preparation, source/runtime cards, stable command, coding-agent workflow deployment | Imported MCP skill plus one repository Agent surface | Dependency mutation at runtime or treating source metadata as deployment proof |
+| `platform/code_repository_workflows` | Valid declarations, exact image matrix, Jobs, Coding Agents, FastAPI, Static Sites, navigation | Imported MCP skill plus a project `.mainsequence` slice | One image rule for all targets or declaration-only success claims |
+| `platform/model_provider_credentials` | Catalog selection, durable sign-in, next-action lifecycle, status, cancellation, secrecy | Imported MCP skill and supplied provider state | Returning secrets or treating an initiated sign-in as usable credentials |
+| `platform/organization_environments` | Organization partitions, branch compatibility, human versus runtime selection, promotion | Imported MCP skill plus supplied branch/resource state | Runtime user-selected environment variables or cross-environment resource reuse |
+| `platform/resource_release` | Release kinds/revisions, direct versus workflow image rules, CORS, observation, deletion | Imported MCP skill plus API/site project evidence | Treating automatic redeployment as image optional in direct creation |
+| `platform/static_site` | Static build/release, installed frontend contract, routing, delegated APIs, CORS, navigation | Imported MCP skill plus Command Center SDK | Dynamic backend behavior in the static bundle or hard-coded deployment URLs |
 | `platform_operations/access_control_and_sharing` | Safe grants, identity resolution, preserving unrelated access | Tutorial plus target skill | Guessing user uids, broad revocation, or conflating branch environments |
 | `platform_operations/orchestration_and_releases` | Job/schedule/JobRun separation, workflows, images, resources, releases, deployment proof | Tutorial or one project's `.mainsequence`/operations evidence | Treating declaration, push, schedule, or health as successful execution |
 | `sdk_code_repository_execution` | Git-derived repository context, success definition, correct specialized-skill routing | Tutorial or one project | Absorbing domain behavior owned by another skill |
@@ -233,9 +249,9 @@ diagnosis, but a generic Python `Agent` example is not normative evidence.
 
 ## Per-skill portfolio map
 
-Use the following as candidate semantic families when planning the 12-case
+Use the following as candidate semantic families when planning the 20-case
 minimum. Each comma-separated family should produce one or more cases only when
-the supplied evidence supports it. Cover at least 6 distinct families per skill
+the supplied evidence supports it. Cover at least 10 distinct families per skill
 before repeating a family for robustness variants.
 
 | Exact skill id | Independent families to cover |
@@ -248,11 +264,20 @@ before repeating a family for robustness variants.
 | `data_publishing/time_index_table_updates` | Producer dependency graph; producer versus read-only reference; update-window calculation; warm-up requirements; empty-valid update versus failure; storage-first incremental or idempotent behavior |
 | `maintenance/bug_auditor` | Root-cause localization; SDK versus project ownership; upstream versus local classification; faulty-test or false-premise detection; stale documentation/configuration mismatch; minimal evidence needed to verify a proposed repair |
 | `maintenance/code_repository_maintenance` | Git-derived repository context; SDK and skill-pin consistency; safe dependency-update sequence; generated/configuration drift; test/health/release evidence distinctions; routing domain work to the owning specialized skill |
+| `platform/a2a_communication` | Environment-scoped discovery; constrained sender boundary; caller/session proof; runtime access remediation; session provenance; atomic access; response-kind extension; retry identity; task lifecycle; credential secrecy |
+| `platform/code_repository_design` | Intent and success; ontology identities; branch/environment partition; connected blueprint; MetaTables; updaters; Jobs; APIs; CLI; Coding Agents; Static Sites; complete automatic-deployment matrix |
+| `platform/code_repository_local_setup` | Ready selection; provisioning; binding clone source; safe destination; existing checkout; deploy-key boundary; clone proof; authentication lanes; environment rendering; partial recovery |
+| `platform/code_repository_to_agent` | Readiness audit; repository instructions; repository-owned skills; source card; runtime card; stable executor command; preparation/deployment split; workflow declaration; automatic redeployment; runtime/session provenance |
+| `platform/code_repository_workflows` | Template validation; declaration file; image ownership; target variables; navigation authorization; icon mask; automatic Jobs; cron/timezone; automatic Coding Agents; automatic FastAPI; manual runtime images; removal semantics |
+| `platform/model_provider_credentials` | Catalog discovery; built-in/custom providers; model capability selection; credential status; sign-in preconditions; durable attempts; next actions; terminal verification; secrecy; cancellation/revocation |
+| `platform/organization_environments` | Organization partition; branch compatibility; explicit human selection; target-derived runtime scope; resource isolation; secret/constant isolation; datasource routing; delegation; code promotion; configuration/data promotion; lifecycle transitions |
+| `platform/resource_release` | Release kinds; revision lifecycle; direct runtime images; workflow runtime images; static image semantics; automatic redeployment; REST/WebSocket FastAPI; CORS; delegated site API; configuration updates; deployment observation; deletion protection |
+| `platform/static_site` | Capability discovery; installed frontend SDK; branch-owned creation; build environment; opaque routing; FastAPI delegation; CORS; automatic redeployment; navigation; icon/mask; deployment observation |
 | `platform_operations/access_control_and_sharing` | Identity resolution before grants; least-privilege grant selection; preservation of unrelated access; branch/environment separation; safe correction of a wrong principal or scope; evidence of requested versus effective sharing state |
 | `platform_operations/orchestration_and_releases` | Business configuration versus Job; Job versus schedule versus JobRun; workflow dependency design; image/resource configuration; release versus deployment lifecycle; declaration/push/health/schedule/live-execution evidence boundaries |
 | `sdk_code_repository_execution` | Git-derived repository identity; branch and environment derivation; explicit success definition; specialized-skill routing; local/static evidence versus live success; ambiguity or missing-prerequisite handling |
 
-Do not turn the table into 66 trivia questions. Each case still needs a
+Do not turn the table into trivia questions. Each case still needs a
 realistic scenario, a meaningful decision boundary, supplied evidence, and a
 bounded deliverable. A family may yield an easy tutorial case, a complex
 project-backed case, and a diagnostic robustness variant, but semantically
@@ -291,6 +316,27 @@ Use these only after verifying them in supplied evidence:
 | APIs | Trusted request context vs caller identifiers; thin transport vs domain work. |
 | Delivery evidence | Health/test/push/workflow/schedule/image/release/DeploymentRun/live behavior prove different things. |
 | Agents | Metadata/source/example `Agent`/Agent Card/released runtime/verified deployment are not equivalent. |
+
+## Automatic-deployment coverage
+
+Automatic deployment is a required cross-skill coverage axis, not one generic
+case. The complete bank must include construction and review cases for every
+supported target below. Keep cases under the exact skill that owns the tested
+decision, and keep semantically related variants in one leakage group.
+
+| Deployment target | Required behavior to test | Image rule to test |
+| --- | --- | --- |
+| Standalone direct `Job` | Create or update automatic execution deliberately and verify the resulting run evidence. | The caller selects the exact ready Job image. |
+| Workflow `Job` | Declare branch-driven automatic deployment and distinguish the Job, schedule, and concrete run. | The backend builds or selects the exact event image; do not attach a runtime-release image field. |
+| Workflow FastAPI release | Deploy the combined REST/WebSocket resource automatically and verify revision, DeploymentRun, health, and behavior. | Omit `related_image_uid` when automatic deployment is enabled; require it when disabled. |
+| Workflow runtime Agent release | Deploy the Agent automatically from repository workflow state and preserve runtime/session provenance. | Omit `related_image_uid` when automatic deployment is enabled; require it when disabled. |
+| Workflow Static Site | Build immutable frontend assets, use opaque routing, and verify navigation plus deployed behavior. | The backend performs the static build; no runtime image is attached in either deployment mode. |
+| Workflow CodeRepository Coding Agent | Prepare the repository, declare the target, redeploy from the supported branch event, and verify the deployment run. | The backend builds the Coding Agent image; the workflow does not supply one. |
+
+Also include direct-versus-workflow boundary cases. Direct creation of an Agent
+or FastAPI `ResourceRelease` always requires an exact ready image, even when its
+automatic-redeployment policy is enabled. Automatic deployment never means
+that a declaration, push, or healthy endpoint alone proves successful behavior.
 
 ## Solver prompt contract
 
@@ -343,13 +389,10 @@ not require byte equality unless exact bytes are materially required.
 
 ## Semantic rubric
 
-Return exactly `passing_score`, `criteria`, and `hard_failures`.
-`passing_score` is a number in `[0, 1]`; `criteria` is a non-empty list of
+Return exactly `criteria` and `hard_failures`. `criteria` is a non-empty list of
 `{id, weight, description}` mappings; `hard_failures` is a list of
-`{id, description}` mappings or `[]`.
-
-- Use `passing_score: 0.75` unless the task supplies a compelling semantic
-  reason for another threshold.
+`{id, description}` mappings or `[]`. The rubric defines a continuous score and
+named critical violations; it never defines a binary verdict or numeric cutoff.
 - Criterion and hard-failure ids are unique lowercase identifiers.
 - Use a small set of independent criteria. Every weight is greater than zero,
   no greater than one, and all weights sum exactly to `1.0`.
@@ -425,20 +468,21 @@ Cases with substantially the same solution or misconception share a group even
 when prose or provider names differ. Unrelated operations in one repository do
 not automatically share a group. Never name the group after a split.
 
-Optimization, distillation, and fine-tuning may use reviewed train and
-validation cases only. Test/challenge prompts, answers, solver responses,
+Optimization performs grouped K-fold cross-validation within reviewed training
+cases. Distillation and fine-tuning may use reviewed training cases only.
+Test/challenge prompts, answers, solver responses,
 judge feedback, and results must never influence case generation or become
 training material. Project-derived exports also require applicable licensing;
 provenance alone does not grant redistribution rights.
 
-## Mandatory judge-calibration deliverable
+## Mandatory judge-validation deliverable
 
-Judge calibration is a required output of this case-authoring workflow. It is
+Judge validation is a required output of this case-authoring workflow. It is
 not a later user chore, a solver stage, a judge-generated result, or optional
 documentation. Before returning from every authoring campaign, create or update:
 
 ```text
-judge-calibration/
+judge-validation/
 ├── manifest.yaml
 ├── strong.md
 ├── partial.md
@@ -449,47 +493,46 @@ judge-calibration/
 
 Additional files and multiple fixtures per label are allowed when one fixture
 does not adequately exercise the active rubric set. The minimum manifest uses
-schema version 2 and contains at least one fixture for every exact label:
+schema version 3 and contains at least one fixture for every exact label:
 `strong`, `partial`, `incorrect`, `contradictory`, and `adversarial`.
 
 ```yaml
-schema_version: 2
+schema_version: 3
 fixtures:
   - id: strong-example
-    case: existing-train-or-validation-case-id
+    case: existing-training-case-id
     candidate: strong.md
     label: strong
-    score_range: [0.9, 1.0]
 ```
 
-Every fixture id is unique. Every `case` is an existing promoted MainSequence
-case. Every `candidate` is a safe path relative to `judge-calibration/`. Every
-score range is inclusive, ordered, and within `[0, 1]`.
+Every fixture id is unique. Every `case` is an existing reviewed MainSequence
+training case. Every `candidate` is a safe path relative to `judge-validation/`.
 
 Codex writes controlled candidate responses grounded in the referenced prompt,
 expected response, rubric, and selected skill:
 
-- `strong` is correct, complete, follows instructions, and must pass;
-- `partial` makes meaningful progress but has material omissions and must fail;
-- `incorrect` is substantively wrong or non-responsive and must fail;
+- `strong` is correct, complete, and follows instructions;
+- `partial` makes meaningful progress but has material omissions;
+- `incorrect` is substantively wrong or non-responsive;
 - `contradictory` conflicts with itself or the supplied current-API evidence and
-  must fail; and
+  is semantically inconsistent; and
 - `adversarial` attempts to manipulate the judge or override the rubric and
-  must fail without introducing secrets or executable attack instructions.
+  must not introduce secrets or executable attack instructions.
 
-Choose non-overlapping ranges that allow the runtime to prove the strict
-ordering `strong > partial > incorrect/contradictory/adversarial`. The fixtures
+The runtime validates only the strict ordinal relation
+`strong > partial > incorrect/contradictory/adversarial`; it applies no score
+range or cutoff. The fixtures
 must genuinely exercise semantic rubric criteria and any hard failures; token or
 keyword caricatures are insufficient. Never use actual solver responses, judge
-outputs, optimizer traces, run results, or held-out feedback as calibration
+outputs, optimizer traces, run results, or held-out feedback as judge validation
 candidates.
 
-Because this workspace includes DSPy optimization, calibration fixtures may
-reference train and validation cases only. They must never reference test or
+Because this workspace includes DSPy optimization, judge-validation fixtures may
+reference training cases only. They must never reference test or
 challenge cases. If there is no eligible representative case, author and split
 one instead of weakening this rule. Review and update fixtures whenever a
-referenced case, expected response, rubric, or split changes. Calibration inputs
-are versioned with the experiment; calibration execution records remain under
+referenced case, expected response, rubric, or split changes. Judge-validation inputs
+are versioned with the experiment; judge-validation execution records remain under
 the external data root and are never committed.
 
 ## Versioned case package
@@ -550,11 +593,11 @@ from the package identity and file hashes by the framework. Use
 The prompt and reference response must not be identical.
 
 `solver/` is the complete public case surface. The solver must never see
-`case.yaml`, `judge/`, rubrics, reference answers, pass thresholds, calibration
-labels, or accepted calibration ranges. The coordinator must materialize a
+`case.yaml`, `judge/`, rubrics, reference answers, or judge-validation labels.
+The coordinator must materialize a
 fresh stage-specific view instead of mounting this canonical package. The judge
 receives the task, candidate response, rubric criteria, reference evidence, and
-skill context, but the pass threshold remains coordinator-only.
+skill context.
 
 ## Rejection gate
 
@@ -575,8 +618,8 @@ Create a case package only after every answer is yes:
 - Are hard failures limited to decisive violations?
 - Are source labels exact, relevant, immutable, and non-empty?
 - Does the leakage group keep semantic siblings in one split?
-- Does `judge-calibration/manifest.yaml` cover all five exact labels with
-  controlled candidate files, defensible ranges, and only eligible existing
-  train/validation cases?
+- Does `judge-validation/manifest.yaml` cover all five exact labels with
+  controlled candidate files, no numeric ranges, and only eligible existing
+  train cases?
 - Is all held-out feedback, live state, secret material, and unsupported fact
   absent?

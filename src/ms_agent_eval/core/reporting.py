@@ -12,18 +12,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .endpoint_pool import endpoint_provenance_routes
 from .errors import IntegrityError
 from .evaluation import CaseBank
 from .hashing import content_hash, json_value
 from .models import ArtifactReference
 from .stages import StageArtifact, StageKind, StageLedger, StageState, StageStatus
-from .workspace import WorkspaceRepository
+from .workspace import ExecutorType, WorkspaceRepository
 
 if TYPE_CHECKING:
     from .planning import CompiledWorkspace
 
 
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 CSV_COLUMNS = (
     "report_schema_version",
     "workspace_id",
@@ -43,8 +44,6 @@ CSV_COLUMNS = (
     "solver_model_details",
     "judge_model_details",
     "score",
-    "passing_score",
-    "passed",
     "scores_detail",
     "hard_failures",
     "judge_feedback",
@@ -150,6 +149,8 @@ class RunReportBuilder:
             evaluation = _mapping(
                 self.ledger.read_output(status.result), "judge evaluation output"
             )
+            if evaluation.get("evaluation_phase") not in {"test", "pilot"}:
+                continue
             judge_input = _mapping(
                 self._read_input(status, "evaluation"), "judge evaluation input"
             )
@@ -190,6 +191,7 @@ class RunReportBuilder:
         if aggregate is not None and run.get("execution_mode") == "pilot":
             report_status = "pilot_completed"
         usage_by_role = self._usage_by_role(statuses)
+        endpoint_execution = self._endpoint_summary(statuses)
         skill_summary = self._skill_summary(case_results)
         criterion_summary = self._criterion_summary(case_results)
         benchmark_valid = run.get("benchmark_valid") is True
@@ -215,7 +217,7 @@ class RunReportBuilder:
                 "source_snapshot_hash": lock.get("source_snapshot_hash"),
                 "case_bank_hash": lock.get("case_bank_hash"),
                 "split_hash": lock.get("split_hash"),
-                "calibration_hash": lock.get("calibration_hash"),
+                "judge_validation_hash": lock.get("judge_validation_hash"),
                 "authoring_instructions_hash": lock.get("authoring_instructions_hash"),
                 "capability_catalog_hash": lock.get("capability_catalog_hash"),
                 "solver_program_hash": lock.get("solver_program_hash"),
@@ -226,6 +228,7 @@ class RunReportBuilder:
             },
             "models": models,
             "usage_by_role": usage_by_role,
+            "endpoint_execution": endpoint_execution,
             "execution": execution_summary,
             "case_count": len(case_results),
             "cases": case_results,
@@ -238,11 +241,11 @@ class RunReportBuilder:
                 if item["state"] in {StageState.FAILED.value, StageState.REJECTED.value}
             ],
             "benchmark_metrics": None,
+            "cross_validation": self._cross_validation(statuses),
         }
         if benchmark_valid and aggregate is not None:
             identity["benchmark_metrics"] = {
                 "mean_score": aggregate.get("mean_score"),
-                "pass_rate": aggregate.get("pass_rate"),
             }
         return RunReport({**identity, "content_hash": content_hash(identity)})
 
@@ -313,7 +316,7 @@ class RunReportBuilder:
         model = _mapping(raw, f"experiment lock {role} model") if raw is not None else {}
         relevant = {
             "solver": {StageKind.SOLVE},
-            "judge": {StageKind.CALIBRATE_JUDGE, StageKind.JUDGE},
+            "judge": {StageKind.VALIDATE_JUDGE, StageKind.JUDGE},
             "author": {StageKind.AUTHOR},
         }[role]
         role_statuses = [item for item in statuses if item.packet.stage in relevant]
@@ -490,10 +493,6 @@ class RunReportBuilder:
             "rubric": rubric_map,
             "criterion_scores": details,
             "score": score,
-            "passing_score": _number(
-                evaluation.get("passing_score"), "evaluation passing_score"
-            ),
-            "passed": _boolean(evaluation.get("passed"), "evaluation passed"),
             "hard_failures": hard_failures,
             "votes": votes,
             "judge_feedback": str(evaluation.get("feedback", "")),
@@ -557,6 +556,25 @@ class RunReportBuilder:
         assert values[0].result is not None
         return _mapping(self.ledger.read_output(values[0].result), "aggregate output")
 
+    def _cross_validation(
+        self, statuses: Sequence[StageStatus]
+    ) -> Mapping[str, object] | None:
+        values = [
+            status
+            for status in statuses
+            if status.packet.stage is StageKind.SELECT
+            and status.state is StageState.PERSISTED
+            and status.result is not None
+        ]
+        if len(values) > 1:
+            raise IntegrityError("run contains multiple persisted selection results")
+        if not values:
+            return None
+        assert values[0].result is not None
+        return _mapping(
+            self.ledger.read_output(values[0].result), "cross-validation selection"
+        )
+
     @staticmethod
     def _validate_aggregate(
         run: Mapping[str, object],
@@ -566,7 +584,7 @@ class RunReportBuilder:
     ) -> None:
         if aggregate is None:
             return
-        if aggregate.get("schema_version") != 2:
+        if aggregate.get("schema_version") != 3:
             raise IntegrityError("aggregate output schema version is not supported")
         if aggregate.get("run_id") != run.get("run_id"):
             raise IntegrityError("aggregate belongs to another run")
@@ -601,22 +619,11 @@ class RunReportBuilder:
                 if aggregate_report_cases
                 else 0.0
             )
-            pass_rate = (
-                sum(bool(item["passed"]) for item in aggregate_report_cases)
-                / len(aggregate_report_cases)
-                if aggregate_report_cases
-                else 0.0
-            )
             if (
                 abs(_number(aggregate.get("mean_score"), "aggregate mean_score") - mean_score)
                 > 1e-9
             ):
                 raise IntegrityError("aggregate mean score is inconsistent")
-            if (
-                abs(_number(aggregate.get("pass_rate"), "aggregate pass_rate") - pass_rate)
-                > 1e-9
-            ):
-                raise IntegrityError("aggregate pass rate is inconsistent")
         elif aggregate.get("benchmark_metrics") is not None:
             raise IntegrityError("pilot aggregate must not contain benchmark metrics")
 
@@ -626,22 +633,22 @@ class RunReportBuilder:
     ) -> str:
         if aggregate is not None:
             return "completed"
-        calibration = next(
+        judge_validation = next(
             (
                 status
                 for status in statuses
-                if status.packet.stage is StageKind.CALIBRATE_JUDGE
+                if status.packet.stage is StageKind.VALIDATE_JUDGE
                 and status.state is StageState.PERSISTED
                 and status.result is not None
             ),
             None,
         )
-        if calibration is not None and calibration.result is not None:
+        if judge_validation is not None and judge_validation.result is not None:
             output = _mapping(
-                self.ledger.read_output(calibration.result), "calibration output"
+                self.ledger.read_output(judge_validation.result), "judge validation output"
             )
-            if output.get("passed") is False:
-                return "calibration_failed"
+            if output.get("ordering_consistent") is False:
+                return "judge_validation_failed"
         if any(
             status.state in {StageState.FAILED, StageState.REJECTED}
             for status in statuses
@@ -723,7 +730,7 @@ class RunReportBuilder:
             role = {
                 StageKind.AUTHOR: "author",
                 StageKind.SOLVE: "solver",
-                StageKind.CALIBRATE_JUDGE: "judge",
+                StageKind.VALIDATE_JUDGE: "judge",
                 StageKind.JUDGE: "judge",
             }.get(status.packet.stage)
             if role is None:
@@ -732,6 +739,83 @@ class RunReportBuilder:
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     values[role][str(key)] += value
         return {role: dict(sorted(counter.items())) for role, counter in values.items()}
+
+    def _endpoint_summary(
+        self, statuses: Sequence[StageStatus]
+    ) -> Mapping[str, object]:
+        endpoints: dict[str, dict[str, object]] = {}
+        for executor in self.repository.workspace.executors.values():
+            if executor.type is not ExecutorType.ENDPOINT:
+                continue
+            for configured in executor.endpoints:
+                key = f"{executor.id}/{configured.id}"
+                endpoints[key] = {
+                    "executor_id": executor.id,
+                    "endpoint_id": configured.id,
+                    "base_url": configured.base_url,
+                    "pool_hash": executor.pool_hash,
+                    "endpoint_configuration_hash": configured.configuration_hash,
+                    "configured_capacity": configured.max_concurrent_requests,
+                    "packets_succeeded": 0,
+                    "packets_failed": 0,
+                    "model_calls": 0,
+                    "completed_calls": 0,
+                    "failed_calls": 0,
+                    "latency_seconds": 0.0,
+                    "queue_wait_seconds": 0.0,
+                    "peak_observed_endpoint_concurrency": 0,
+                    "peak_observed_pool_concurrency": 0,
+                }
+        for status in statuses:
+            if status.result is None:
+                continue
+            raw = status.result.provenance.get("endpoint_pool")
+            if not isinstance(raw, Mapping):
+                continue
+            for route in endpoint_provenance_routes(raw, status.result.usage):
+                endpoint_id = route.get("endpoint_id")
+                if not isinstance(endpoint_id, str):
+                    continue
+                key = f"{status.packet.executor.id}/{endpoint_id}"
+                endpoint = endpoints.get(key)
+                if endpoint is None:
+                    continue
+                outcome = (
+                    "packets_failed"
+                    if status.result.error is not None
+                    else "packets_succeeded"
+                )
+                endpoint[outcome] = int(endpoint[outcome]) + 1
+                for usage_key in ("model_calls", "completed_calls", "failed_calls"):
+                    value = route.get(usage_key, 0)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        endpoint[usage_key] = int(endpoint[usage_key]) + value
+                latency = route.get("latency_seconds", 0.0)
+                if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+                    endpoint["latency_seconds"] = float(
+                        endpoint["latency_seconds"]
+                    ) + float(latency)
+                queue_wait = route.get("queue_wait_seconds", 0.0)
+                if isinstance(queue_wait, (int, float)) and not isinstance(
+                    queue_wait, bool
+                ):
+                    endpoint["queue_wait_seconds"] = float(
+                        endpoint["queue_wait_seconds"]
+                    ) + float(queue_wait)
+                for summary_key in (
+                    "peak_observed_endpoint_concurrency",
+                    "peak_observed_pool_concurrency",
+                ):
+                    value = route.get(summary_key, 0)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        endpoint[summary_key] = max(int(endpoint[summary_key]), value)
+        return {
+            "configured_capacity": sum(
+                int(endpoint["configured_capacity"])
+                for endpoint in endpoints.values()
+            ),
+            "endpoints": [endpoints[key] for key in sorted(endpoints)],
+        }
 
     @staticmethod
     def _skill_summary(
@@ -744,8 +828,7 @@ class RunReportBuilder:
             {
                 "skill_name": skill,
                 "case_count": len(items),
-                "passed": sum(bool(item["passed"]) for item in items),
-                "failed": sum(not bool(item["passed"]) for item in items),
+                "critical_violations": sum(bool(item["hard_failures"]) for item in items),
                 "mean_score": sum(float(item["score"]) for item in items) / len(items),
             }
             for skill, items in sorted(by_skill.items())
@@ -887,8 +970,6 @@ def render_report_csv(report: RunReport) -> bytes:
             "solver_model_details": models.get("solver"),
             "judge_model_details": models.get("judge"),
             "score": case["score"],
-            "passing_score": case["passing_score"],
-            "passed": str(case["passed"]).lower(),
             "scores_detail": {
                 "criteria": case["criterion_scores"],
                 "hard_failure_applied": bool(case["hard_failures"]),
@@ -919,7 +1000,7 @@ def render_report_markdown(report: RunReport) -> bytes:
         lines.extend(
             [
                 "> **Diagnostic pilot — not a valid benchmark.** Per-case scores are shown, "
-                "but no benchmark mean or pass rate is reported.",
+                "but no aggregate benchmark metric is reported.",
                 "",
             ]
         )
@@ -948,10 +1029,32 @@ def render_report_markdown(report: RunReport) -> bytes:
                 "## Benchmark metrics",
                 "",
                 f"- Mean score: `{_format_score(metrics.get('mean_score'))}`",
-                f"- Pass rate: `{_format_score(metrics.get('pass_rate'))}`",
                 "",
             ]
         )
+    cross_validation = value.get("cross_validation")
+    if isinstance(cross_validation, Mapping):
+        lines.extend(
+            [
+                "## Cross-validation selection",
+                "",
+                f"- Metric: `{cross_validation.get('metric')}`",
+                f"- Selected candidate: `{cross_validation.get('selected_candidate_id')}`",
+                f"- Selected k: `{cross_validation.get('selected_k')}`",
+                f"- Mean out-of-fold score: `{_format_score(cross_validation.get('selected_mean_score'))}`",
+                "",
+                "| Candidate | k | Cases | Mean out-of-fold score |",
+                "| --- | ---: | ---: | ---: |",
+            ]
+        )
+        for candidate in _mapping_sequence(
+            cross_validation.get("candidates", []), "cross-validation candidates"
+        ):
+            lines.append(
+                f"| `{_table(candidate['candidate_id'])}` | {candidate['k']} | "
+                f"{candidate['case_count']} | {_format_score(candidate['mean_score'])} |"
+            )
+        lines.append("")
     lines.extend(["## Models", ""])
     for role in ("author", "solver", "judge"):
         model = _mapping(_mapping(value["models"], "report models")[role], f"{role} model")
@@ -978,6 +1081,35 @@ def render_report_markdown(report: RunReport) -> bytes:
         lines.append(
             f"| {stage['stage']} | {stage['executed_this_run']} | {stage['reused_this_run']} |"
         )
+    endpoint_execution = _mapping(
+        value.get("endpoint_execution", {}), "endpoint execution"
+    )
+    endpoint_rows = _mapping_sequence(
+        endpoint_execution.get("endpoints", []), "endpoint execution endpoints"
+    )
+    if endpoint_rows:
+        lines.extend(
+            [
+                "",
+                "## Endpoint execution",
+                "",
+                f"- Configured pool capacity: `{endpoint_execution.get('configured_capacity', 0)}`",
+                "",
+                "| Executor / endpoint | URL | Capacity | Calls | Succeeded packets | Failed packets | Peak endpoint | Peak pool | Queue wait (s) | Model latency (s) |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for endpoint in endpoint_rows:
+            lines.append(
+                f"| `{endpoint['executor_id']}/{endpoint['endpoint_id']}` | "
+                f"`{endpoint['base_url']}` | {endpoint['configured_capacity']} | "
+                f"{endpoint['model_calls']} | {endpoint['packets_succeeded']} | "
+                f"{endpoint['packets_failed']} | "
+                f"{endpoint['peak_observed_endpoint_concurrency']} | "
+                f"{endpoint['peak_observed_pool_concurrency']} | "
+                f"{float(endpoint['queue_wait_seconds']):.3f} | "
+                f"{float(endpoint['latency_seconds']):.3f} |"
+            )
     lines.extend(["", "## Incremental usage", ""])
     for role, usage in _mapping(value["usage_by_role"], "report usage").items():
         lines.append(f"- {str(role).title()}: `{_compact_json(usage)}`")
@@ -986,60 +1118,43 @@ def render_report_markdown(report: RunReport) -> bytes:
             "",
             "## Skills",
             "",
-            "| Skill | Cases | Passed | Failed | Mean score |",
-            "| --- | ---: | ---: | ---: | ---: |",
+            "| Skill | Cases | Critical violations | Mean score |",
+            "| --- | ---: | ---: | ---: |",
         ]
     )
     for skill in _mapping_sequence(value["skills"], "report skills"):
         lines.append(
-            f"| {_table(skill['skill_name'])} | {skill['case_count']} | {skill['passed']} | "
-            f"{skill['failed']} | {_format_score(skill['mean_score'])} |"
+            f"| {_table(skill['skill_name'])} | {skill['case_count']} | "
+            f"{skill['critical_violations']} | {_format_score(skill['mean_score'])} |"
         )
     lines.extend(
         [
             "",
             "## Cases",
             "",
-            "| Skill | Case | Split | Repetition | Score | Threshold | Result |",
-            "| --- | --- | --- | ---: | ---: | ---: | --- |",
+            "| Skill | Case | Split | Repetition | Score | Critical violations |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
         ]
     )
     filenames = _case_filenames(_case_sequence(report))
     for case in _case_sequence(report):
         key = (str(case["case_id"]), int(case["repetition"]))
-        result = "PASS" if case["passed"] is True else "FAIL"
         lines.append(
             f"| {_table(case['skill_name'])} | "
             f"[{_table(case['case_title'])}](cases/{filenames[key]}) | "
             f"{_table(case['split'])} | {case['repetition']} | "
-            f"{_format_score(case['score'])} | {_format_score(case['passing_score'])} | "
-            f"{result} |"
+            f"{_format_score(case['score'])} | {len(case['hard_failures'])} |"
         )
-    failures = [case for case in _case_sequence(report) if case["passed"] is not True]
-    lines.extend(["", "## Failed cases", ""])
-    if not failures:
+    violations = [case for case in _case_sequence(report) if case["hard_failures"]]
+    lines.extend(["", "## Critical violations", ""])
+    if not violations:
         lines.append("None.")
     else:
-        for case in failures:
+        for case in violations:
             lines.append(
                 f"- `{case['case_id']}` repetition {case['repetition']}: "
                 f"score {_format_score(case['score'])}; hard failures "
                 f"`{_compact_json(case['hard_failures'])}`"
-            )
-    borderline = [
-        case
-        for case in _case_sequence(report)
-        if abs(float(case["score"]) - float(case["passing_score"])) <= 0.05
-    ]
-    lines.extend(["", "## Borderline cases", ""])
-    if not borderline:
-        lines.append("None.")
-    else:
-        for case in borderline:
-            lines.append(
-                f"- `{case['case_id']}` repetition {case['repetition']}: "
-                f"score {_format_score(case['score'])}, threshold "
-                f"{_format_score(case['passing_score'])}."
             )
     lines.extend(
         [
@@ -1079,9 +1194,7 @@ def render_case_markdown(report: RunReport, case: Mapping[str, object]) -> bytes
         f"- Skill: `{case['skill_name']}`",
         f"- Split: `{case['split']}`",
         f"- Repetition: `{case['repetition']}`",
-        f"- Result: `{'PASS' if case['passed'] else 'FAIL'}`",
         f"- Score: `{_format_score(case['score'])}`",
-        f"- Passing score: `{_format_score(case['passing_score'])}`",
         "",
         "## Prompt",
         "",

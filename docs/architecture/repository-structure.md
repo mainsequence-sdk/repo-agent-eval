@@ -6,13 +6,14 @@
 
 ```text
 core/
-  workspace.py             schema-v9 target, executor, model, reuse, and stage manifest
+  workspace.py             schema-v11 target, executor, model, reuse, and stage manifest
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring
-  evaluation.py            cases, rubrics, calibration, LLM-judge aggregation
+  evaluation.py            cases, rubrics, judge validation, LLM-judge aggregation
   planning.py              generated indexes and experiment locks
   stages.py                immutable packets/results and append-only lifecycle
+  endpoint_pool.py         threaded replica permits and cross-process slot locks
   coordinator.py           resumable staged evaluate/optimize orchestration
   stage_executors.py       transport-neutral harness rendering contract
   runner.py                public full-run facade over the coordinator
@@ -41,9 +42,9 @@ experiments/<name>/
 │   ├── coverage.yaml      required capabilities and primary-case depth
 │   ├── splits.yaml        group-to-split assignments
 │   └── <skill>/<case>/    coordinator metadata plus solver/ and judge/ surfaces
-└── judge-calibration/
-    ├── manifest.yaml      authored reference labels and accepted score ranges
-    └── *.md               calibration candidate responses
+└── judge-validation/
+    ├── manifest.yaml      authored reference labels for ordinal validation
+    └── *.md               judge-validation candidate responses
 ```
 
 The manifest has `evaluation` and `experiments` sections, explicitly points to
@@ -52,7 +53,7 @@ The manifest has `evaluation` and `experiments` sections, explicitly points to
 policy, not generated data: its exact content participates in case-authoring
 provenance. Snapshot ids, skill
 indexes, case indexes, compatibility maps, normalized program hashes, model
-hashes, calibration hashes, and experiment locks are generated evidence—not
+hashes, judge validation hashes, and experiment locks are generated evidence—not
 additional configuration directories.
 
 `evaluation.cases.coverage` points to the capability catalog and sets additional
@@ -62,9 +63,9 @@ case one primary capability and at most two supporting capabilities, and
 reviews existing packages to keep a campaign semantically diverse. Numeric
 counts cannot hide a missing semantic capability.
 
-The same Codex authoring campaign populates `judge-calibration/` after cases and
+The same Codex authoring campaign populates `judge-validation/` after cases and
 grouped splits exist. Those controlled candidate responses are versioned
-experiment inputs. Actual calibration executions and judge outputs stay in the
+experiment inputs. Actual judge-validation executions and judge outputs stay in the
 external data plane.
 
 The complete general contract is documented in
@@ -99,7 +100,7 @@ The default is `~/ms_agent_eval/<workspace-id>`:
 ```text
 operations/                internal, machine-oriented execution data
   blobs/sha256/            immutable requests, responses, traces, and state
-  manifests/               locks, calibration, evaluations, and run results
+  manifests/               locks, judge validation, evaluations, and run results
   snapshots/               immutable target and reference repository content
   tmp/                     atomic staging
 summary/runs/<run-id>/     derived Markdown, CSV, JSON, and per-case reports

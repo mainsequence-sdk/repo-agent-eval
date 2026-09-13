@@ -64,16 +64,16 @@ or expected artifact belong to one leakage group and must remain in one split.
 
 The configured author stage authors cases using the workspace's
 `case-authoring.md` and repository-local `case-authoring` skill. The same
-campaign must create the sibling `judge-calibration/` manifest and candidates;
+campaign must create the sibling `judge-validation/` manifest and candidates;
 the case bank is not an independently complete authoring deliverable. Run
 `ms-agent-eval inspect --workspace workspace.yaml` to see exact remaining gaps.
 No solver call is allowed while the coverage contract is incomplete.
 
-Every promoted case binds its provenance to the exact catalog hash. After any
+Every reviewed case binds its provenance to the exact catalog hash. After any
 catalog change, review and rehash affected cases before evaluation.
 
 The canonical package is coordinator-owned and is never mounted wholesale into
 a model runtime. A solver view contains only `solver/` material plus locked
 global and skill context. A judge view contains the task, candidate, rubric
-criteria, reference evidence, and skill context; coordinator-only thresholds
-and calibration labels/ranges remain hidden.
+criteria, reference evidence, and skill context; judge-validation labels remain
+coordinator-only. Rubrics have no pass thresholds.

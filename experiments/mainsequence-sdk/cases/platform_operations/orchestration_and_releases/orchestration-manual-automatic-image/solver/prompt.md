@@ -1,13 +1,19 @@
-# Task
+# Goal
+Review the proposed `eval-16786052` design for this scenario: The team is working on a scheduled analytics workflow producing an artifact and serving a released application. The requested slice is 'Distinguish Job execution modes' and the concrete outcome is to model manual and automatic Jobs without conflating schedules, triggers, and image ownership.
 
-Review two standalone Job proposals for pushed repository code:
+# Supplied evidence
+- Required behavior: Model manual and automatic Jobs without conflating schedules, triggers, and image ownership.
+- A workflow validates and a schedule is enabled, but no concrete JobRun, logs, usage record, or output artifact is supplied.
+- The governing boundary is: separate workflow, Job, schedule, JobRun, image, artifact, resource, release, revision, and DeploymentRun identities and require the full proof chain.
+- A success claim must be supported by workflow validation, exact image, JobRun logs/usage, artifact identity, release revision, DeploymentRun, health, and representative output.
+- Proposed implementation: The current proposal uses one mutable image tag, conflates a schedule with a run, treats a pushed declaration as deployment, and claims a healthy service produced correct data.
+- The proposal reports no runtime logs, deployment run, terminal task state, or representative output beyond the statements above.
 
-1. `backfill-once` must remain pinned to already-ready image UID `image-202`.
-   The proposal omits an image and says the Job will use “latest.”
-2. `nightly-refresh` should follow future qualifying synchronized commits with
-   automatic deployment. The proposal passes both `--automatic-deployment` and
-   `--related-image-uid image-202`.
+# Constraints
+- Use only the current behavior in the supplied skill context.
+- Treat the proposal as review input, not as evidence that an operation succeeded.
+- Preserve unrelated resources, access, configuration, and repository state.
+- Do not perform or claim live execution.
 
-Explain the correct image configuration for each Job, what exactness means,
-and the minimum post-creation evidence needed before reporting execution
-success. Do not create or run either Job.
+# Deliverable
+Identify the material design errors, provide a corrected ordered design, and state exactly which observations would be required before success could be claimed.

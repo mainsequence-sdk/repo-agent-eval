@@ -109,6 +109,7 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
             data_root.as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
+            "4",
             "1",
             "3",
             "3.12",
@@ -137,9 +138,10 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 9
+    assert repository.workspace.schema_version == 11
     assert repository.workspace.models["solver"].reasoning_effort == "medium"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
+    assert repository.workspace.executors["remote-models"].total_concurrency == 4
     assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"
     assert repository.case_authoring_path == workspace.parent / "case-authoring.md"
     assert "Evaluation Case Authoring Contract" in repository.case_authoring_instructions()
@@ -152,31 +154,30 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
     assert not (workspace.parent / ".env.example").exists()
     assert result["resolved_commit"] == "a" * 40
     assert result["skill_count"] == 2
-    assert "cases, splits, and judge calibration" in str(result["readiness"]["next"])
+    assert "cases, splits, and judge validation" in str(result["readiness"]["next"])
 
 
-def test_setup_checklist_requires_every_calibration_label(tmp_path: Path) -> None:
+def test_setup_checklist_requires_every_judge_validation_label(tmp_path: Path) -> None:
     from .helpers import create_workspace
 
     repository = create_workspace(tmp_path / "workspace")
     case = repository.cases_root / "alpha" / "one" / "case.yaml"
     case.parent.mkdir(parents=True)
     case.write_text("schema_version: 4\n", encoding="utf-8")
-    (repository.calibration_root / "manifest.yaml").write_text(
-        "schema_version: 2\n"
+    (repository.judge_validation_root / "manifest.yaml").write_text(
+        "schema_version: 3\n"
         "fixtures:\n"
         "  - id: only-strong\n"
         "    case: one\n"
         "    candidate: strong.md\n"
-        "    label: strong\n"
-        "    score_range: [0.9, 1.0]\n",
+        "    label: strong\n",
         encoding="utf-8",
     )
 
     readiness = _checklist(repository)
 
-    assert readiness["judge_calibration"] == "missing"
-    assert "mandatory judge calibration" in str(readiness["next"])
+    assert readiness["judge_validation"] == "missing"
+    assert "mandatory judge validation" in str(readiness["next"])
 
 
 def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
@@ -188,6 +189,7 @@ def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
             data_root.as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
+            "4",
             "solver-manual",
             "judge-manual",
             "1",
@@ -224,6 +226,7 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
             data_root.as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
+            "4",
             "1",
             "3",
             "3.12",
@@ -255,7 +258,7 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
     assert not (workspace.parent / "case-authoring.md").exists()
     assert not (workspace.parent / "cases" / "README.md").exists()
     assert not (workspace.parent / "cases" / "splits.yaml").exists()
-    assert not (workspace.parent / "judge-calibration" / "manifest.yaml").exists()
+    assert not (workspace.parent / "judge-validation" / "manifest.yaml").exists()
 
 
 def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) -> None:
@@ -268,6 +271,7 @@ def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) 
             data_root.as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
+            "4",
             "1",
             "3",
             "3.12",
@@ -321,6 +325,7 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
             (tmp_path / "external-collision").as_posix(),
             "https://github.com/example/project",
             "http://127.0.0.1:8000/v1",
+            "4",
             "1",
             "3",
             "3.12",

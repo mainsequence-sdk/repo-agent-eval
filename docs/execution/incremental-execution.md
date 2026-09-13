@@ -5,7 +5,7 @@ new run does not imply rerunning every model call. The coordinator reuses an
 existing result only when it can prove that the requested computation is
 semantically identical and that the earlier result was validated and persisted.
 
-This guide describes the implemented schema-v9 behavior. The design rationale
+This guide describes the implemented schema-v11 behavior. The design rationale
 and complete identity rules are in
 [ADR-003](../architecture/003-content-addressed-experiment-graph.md).
 
@@ -43,7 +43,8 @@ All output-affecting data belongs in the canonical work document:
 
 - stage-specific semantic inputs and dependency artifact hashes;
 - instruction artifact and output contract;
-- executor adapter and configuration hash;
+- executor adapter and output-affecting configuration hash (not equivalent
+  endpoint topology or capacity);
 - model configuration hash, including deployment revision, reasoning effort,
   and generation parameters; and
 - model-call and token limits that can change the produced output.
@@ -80,15 +81,14 @@ Every loaded case exposes four hashes:
 Stage work uses the narrowest valid projection. Solver work never hashes the
 rubric, expected answer, expected artifacts, or judge feedback. Judge work
 hashes its judge view, the exact candidate response, the producing solver work
-and deployment identities, the passing calibration artifact, the judge program,
+and deployment identities, the ordering-consistent judge-validation artifact,
+the judge program,
 and the configured number of judge repetitions.
 
-Judge-calibration model work similarly hashes only fixture ids, candidate
-responses, and judge-visible case views. Private fixture labels and score ranges
-remain outside the LLM input. When those private thresholds change, compatible
-scores may be reused but the coordinator recomputes the pass/fail gate and
-corpus identity locally. A failing gate is retained for its run but is never
-published to the reusable-work index.
+Judge-validation model work similarly hashes only fixture ids, candidate
+responses, and judge-visible case views. Private fixture labels remain outside
+the LLM input. The coordinator recomputes ordinal consistency and set identity
+locally. An inconsistent result is retained for its run but is not reusable.
 
 Consequently:
 
@@ -98,7 +98,7 @@ Consequently:
 | Rubric or expected answer | reuse | execute | execute |
 | Solver prompt | execute | execute | execute |
 | Solver deployment revision | execute | execute for changed responses | execute |
-| Judge deployment or reasoning | reuse | execute calibration and judging | execute |
+| Judge deployment or reasoning | reuse | execute judge validation and judging | execute |
 | Unrelated experiment | reuse; same revision | reuse; same revision | reuse |
 
 The solver packet still carries case id, split, and repetition for reporting.
@@ -129,6 +129,12 @@ different deployment.
 
 Credentials never enter the hash.
 
+Equivalent endpoint replica ids, URLs, and capacities are also excluded from
+the semantic work id. They remain frozen in the experiment revision and are
+recorded on each executed attempt. This is safe only because
+`deployment_revision` attests that every replica in the selected pool serves
+the same output-affecting model deployment.
+
 ## Reuse policies
 
 Every stage requires an explicit policy.
@@ -138,7 +144,7 @@ Normal exact reuse:
 ```yaml
 stages:
   solve:
-    executor: remote-qwen
+    executor: lan-inference
     model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
@@ -158,7 +164,7 @@ reuse:
   samples: 3
 ```
 
-`replicate` is solver-only because author, calibration, optimizer, gate, and
+`replicate` is solver-only because author, judge validation, fit, select, and
 aggregate stages each require a single unambiguous output in the current
 pipeline. Replicates deliberately bypass exact reuse. They share semantic work
 identity but receive distinct replicate slots, attempts, results, and usage.
@@ -261,7 +267,7 @@ operations/manifests/
 Repeated runs of identical effective configuration share a revision directory.
 A relevant change creates a new revision while unchanged work nodes can still
 be reused from older revisions. A run manifest uses schema v4 and directly
-references its immutable lock, bundle, and schema-v2 experiment definition.
+references its immutable lock, bundle, and schema-v3 experiment definition.
 
 Resume never adopts the current workspace silently. If the current selected
 definition still hashes to the run's revision, it is used directly. If it has
@@ -274,7 +280,7 @@ revision. Unchanged work can still be shared between the old and new revisions.
 The stored definition contains only effective revision inputs: the selected
 experiment (and its base for optimization), stage/executor/model configuration,
 case-authoring policy, capability catalog, case packages, split assignment,
-judge calibration, resolved source context, and validation result. Files such
+judge validation, resolved source context, and readiness result. Files such
 as a cases-directory README are not frozen because they do not participate in
 evaluation identity.
 

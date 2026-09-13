@@ -1,31 +1,7 @@
-The contract hash is not a stable logical or physical table identity. It may be
-used as optional contract-version metadata, but changing columns must not
-silently rename the table or its catalog identifier. Use a stable,
-repository-prefixed physical name such as:
+The review should reject the proposal because it violates the **Separate logical and physical identity** boundary. The required behavior is: Keep logical MetaTable identity distinct from physical storage naming and contract hashes.
 
-```python
-WATCHLIST_ITEM_TABLE = schema_table_name("research_portal", "watchlist_item")
+The corrected design should start from explicit repository, environment, resource, and actor identities, then follow the owning skill's supported sequence. The governing boundary is: define stable logical and physical identities, explicit grain and keys, real foreign keys, deliberate cascades, rich column metadata, and migration-owned evolution. It must preserve unrelated state and must not substitute a convenient local assumption for an authoritative resource or lifecycle observation.
 
-class WatchlistItem(PlatformManagedMetaTable, Base):
-    __tablename__ = WATCHLIST_ITEM_TABLE
-    __metatable_identifier__ = "research_portal.WatchlistItem"
-    __metatable_namespace__ = "research_portal"
-    __metatable_description__ = "One row per human user and watched market symbol."
+The answer should call out this concrete anti-pattern: The current proposal uses display names as identities, stores relationships as unrelated strings, omits composite uniqueness, and registers schemas at runtime. A semantically equivalent correction is acceptable when it preserves the same ownership, identity, lifecycle, and safety boundaries.
 
-    user_uid = mapped_column(String, primary_key=True, info={
-        "label": "User UID", "description": "Canonical public UID of the watchlist owner."
-    })
-    symbol = mapped_column(String, primary_key=True, info={
-        "label": "Market Symbol", "description": "Instrument symbol unique within the user's watchlist."
-    })
-    note = mapped_column(String, nullable=True, info={
-        "label": "Note", "description": "Optional user-authored annotation for this item."
-    })
-```
-
-The composite key matches the stated row grain. Every mapped column needs both
-a label and an intention-rich description; the table description must explain
-business purpose and grain. Keep the authored table name stable so catalog
-sync resolves the existing table correctly. Send the changed model through the
-selected provider's Alembic revision/review/upgrade lifecycle rather than
-direct registration or runtime DDL.
+The review can prove only that the corrected design is aligned with the supplied contract. A success claim additionally requires the model graph, constraints, migration revision, governed operation result, and ownership boundary.

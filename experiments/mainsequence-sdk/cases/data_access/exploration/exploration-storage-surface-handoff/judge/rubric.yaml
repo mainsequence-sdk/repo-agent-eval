@@ -1,4 +1,3 @@
-passing_score: 0.75
 criteria:
   - id: surface_classification
     weight: 0.4

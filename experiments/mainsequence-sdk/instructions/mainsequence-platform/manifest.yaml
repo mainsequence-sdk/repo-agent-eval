@@ -1,0 +1,71 @@
+schema_version: 1
+id: platform
+source:
+  type: mcp
+  protocol_version: "2025-11-25"
+  retrieval_client:
+    repository: https://github.com/mainsequence-sdk/mainsequence-sdk
+    ref: v8.1.12
+    resolved_commit: 98b5679716c4b48b66081c553c3d5be6cf064d3e
+  endpoint_at_capture: http://127.0.0.1:8000/mcp
+  manifest_version: 2
+  manifest_hash: sha256:84b5ba469bc6c03cad6ff09dce89d2821d2fc503301f6a74cce4f95da1e22ab1
+  ontology:
+    uri: mainsequence://platform/ontology
+    resource_path: ontology/platform.json
+    content_hash: sha256:90e5f3efcef46dcd08d99ea35e7ffa6bbf6d5c9598283bcffcc7f42ebee9962b
+skills:
+  - id: a2a_communication
+    name: a2a_communication
+    uri: mainsequence://platform/skills/a2a-communication
+    resource_path: skills/agents/a2a_communication/SKILL.md
+    file: instructions/mainsequence-platform/skills/agents/a2a_communication/SKILL.md
+    content_hash: sha256:692dce02c408ab33188fc203e19268cb54730d59d4aae5e801be2233b41b519b
+  - id: code_repository_to_agent
+    name: code_repository_to_agent
+    uri: mainsequence://platform/skills/code-repository-to-agent
+    resource_path: skills/agents/code_repository_to_agent/SKILL.md
+    file: instructions/mainsequence-platform/skills/agents/code_repository_to_agent/SKILL.md
+    content_hash: sha256:ccc1430359c6e302422f590a7d879da037459fee7293916c19a67d6bffa19202
+  - id: model_provider_credentials
+    name: model_provider_credentials
+    uri: mainsequence://platform/skills/model-provider-credentials
+    resource_path: skills/agents/model_provider_credentials/SKILL.md
+    file: instructions/mainsequence-platform/skills/agents/model_provider_credentials/SKILL.md
+    content_hash: sha256:b703075e1e074412f55e52ae00235324501a7a8bbb827bba1703c72cbf3750f3
+  - id: code_repository_design
+    name: code_repository_design
+    uri: mainsequence://platform/skills/code-repository-design
+    resource_path: skills/platform/code_repository_design/SKILL.md
+    file: instructions/mainsequence-platform/skills/platform/code_repository_design/SKILL.md
+    content_hash: sha256:2ed94f89d9f97db1d76e64b38df912ff03a7279d64d908ff2f5fcc2128a096bb
+  - id: organization_environments
+    name: organization_environments
+    uri: mainsequence://platform/skills/organization-environments
+    resource_path: skills/platform/organization_environments/SKILL.md
+    file: instructions/mainsequence-platform/skills/platform/organization_environments/SKILL.md
+    content_hash: sha256:76efaca361d5f94056487b69f189e105dd918ee786da47726f72d67eed5e0620
+  - id: code_repository_local_setup
+    name: code_repository_local_setup
+    uri: mainsequence://platform/skills/code-repository-local-setup
+    resource_path: skills/pod_manager/code_repository_local_setup/SKILL.md
+    file: instructions/mainsequence-platform/skills/pod_manager/code_repository_local_setup/SKILL.md
+    content_hash: sha256:52269f0c576b398a21fcde5458616b3d63285cf5aee1c460fe0f60d32c1505da
+  - id: code_repository_workflows
+    name: code_repository_workflows
+    uri: mainsequence://platform/skills/code-repository-workflows
+    resource_path: skills/pod_manager/code_repository_workflows/SKILL.md
+    file: instructions/mainsequence-platform/skills/pod_manager/code_repository_workflows/SKILL.md
+    content_hash: sha256:3b10f1cb9b812d78951c1fbf82111a4738fbf8b32a5be6c6b76b4f5f0f146b97
+  - id: resource_release
+    name: resource_release
+    uri: mainsequence://platform/skills/resource-release
+    resource_path: skills/pod_manager/resource_release/SKILL.md
+    file: instructions/mainsequence-platform/skills/pod_manager/resource_release/SKILL.md
+    content_hash: sha256:7d5b56ca717ad6b0c832b2a7cfda3bd09aba0c822792cc7ad0b70884f4907d7a
+  - id: static_site
+    name: static_site
+    uri: mainsequence://platform/skills/static-site
+    resource_path: skills/pod_manager/static_site/SKILL.md
+    file: instructions/mainsequence-platform/skills/pod_manager/static_site/SKILL.md
+    content_hash: sha256:4985af983f3ae9c3b010240d58e4d8d6a4c1ce696619a54783222d6e7cc50f8d

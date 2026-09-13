@@ -7,13 +7,14 @@ materializes only the relevant surface for each stage; it never mounts the
 whole package into a model runtime. `splits.yaml` assigns whole semantic leakage
 groups using the workspace's deterministic seed.
 
-`coverage.yaml` is the complete semantic contract. It decomposes each selected
-skill into current-API capabilities and requires three primary cases per
-capability. Every case has exactly one primary capability and at most two
-supporting capabilities. Supporting tags do not earn readiness credit.
+`coverage.yaml` is the complete semantic contract. It decomposes all 20
+SDK-owned and MCP-imported skills into 193 current-API capabilities and requires
+two primary cases per capability. Every case has exactly one primary capability
+and at most two supporting capabilities. Supporting tags do not earn readiness
+credit.
 
 This first foundational campaign has two cases and two independent leakage
-groups for every skill:
+groups for every SDK-owned skill:
 
 | Skill | Cases |
 | --- | --- |
@@ -29,8 +30,10 @@ groups for every skill:
 | `platform_operations/orchestration_and_releases` | `orchestration-manual-automatic-image`, `orchestration-workflow-proof-chain` |
 | `sdk_code_repository_execution` | `repository-git-context-bootstrap`, `repository-specialized-skill-routing` |
 
-This first round is only an initial classification, not skill coverage. The
-workspace is intentionally incomplete because each capability requires three
-primary cases in addition to the 12-case and 6-group per-skill floors. No
-solver or judge call is allowed until all semantic gaps and judge calibration
-are complete.
+The complete bank contains 452 cases across 236 leakage groups. Every skill has
+at least 20 cases and 10 groups, and every capability has at least two primary
+cases. Extra `platform/code_repository_design` families cover automatic
+deployment independently for standalone Jobs, workflow Jobs, FastAPI, runtime
+Agents, Static Sites, and CodeRepository Coding Agents. Grouped splits are
+deterministic, and the judge-validation corpus references an eligible training
+group.

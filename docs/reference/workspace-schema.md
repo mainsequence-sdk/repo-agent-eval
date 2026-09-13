@@ -1,6 +1,6 @@
 # Workspace Schema Reference
 
-The current manifest schema is version 9. Unknown fields, legacy schemas,
+The current manifest schema is version 11. Unknown fields, legacy schemas,
 ambiguous instruction selection, unsafe paths, and invalid cross-references fail
 closed.
 
@@ -15,7 +15,8 @@ without adopting later workspace edits. See
 | --- | --- |
 | `workspace.id` | Stable workspace identifier. |
 | `workspace.data_root` | Optional external storage root. |
-| `executors.<id>` | Executor `type`, `adapter`, and adapter-specific options. |
+| `executors.<id>` | Executor `type`, `adapter`, and adapter-specific options; endpoint executors require a non-empty `endpoints` list. |
+| `executors.<id>.endpoints[]` | Unique endpoint `id`, HTTP(S) `base_url`, positive `max_concurrent_requests`, and optional `api_key_env`. |
 | `models.<id>` | Model `name`, required `deployment_revision`, optional `reasoning_effort`, parameters, and cost metadata. |
 | `stages.<stage>` | Executor id, model id where model-driven, required reuse policy, and budget. |
 | `evaluation.repository` | HTTPS URL and tag/full commit. |
@@ -24,14 +25,13 @@ without adopting later workspace edits. See
 | `evaluation.case_authoring` | Policy file and optional pinned reference sources. |
 | `evaluation.cases` | Case directory, capability catalog, and readiness floors. |
 | `evaluation.splits` | Split manifest plus deterministic group policy. |
-| `evaluation.judge` | Typed DSPy judge, calibration directory, and repetitions. |
+| `evaluation.judge` | Typed DSPy judge, judge validation directory, and repetitions. |
 | `experiments.<id>` | `evaluate` baseline or `optimize` configuration. |
 
 Author stages may use a harness because case packages require review and direct
 workspace edits. Solver and judge stages use configured model executors.
-Optimization, final-evaluation release, and aggregation can use a local process
-because they coordinate already locked artifacts rather than make semantic
-decisions.
+Fit, model selection, and aggregation can use a local process because they
+coordinate already locked artifacts rather than make semantic decisions.
 
 See [Workspace configuration](../experiments/workspace-configuration.md) for an
 annotated skeleton and the example manifests under `experiments/` for complete

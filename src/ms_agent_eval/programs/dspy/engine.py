@@ -146,7 +146,15 @@ def _failure_kind(error: Exception) -> str:
     message = str(error).lower()
     if "parse" in name.lower() or "parse" in message or "output fields" in message:
         return "typed_output_parse_error"
-    return name
+    if any(token in message for token in ("connection", "connecterror", "dns")):
+        return "connection_error"
+    if "timeout" in message:
+        return "timeout_error"
+    if "rate limit" in message or "status code: 429" in message:
+        return "rate_limit_error"
+    if "authentication" in message or "unauthorized" in message:
+        return "authentication_error"
+    return name.lower()
 
 
 @dataclass(frozen=True)
@@ -216,6 +224,7 @@ class DspyExecutor:
                 trace_artifact=trace,
                 status="completed",
                 error_kind=None,
+                error_message=None,
             )
         except Exception as error:
             kind = _failure_kind(error)
@@ -240,6 +249,7 @@ class DspyExecutor:
                 trace_artifact=trace,
                 status="failed",
                 error_kind=kind,
+                error_message=str(error),
             )
 
     def save_state_artifact(self, program: dspy.Module) -> ArtifactReference:

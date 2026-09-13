@@ -4,7 +4,7 @@ import os
 import posixpath
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -26,13 +26,13 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 9
+WORKSPACE_SCHEMA_VERSION = 11
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PINNED_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 _DOCKER_NETWORK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_SPLITS = {"train", "validation", "test", "challenge"}
+_SPLITS = {"train", "test", "challenge"}
 REASONING_EFFORTS = (
     "none",
     "minimal",
@@ -92,6 +92,12 @@ def _mapping(value: object, field: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ConfigurationError(f"{field} must be a mapping")
     return {str(key): item for key, item in value.items()}
+
+
+def _sequence(value: object, field: str) -> Sequence[object]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ConfigurationError(f"{field} must be a list")
+    return value
 
 
 def _reject_unknown(payload: Mapping[str, object], allowed: set[str], field: str) -> None:
@@ -289,22 +295,27 @@ class SkillSelection:
     files: tuple[str, ...]
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> SkillSelection:
-        _reject_unknown(payload, {"directory", "files"}, "evaluation.instructions.skills")
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str = "evaluation.instructions.skills",
+    ) -> SkillSelection:
+        _reject_unknown(payload, {"directory", "files"}, field)
         raw_directory = payload.get("directory")
         raw_files = payload.get("files")
         if (raw_directory is None) == (raw_files is None):
             raise ConfigurationError(
-                "evaluation.instructions.skills requires exactly one of directory or files"
+                f"{field} requires exactly one of directory or files"
             )
         if raw_directory is not None:
-            return cls(_relative_path(raw_directory, "skills.directory"), ())
+            return cls(_relative_path(raw_directory, f"{field}.directory"), ())
         files = tuple(
-            _relative_path(item, "skills.files[]")
-            for item in _string_list(raw_files, "skills.files")
+            _relative_path(item, f"{field}.files[]")
+            for item in _string_list(raw_files, f"{field}.files")
         )
         if any(PurePosixPath(item).name != "SKILL.md" for item in files):
-            raise ConfigurationError("every explicit skill file must be named SKILL.md")
+            raise ConfigurationError(f"every explicit file in {field} must be named SKILL.md")
         return cls(None, files)
 
     def explicit_entries(self) -> tuple[ExplicitUnitEntry, ...]:
@@ -324,22 +335,66 @@ class SkillSelection:
 
 
 @dataclass(frozen=True)
-class InstructionConfiguration:
-    global_paths: tuple[str, ...]
+class SkillImportConfiguration:
+    id: str
+    source: str
+    note: str
+    manifest: str
     skills: SkillSelection
 
     @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        index: int,
+    ) -> SkillImportConfiguration:
+        field = f"evaluation.instructions.imports[{index}]"
+        _reject_unknown(payload, {"id", "source", "note", "manifest", "skills"}, field)
+        return cls(
+            _identifier(payload.get("id"), f"{field}.id"),
+            _identifier(payload.get("source"), f"{field}.source"),
+            _string(payload.get("note"), f"{field}.note"),
+            _relative_path(payload.get("manifest"), f"{field}.manifest"),
+            SkillSelection.from_mapping(
+                _mapping(payload.get("skills"), f"{field}.skills"),
+                field=f"{field}.skills",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class InstructionConfiguration:
+    global_paths: tuple[str, ...]
+    skills: SkillSelection
+    imports: tuple[SkillImportConfiguration, ...]
+
+    @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> InstructionConfiguration:
-        _reject_unknown(payload, {"global", "skills"}, "evaluation.instructions")
+        _reject_unknown(payload, {"global", "skills", "imports"}, "evaluation.instructions")
         global_paths = tuple(
             _relative_path(item, "evaluation.instructions.global[]")
             for item in _string_list(payload.get("global", []), "evaluation.instructions.global")
         )
+        imports = tuple(
+            SkillImportConfiguration.from_mapping(
+                _mapping(item, f"evaluation.instructions.imports[{index}]"),
+                index=index,
+            )
+            for index, item in enumerate(
+                _sequence(payload.get("imports", []), "evaluation.instructions.imports")
+            )
+        )
+        import_ids = [item.id for item in imports]
+        if len(import_ids) != len(set(import_ids)):
+            raise ConfigurationError("evaluation.instructions.imports ids must be unique")
         return cls(
             global_paths,
             SkillSelection.from_mapping(
-                _mapping(payload.get("skills"), "evaluation.instructions.skills")
+                _mapping(payload.get("skills"), "evaluation.instructions.skills"),
+                field="evaluation.instructions.skills",
             ),
+            imports,
         )
 
 
@@ -572,12 +627,62 @@ class CodexCliConfiguration:
 
 
 @dataclass(frozen=True)
+class EndpointConfiguration:
+    id: str
+    base_url: str
+    max_concurrent_requests: int
+    api_key_env: str | None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str,
+    ) -> EndpointConfiguration:
+        _reject_unknown(
+            payload,
+            {"id", "base_url", "max_concurrent_requests", "api_key_env"},
+            field,
+        )
+        raw_key = payload.get("api_key_env")
+        return cls(
+            _identifier(payload.get("id"), f"{field}.id"),
+            _api_base_url(payload.get("base_url"), f"{field}.base_url"),
+            _positive_int(
+                payload.get("max_concurrent_requests"),
+                f"{field}.max_concurrent_requests",
+            ),
+            (
+                _environment(raw_key, f"{field}.api_key_env")
+                if raw_key is not None
+                else None
+            ),
+        )
+
+    def api_key(self, environment: Mapping[str, str]) -> str | None:
+        if self.api_key_env is None:
+            return None
+        value = environment.get(self.api_key_env, "").strip()
+        if not value:
+            raise ResolutionError(
+                f"endpoint {self.id!r} requires an API credential in {self.api_key_env}"
+            )
+        return value
+
+    @property
+    def configuration_hash(self) -> str:
+        """Hash non-secret endpoint topology and capacity for attempt provenance."""
+
+        return content_hash(self)
+
+
+@dataclass(frozen=True)
 class ExecutorConfiguration:
     id: str
     type: ExecutorType
     adapter: str
-    base_url: str | None
-    api_key_env: str | None
+    endpoints: tuple[EndpointConfiguration, ...]
     version: str | None
     options: Mapping[str, object]
     codex_cli: CodexCliConfiguration | None
@@ -591,7 +696,7 @@ class ExecutorConfiguration:
         field = f"executors.{executor_id}"
         _reject_unknown(
             payload,
-            {"type", "adapter", "base_url", "api_key_env", "version", "options"},
+            {"type", "adapter", "endpoints", "version", "options"},
             field,
         )
         try:
@@ -610,24 +715,35 @@ class ExecutorConfiguration:
             raise ConfigurationError(
                 f"{field}.adapter {adapter!r} is invalid for {executor_type.value} executors"
             )
-        raw_base_url = payload.get("base_url")
-        base_url = (
-            _api_base_url(raw_base_url, f"{field}.base_url")
-            if raw_base_url is not None
-            else None
-        )
-        if executor_type is ExecutorType.ENDPOINT and base_url is None:
-            raise ConfigurationError(f"{field}.base_url is required for endpoint executors")
-        if executor_type is not ExecutorType.ENDPOINT and base_url is not None:
-            raise ConfigurationError(f"{field}.base_url is only valid for endpoint executors")
-        raw_key = payload.get("api_key_env")
-        api_key_env = (
-            _environment(raw_key, f"{field}.api_key_env") if raw_key is not None else None
-        )
-        if executor_type is not ExecutorType.ENDPOINT and api_key_env is not None:
-            raise ConfigurationError(
-                f"{field}.api_key_env is only valid for endpoint executors"
+        raw_endpoints = payload.get("endpoints")
+        if executor_type is ExecutorType.ENDPOINT:
+            if raw_endpoints is None:
+                raise ConfigurationError(
+                    f"{field}.endpoints is required for endpoint executors"
+                )
+            endpoints = tuple(
+                EndpointConfiguration.from_mapping(
+                    _mapping(item, f"{field}.endpoints[{index}]"),
+                    field=f"{field}.endpoints[{index}]",
+                )
+                for index, item in enumerate(
+                    _sequence(raw_endpoints, f"{field}.endpoints")
+                )
             )
+            if not endpoints:
+                raise ConfigurationError(f"{field}.endpoints must not be empty")
+            endpoint_ids = [endpoint.id for endpoint in endpoints]
+            if len(endpoint_ids) != len(set(endpoint_ids)):
+                raise ConfigurationError(f"{field}.endpoints ids must be unique")
+            endpoint_urls = [endpoint.base_url for endpoint in endpoints]
+            if len(endpoint_urls) != len(set(endpoint_urls)):
+                raise ConfigurationError(f"{field}.endpoints base URLs must be unique")
+        else:
+            if raw_endpoints is not None:
+                raise ConfigurationError(
+                    f"{field}.endpoints is only valid for endpoint executors"
+                )
+            endpoints = ()
         raw_version = payload.get("version")
         version = (
             _string(raw_version, f"{field}.version") if raw_version is not None else None
@@ -645,41 +761,45 @@ class ExecutorConfiguration:
             _identifier(executor_id, "executor id"),
             executor_type,
             adapter,
-            base_url,
-            api_key_env,
+            endpoints,
             version,
             MappingProxyType(dict(options)),
             codex_cli,
         )
 
-    def api_key(self, environment: Mapping[str, str]) -> str | None:
-        if self.api_key_env is None:
-            return None
-        value = environment.get(self.api_key_env, "").strip()
-        if not value:
-            raise ResolutionError(
-                f"executor {self.id!r} requires an API credential in {self.api_key_env}"
-            )
-        return value
+    @property
+    def total_concurrency(self) -> int:
+        return sum(endpoint.max_concurrent_requests for endpoint in self.endpoints)
+
+    @property
+    def pool_hash(self) -> str:
+        """Hash physical endpoint topology without including credential values."""
+
+        return content_hash(
+            {
+                "adapter": self.adapter,
+                "endpoints": self.endpoints,
+            }
+        )
 
     @property
     def execution_hash(self) -> str:
         """Hash output-affecting execution behavior, excluding labels and secrets."""
 
-        return content_hash(
-            {
-                "type": self.type,
-                "adapter": self.adapter,
-                "base_url": self.base_url,
-                "version": self.version,
-                "options": self.options,
-                "codex_cli": self.codex_cli,
-            }
-        )
+        identity: dict[str, object] = {
+            "type": self.type,
+            "adapter": self.adapter,
+            "version": self.version,
+            "options": self.options,
+            "codex_cli": self.codex_cli,
+        }
+        # Endpoint replicas and capacities are attempt-level infrastructure.
+        # Model deployment_revision is the explicit semantic-equivalence attestation.
+        return content_hash(identity)
 
 
-_MODEL_STAGES = {"author", "calibrate_judge", "solve", "judge"}
-_CANONICAL_STAGES = _MODEL_STAGES | {"optimize", "final_evaluate", "aggregate"}
+_MODEL_STAGES = {"author", "validate_judge", "solve", "judge"}
+_CANONICAL_STAGES = _MODEL_STAGES | {"fit", "select", "aggregate"}
 
 
 class ReusePolicy(str, Enum):
@@ -826,22 +946,22 @@ class CaseAuthoringConfiguration:
 @dataclass(frozen=True)
 class JudgeConfiguration:
     program: DspyProgramConfiguration
-    calibration_directory: str
+    validation_directory: str
     repetitions: int
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> JudgeConfiguration:
         _reject_unknown(
-            payload, {"dspy", "calibration", "repetitions"}, "evaluation.judge"
+            payload, {"dspy", "validation", "repetitions"}, "evaluation.judge"
         )
-        calibration = _mapping(payload.get("calibration"), "evaluation.judge.calibration")
-        _reject_unknown(calibration, {"directory"}, "evaluation.judge.calibration")
+        validation = _mapping(payload.get("validation"), "evaluation.judge.validation")
+        _reject_unknown(validation, {"directory"}, "evaluation.judge.validation")
         return cls(
             DspyProgramConfiguration.from_mapping(
                 _mapping(payload.get("dspy"), "evaluation.judge.dspy"),
                 field="evaluation.judge.dspy",
             ),
-            _relative_path(calibration.get("directory"), "evaluation.judge.calibration.directory"),
+            _relative_path(validation.get("directory"), "evaluation.judge.validation.directory"),
             _positive_int(payload.get("repetitions", 1), "evaluation.judge.repetitions"),
         )
 
@@ -898,7 +1018,6 @@ class CasesConfiguration:
 class SplitPolicy:
     seed: str
     train: float
-    validation: float
     test: float
     challenge: float
 
@@ -906,7 +1025,7 @@ class SplitPolicy:
     def from_mapping(cls, payload: Mapping[str, object]) -> SplitPolicy:
         _reject_unknown(
             payload,
-            {"seed", "train", "validation", "test", "challenge"},
+            {"seed", "train", "test", "challenge"},
             "evaluation.splits.policy",
         )
         seed = _string(payload.get("seed", "ms-agent-eval"), "splits.policy.seed")
@@ -918,9 +1037,7 @@ class SplitPolicy:
             values[split] = float(raw)
         if abs(sum(values.values()) - 1.0) > 1e-9:
             raise ConfigurationError("split policy proportions must sum to 1.0")
-        return cls(
-            seed, values["train"], values["validation"], values["test"], values["challenge"]
-        )
+        return cls(seed, values["train"], values["test"], values["challenge"])
 
 
 @dataclass(frozen=True)
@@ -933,8 +1050,7 @@ class SplitsConfiguration:
         _reject_unknown(payload, {"file", "policy"}, "evaluation.splits")
         default_policy = {
             "seed": "ms-agent-eval",
-            "train": 0.5,
-            "validation": 0.2,
+            "train": 0.7,
             "test": 0.2,
             "challenge": 0.1,
         }
@@ -1029,20 +1145,47 @@ class RuntimeConfiguration:
 @dataclass(frozen=True)
 class OptimizerConfiguration:
     name: str
-    parameters: Mapping[str, object]
+    k_values: tuple[int, ...]
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> OptimizerConfiguration:
-        _reject_unknown(payload, {"name", "parameters"}, "experiment.optimizer")
+        _reject_unknown(payload, {"name", "search"}, "experiment.optimizer")
         name = _string(payload.get("name"), "experiment.optimizer.name")
         if name != "LabeledFewShot":
             raise ConfigurationError("the initial DSPy optimizer must be LabeledFewShot")
-        return cls(
-            name,
-            MappingProxyType(
-                dict(_mapping(payload.get("parameters", {}), "experiment.optimizer.parameters"))
-            ),
-        )
+        search = _mapping(payload.get("search"), "experiment.optimizer.search")
+        _reject_unknown(search, {"k"}, "experiment.optimizer.search")
+        raw_values = search.get("k")
+        if not isinstance(raw_values, Sequence) or isinstance(
+            raw_values, (str, bytes, bytearray)
+        ):
+            raise ConfigurationError("experiment.optimizer.search.k must be a list")
+        values = tuple(raw_values)
+        if not values or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in values
+        ):
+            raise ConfigurationError("experiment.optimizer.search.k must contain positive integers")
+        if len(values) != len(set(values)):
+            raise ConfigurationError("experiment.optimizer.search.k must not contain duplicates")
+        return cls(name, tuple(sorted(values)))
+
+
+@dataclass(frozen=True)
+class CrossValidationConfiguration:
+    folds: int
+    seed: int
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> CrossValidationConfiguration:
+        _reject_unknown(payload, {"folds", "seed"}, "experiment.cross_validation")
+        folds = _positive_int(payload.get("folds"), "experiment.cross_validation.folds")
+        if folds < 2:
+            raise ConfigurationError("experiment.cross_validation.folds must be at least 2")
+        seed = payload.get("seed", 0)
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise ConfigurationError("experiment.cross_validation.seed must be an integer")
+        return cls(folds, seed)
 
 
 @dataclass(frozen=True)
@@ -1075,10 +1218,9 @@ class ExperimentConfiguration:
     based_on: str | None
     runtime: RuntimeConfiguration | None
     repetitions: int
-    dataset: Mapping[str, str] | None
     optimizer: OptimizerConfiguration | None
+    cross_validation: CrossValidationConfiguration | None
     budget: OptimizationBudget | None
-    compiled_output: str | None
 
     @classmethod
     def from_mapping(
@@ -1110,27 +1252,12 @@ class ExperimentConfiguration:
                 None,
                 None,
                 None,
-                None,
             )
         _reject_unknown(
             payload,
-            {"mode", "based_on", "dataset", "optimizer", "budget", "output"},
+            {"mode", "based_on", "optimizer", "cross_validation", "budget"},
             f"experiments.{experiment_id}",
         )
-        dataset = {
-            key: _string(value, f"experiment.dataset.{key}")
-            for key, value in _mapping(payload.get("dataset"), "experiment.dataset").items()
-        }
-        required = {"train", "validation", "final_evaluation"}
-        if set(dataset) != required or set(dataset.values()) != {"train", "validation", "test"}:
-            raise ConfigurationError(
-                "optimization dataset must map train, validation, and final_evaluation to protected splits"
-            )
-        output = _mapping(payload.get("output"), "experiment.output")
-        _reject_unknown(output, {"compiled_program"}, "experiment.output")
-        compiled = _string(output.get("compiled_program"), "output.compiled_program")
-        if compiled != "content_addressed_json":
-            raise ConfigurationError("compiled programs must use content_addressed_json")
         return cls(
             _identifier(experiment_id, "experiment id"),
             mode,
@@ -1138,12 +1265,13 @@ class ExperimentConfiguration:
             _identifier(payload.get("based_on"), "experiment.based_on"),
             None,
             1,
-            MappingProxyType(dataset),
             OptimizerConfiguration.from_mapping(
                 _mapping(payload.get("optimizer"), "experiment.optimizer")
             ),
+            CrossValidationConfiguration.from_mapping(
+                _mapping(payload.get("cross_validation"), "experiment.cross_validation")
+            ),
             OptimizationBudget.from_mapping(_mapping(payload.get("budget"), "experiment.budget")),
-            compiled,
         )
 
 
@@ -1311,11 +1439,11 @@ class WorkspaceConfiguration:
     def _validate_role_configuration(self) -> None:
         solve = self.stages["solve"]
         judge = self.stages["judge"]
-        calibration = self.stages["calibrate_judge"]
+        validation = self.stages["validate_judge"]
         assert solve.model is not None and judge.model is not None
-        if (calibration.executor, calibration.model) != (judge.executor, judge.model):
+        if (validation.executor, validation.model) != (judge.executor, judge.model):
             raise ConfigurationError(
-                "calibrate_judge must use the exact executor and model configured for judge"
+                "validate_judge must use the exact executor and model configured for judge"
             )
 
 
@@ -1346,7 +1474,6 @@ class ResolvedRoleModel:
             "provider": executor.adapter,
             "model": configuration.model,
             "deployment_revision": configuration.deployment_revision,
-            "base_url": executor.base_url or "",
             "reasoning_effort": configuration.reasoning_effort,
             "parameters": configuration.parameters,
         }
@@ -1356,24 +1483,22 @@ class ResolvedRoleModel:
             provider=executor.adapter,
             model=configuration.model,
             deployment_revision=configuration.deployment_revision,
-            base_url=executor.base_url or "",
-            api_key_env=executor.api_key_env,
+            base_url="",
+            api_key_env=None,
             reasoning_effort=configuration.reasoning_effort,
             parameters=configuration.parameters,
             configured_cost_per_call=configuration.configured_cost_per_call,
             content_hash=content_hash(semantic_identity),
         )
 
-    def api_key(self, environment: Mapping[str, str]) -> str | None:
-        if self.api_key_env is None:
-            return None
-        value = environment.get(self.api_key_env, "").strip()
-        if not value:
-            raise ResolutionError(
-                f"{self.role} API credential is required in {self.api_key_env}"
-            )
-        return value
+    def bind_endpoint(self, endpoint: EndpointConfiguration) -> ResolvedRoleModel:
+        """Return a transport-bound copy without changing semantic model identity."""
 
+        return replace(
+            self,
+            base_url=endpoint.base_url,
+            api_key_env=endpoint.api_key_env,
+        )
 
 def resolve_role_models(
     workspace: WorkspaceConfiguration,
@@ -1460,10 +1585,10 @@ class WorkspaceRepository:
         return self.path(relative, field="evaluation.cases.coverage.catalog")
 
     @property
-    def calibration_root(self) -> Path:
+    def judge_validation_root(self) -> Path:
         return self.path(
-            self.workspace.evaluation.judge.calibration_directory,
-            field="judge.calibration.directory",
+            self.workspace.evaluation.judge.validation_directory,
+            field="judge.validation.directory",
         )
 
     @property

@@ -1,0 +1,25 @@
+criteria:
+- id: central_correctness
+  weight: 0.45
+  description: Full credit correctly applies define the source agent card to the supplied scenario and reaches a
+    safe, current design; partial credit reaches the main outcome but misses a material edge or lifecycle consequence;
+    zero credit preserves the flawed approach or recommends unsupported behavior.
+- id: instruction_application
+  weight: 0.25
+  description: Full credit follows the selected skill's ordering, ownership, identity, and stop boundaries; partial
+    credit uses the right surface with incomplete sequencing or scope; zero credit bypasses the owning skill, uses
+    removed behavior, or crosses an authorization boundary.
+- id: evidence_and_reasoning
+  weight: 0.2
+  description: Full credit distinguishes supplied facts, design conclusions, and live observations still required
+    while explaining consequences; partial credit has sound conclusions with weak evidence boundaries; zero credit
+    fabricates execution, identifiers, logs, or deployment state.
+- id: completeness_and_safety
+  weight: 0.1
+  description: Full credit covers the bounded deliverable, protects secrets and unrelated state, and gives an actionable
+    evidence checklist; partial credit omits one secondary safeguard; zero credit exposes secrets, recommends destructive
+    broad changes, or leaves the central deliverable unusable.
+hard_failures:
+- id: fabricated_live_success
+  description: The response claims it executed, deployed, authenticated, or observed live behavior when the prompt
+    supplies no such evidence.

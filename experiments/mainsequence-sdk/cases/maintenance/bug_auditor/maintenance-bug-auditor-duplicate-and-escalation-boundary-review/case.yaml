@@ -1,0 +1,25 @@
+schema_version: 5
+id: maintenance-bug-auditor-duplicate-and-escalation-boundary-review
+title: 'Handle duplicates and escalation: review'
+skill: maintenance/bug_auditor
+group: maintenance-bug-auditor-duplicate-and-escalation-boundary
+coverage:
+  primary: duplicate-and-escalation-boundary
+  supporting:
+  - uncertainty-and-next-actions
+  - audit-status-and-output
+  archetype: review
+  difficulty: complex
+source_paths:
+- agent_scaffold/skills/maintenance/bug_auditor/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:780189b0aaad0b9490d5b3483c44d013874fb1f2944105e333dfa7d3c52bda97
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

@@ -44,7 +44,7 @@ container, with browser automation added only when visible behavior matters.
 
 ## Part B — evaluation experiments
 
-The schema-v9 workspace requires a deployment revision for every model and an
+The schema-v11 workspace requires a deployment revision for every model and an
 explicit reuse policy for every stage. Replace the `*-configured-v1`
 deployment placeholders when real model servers are selected, and bump them
 whenever weights or serving behavior changes. Exact validated stage results
@@ -53,11 +53,11 @@ are then reusable across runs and compatible experiment revisions; see
 
 The same manifest defines:
 
-- `baseline`, which asks the DSPy solver to answer each promoted case and has a
+- `baseline`, which asks the DSPy solver to answer each reviewed case and has a
   separate DSPy judge stage score the result semantically; and
-- `optimize-few-shot`, which compiles from train cases, evaluates validation
-  cases, publishes state-only DSPy JSON, and only then loads the untouched test
-  set.
+- `optimize-few-shot`, which compares the baseline and configured few-shot
+  candidates by grouped K-fold cross-validation on train, refits the selected
+  configuration on all training cases, and evaluates the untouched test once.
 
 Solver and judge are distinct roles but may use the same configured model.
 Executor addresses, model names, and stage assignments are durable workspace
@@ -96,6 +96,6 @@ are minimums, not a production fine-tuning target.
 
 The same Codex case-authoring campaign must also create or update the controlled
 `strong`, `partial`, `incorrect`, `contradictory`, and `adversarial` candidates
-under `judge-calibration/`; this is not a later manual step. No solver run can
+under `judge-validation/`; this is not a later manual step. No solver run can
 start until the authored case bank, grouped splits, configured runtime stages,
-and reviewed judge calibration are complete.
+and reviewed judge validation are complete.

@@ -1,0 +1,25 @@
+schema_version: 5
+id: sdk-code-repository-execution-ambiguity-stop-boundary-review
+title: 'Stop on material ambiguity: review'
+skill: sdk_code_repository_execution
+group: sdk-code-repository-execution-ambiguity-stop-boundary
+coverage:
+  primary: ambiguity-stop-boundary
+  supporting:
+  - docs-first-routing
+  - git-native-context
+  archetype: review
+  difficulty: complex
+source_paths:
+- agent_scaffold/skills/sdk_code_repository_execution/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:effccda5fbeb53bdd14291856db7bffec2f8210dfa7901a5ff228be354b87444
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

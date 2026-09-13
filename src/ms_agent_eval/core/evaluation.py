@@ -269,23 +269,13 @@ class HardFailure:
 
 @dataclass(frozen=True)
 class Rubric:
-    passing_score: float
     criteria: tuple[RubricCriterion, ...]
     hard_failures: tuple[HardFailure, ...]
 
     @classmethod
     def load(cls, path: Path) -> Rubric:
         payload = _yaml(path)
-        _reject_unknown(
-            payload, {"passing_score", "criteria", "hard_failures"}, "rubric", path=path
-        )
-        passing = payload.get("passing_score")
-        if (
-            not isinstance(passing, (int, float))
-            or isinstance(passing, bool)
-            or not 0 <= float(passing) <= 1
-        ):
-            raise ConfigurationError("passing_score must be in [0, 1]", path=path)
+        _reject_unknown(payload, {"criteria", "hard_failures"}, "rubric", path=path)
         criteria: list[RubricCriterion] = []
         for raw in _sequence(payload.get("criteria"), "criteria", path=path):
             item = _mapping(raw, "criteria[]", path=path)
@@ -325,14 +315,14 @@ class Rubric:
         failure_ids = [item.id for item in failures]
         if len(failure_ids) != len(set(failure_ids)):
             raise ConfigurationError("hard-failure ids must be unique", path=path)
-        return cls(float(passing), tuple(criteria), tuple(failures))
+        return cls(tuple(criteria), tuple(failures))
 
     @property
     def content_hash(self) -> str:
         return content_hash(self)
 
     def prompt_text(self) -> str:
-        """Render semantic judging guidance without the coordinator's pass threshold."""
+        """Render the semantic scoring guidance for the judge."""
 
         return json.dumps(
             {
@@ -782,8 +772,8 @@ class SplitManifest:
     def load(cls, path: Path, case_bank: CaseBank) -> SplitManifest:
         payload = _yaml(path)
         _reject_unknown(payload, {"schema_version", "groups"}, "splits", path=path)
-        if payload.get("schema_version") != 2:
-            raise ConfigurationError("split schema_version must be 2", path=path)
+        if payload.get("schema_version") != 3:
+            raise ConfigurationError("split schema_version must be 3", path=path)
         raw = _mapping(payload.get("groups"), "splits.groups", path=path)
         assignments = tuple(
             SplitAssignment(
@@ -792,10 +782,10 @@ class SplitManifest:
             )
             for group, split in sorted(raw.items())
         )
-        allowed = {"train", "validation", "test", "challenge"}
+        allowed = {"train", "test", "challenge"}
         if any(item.split not in allowed for item in assignments):
             raise ConfigurationError(
-                "split names must be train/validation/test/challenge", path=path
+                "split names must be train/test/challenge", path=path
             )
         owners = {item.group: item.split for item in assignments}
         groups = {case.group for case in case_bank.cases}
@@ -816,16 +806,13 @@ def deterministic_group_split(
     *,
     seed: str,
     train: float,
-    validation: float,
     test: float,
 ) -> str:
     digest = hashlib.sha256(f"{seed}:{group}".encode()).digest()
     point = int.from_bytes(digest[:8], "big") / 2**64
     if point < train:
         return "train"
-    if point < train + validation:
-        return "validation"
-    if point < train + validation + test:
+    if point < train + test:
         return "test"
     return "challenge"
 
@@ -835,7 +822,6 @@ def validate_deterministic_splits(
     *,
     seed: str,
     train: float,
-    validation: float,
     test: float,
 ) -> None:
     mismatches = {
@@ -845,7 +831,6 @@ def validate_deterministic_splits(
                 item.group,
                 seed=seed,
                 train=train,
-                validation=validation,
                 test=test,
             ),
         }
@@ -855,7 +840,6 @@ def validate_deterministic_splits(
             item.group,
             seed=seed,
             train=train,
-            validation=validation,
             test=test,
         )
     }
@@ -863,6 +847,44 @@ def validate_deterministic_splits(
         raise IntegrityError(
             f"split assignments do not match the configured deterministic policy: {mismatches}"
         )
+
+
+@dataclass(frozen=True)
+class FoldAssignment:
+    group: str
+    fold: int
+
+
+def deterministic_group_k_fold(
+    cases: Sequence[CaseDefinition],
+    *,
+    folds: int,
+    seed: int,
+) -> tuple[FoldAssignment, ...]:
+    """Assign whole leakage groups to balanced, deterministic cross-validation folds."""
+
+    if folds < 2:
+        raise ConfigurationError("cross-validation folds must be at least 2")
+    groups: dict[str, int] = Counter(case.group for case in cases)
+    if folds > len(groups):
+        raise PreflightError(
+            "cross-validation folds cannot exceed the number of training leakage groups"
+        )
+    ranked = sorted(
+        groups,
+        key=lambda group: (
+            -groups[group],
+            hashlib.sha256(f"{seed}:{group}".encode()).hexdigest(),
+            group,
+        ),
+    )
+    fold_sizes = [0] * folds
+    assignments: list[FoldAssignment] = []
+    for group in ranked:
+        fold = min(range(folds), key=lambda index: (fold_sizes[index], index))
+        assignments.append(FoldAssignment(group, fold))
+        fold_sizes[fold] += groups[group]
+    return tuple(sorted(assignments, key=lambda item: item.group))
 
 
 @dataclass(frozen=True)
@@ -903,8 +925,6 @@ class EvaluationRecord:
     criterion_scores: tuple[CriterionScore, ...]
     hard_failures: tuple[str, ...]
     score: float
-    passing_score: float
-    passed: bool
     feedback: str
     content_hash: str
 
@@ -931,56 +951,38 @@ class LlmJudge:
         self, case: CaseDefinition, candidate_response: str, *, skill_context: str
     ) -> EvaluationRecord:
         votes = tuple(
-            self._vote(
+            self.evaluate_vote(
                 case,
-                self.program(
-                    task=case.prompt,
-                    skill_context=skill_context,
-                    rubric=case.rubric.prompt_text(),
-                    expected_response=case.expected_response,
-                    expected_artifacts=json.dumps(
-                        case.expected_artifacts(), ensure_ascii=False, sort_keys=True
-                    ),
-                    candidate_response=candidate_response,
-                ),
+                candidate_response,
+                skill_context=skill_context,
             )
             for _ in range(self.repetitions)
         )
-        scores = tuple(
-            CriterionScore(
-                criterion.id,
-                statistics.median(
-                    next(score.score for score in vote.criterion_scores if score.id == criterion.id)
-                    for vote in votes
+        return aggregate_judge_votes(
+            case,
+            votes,
+            model_hash=self.model_hash,
+            program_hash=self.program_hash,
+        )
+
+    def evaluate_vote(
+        self, case: CaseDefinition, candidate_response: str, *, skill_context: str
+    ) -> JudgeVote:
+        """Produce one independently executable judge vote."""
+
+        return self._vote(
+            case,
+            self.program(
+                task=case.prompt,
+                skill_context=skill_context,
+                rubric=case.rubric.prompt_text(),
+                expected_response=case.expected_response,
+                expected_artifacts=json.dumps(
+                    case.expected_artifacts(), ensure_ascii=False, sort_keys=True
                 ),
-            )
-            for criterion in case.rubric.criteria
+                candidate_response=candidate_response,
+            ),
         )
-        hard_failures = tuple(
-            item.id
-            for item in case.rubric.hard_failures
-            if sum(item.id in vote.hard_failures for vote in votes) > len(votes) / 2
-        )
-        score = sum(
-            item.weight * next(value.score for value in scores if value.id == item.id)
-            for item in case.rubric.criteria
-        )
-        feedback = "\n\n".join(vote.feedback for vote in votes)
-        identity = {
-            "schema_version": 2,
-            "status": "evaluated",
-            "case_id": case.id,
-            "judge_model_hash": self.model_hash,
-            "judge_program_hash": self.program_hash,
-            "votes": votes,
-            "criterion_scores": scores,
-            "hard_failures": hard_failures,
-            "score": score,
-            "passing_score": case.rubric.passing_score,
-            "passed": score >= case.rubric.passing_score and not hard_failures,
-            "feedback": feedback,
-        }
-        return EvaluationRecord(**identity, content_hash=content_hash(identity))
 
     @staticmethod
     def _vote(case: CaseDefinition, output: Mapping[str, object]) -> JudgeVote:
@@ -1019,19 +1021,69 @@ class LlmJudge:
         return JudgeVote(tuple(scores), failures, feedback.strip(), tuple(map(str, raw_call_ids)))
 
 
+def aggregate_judge_votes(
+    case: CaseDefinition,
+    votes: Sequence[JudgeVote],
+    *,
+    model_hash: str,
+    program_hash: str,
+) -> EvaluationRecord:
+    """Deterministically aggregate independently executed judge votes."""
+
+    if not votes:
+        raise IntegrityError("judge vote aggregation requires at least one vote")
+    locked_votes = tuple(votes)
+    expected_criteria = {criterion.id for criterion in case.rubric.criteria}
+    for vote in locked_votes:
+        if {score.id for score in vote.criterion_scores} != expected_criteria:
+            raise IntegrityError("judge vote criterion ids must match rubric exactly")
+    scores = tuple(
+        CriterionScore(
+            criterion.id,
+            statistics.median(
+                next(score.score for score in vote.criterion_scores if score.id == criterion.id)
+                for vote in locked_votes
+            ),
+        )
+        for criterion in case.rubric.criteria
+    )
+    hard_failures = tuple(
+        item.id
+        for item in case.rubric.hard_failures
+        if sum(item.id in vote.hard_failures for vote in locked_votes)
+        > len(locked_votes) / 2
+    )
+    score = sum(
+        item.weight * next(value.score for value in scores if value.id == item.id)
+        for item in case.rubric.criteria
+    )
+    feedback = "\n\n".join(vote.feedback for vote in locked_votes)
+    identity = {
+        "schema_version": 3,
+        "status": "evaluated",
+        "case_id": case.id,
+        "judge_model_hash": model_hash,
+        "judge_program_hash": program_hash,
+        "votes": locked_votes,
+        "criterion_scores": scores,
+        "hard_failures": hard_failures,
+        "score": score,
+        "feedback": feedback,
+    }
+    return EvaluationRecord(**identity, content_hash=content_hash(identity))
+
+
 @dataclass(frozen=True)
-class CalibrationFixture:
+class JudgeValidationFixture:
     id: str
     case_id: str
     candidate_path: Path
     label: str
-    minimum_score: float
-    maximum_score: float
 
 
 @dataclass(frozen=True)
-class CalibrationCorpus:
-    fixtures: tuple[CalibrationFixture, ...]
+class JudgeValidationCorpus:
+    fixtures: tuple[JudgeValidationFixture, ...]
     content_hash: str
 
     @classmethod
@@ -1041,19 +1093,21 @@ class CalibrationCorpus:
         case_bank: CaseBank,
         *,
         require_complete: bool = True,
-    ) -> CalibrationCorpus:
+    ) -> JudgeValidationCorpus:
         manifest = root / "manifest.yaml"
         payload = _yaml(manifest)
-        _reject_unknown(payload, {"schema_version", "fixtures"}, "calibration", path=manifest)
-        if payload.get("schema_version") != 2:
-            raise ConfigurationError("calibration schema_version must be 2", path=manifest)
-        fixtures: list[CalibrationFixture] = []
-        known_cases = {case.id for case in case_bank.cases}
+        _reject_unknown(
+            payload, {"schema_version", "fixtures"}, "judge validation", path=manifest
+        )
+        if payload.get("schema_version") != 3:
+            raise ConfigurationError("judge validation schema_version must be 3", path=manifest)
+        fixtures: list[JudgeValidationFixture] = []
+        known_cases = {case.id: case for case in case_bank.cases}
         for raw in _sequence(payload.get("fixtures"), "fixtures", path=manifest):
             item = _mapping(raw, "fixtures[]", path=manifest)
             _reject_unknown(
                 item,
-                {"id", "case", "candidate", "label", "score_range"},
+                {"id", "case", "candidate", "label"},
                 "fixtures[]",
                 path=manifest,
             )
@@ -1061,46 +1115,39 @@ class CalibrationCorpus:
             case_id = _string(item.get("case"), "fixture.case", path=manifest)
             if case_id not in known_cases:
                 raise ConfigurationError(
-                    f"calibration fixture references unknown case {case_id!r}", path=manifest
+                    f"judge-validation fixture references unknown case {case_id!r}",
+                    path=manifest,
                 )
-            score_range = _sequence(item.get("score_range"), "score_range", path=manifest)
-            if len(score_range) != 2 or any(
-                not isinstance(value, (int, float)) or isinstance(value, bool)
-                for value in score_range
-            ):
-                raise ConfigurationError("score_range must contain two numbers", path=manifest)
-            minimum, maximum = map(float, score_range)
-            if not 0 <= minimum <= maximum <= 1:
-                raise ConfigurationError("score_range must be within [0, 1]", path=manifest)
             fixtures.append(
-                CalibrationFixture(
+                JudgeValidationFixture(
                     fixture_id,
                     case_id,
                     _relative_file(root, item.get("candidate"), "fixture.candidate", path=manifest),
                     _string(item.get("label"), "fixture.label", path=manifest),
-                    minimum,
-                    maximum,
                 )
             )
         required = {"strong", "partial", "incorrect", "contradictory", "adversarial"}
         labels = {item.label for item in fixtures}
         fixture_ids = [item.id for item in fixtures]
         if len(fixture_ids) != len(set(fixture_ids)):
-            raise ConfigurationError("calibration fixture ids must be unique", path=manifest)
+            raise ConfigurationError(
+                "judge-validation fixture ids must be unique", path=manifest
+            )
         unknown_labels = sorted(labels - required)
         if unknown_labels:
-            raise ConfigurationError(f"unknown calibration labels: {unknown_labels}", path=manifest)
+            raise ConfigurationError(
+                f"unknown judge-validation labels: {unknown_labels}", path=manifest
+            )
         if require_complete and not required <= labels:
             raise PreflightError(
-                f"judge calibration requires labels {sorted(required)}; missing {sorted(required - labels)}"
+                f"judge validation requires labels {sorted(required)}; missing {sorted(required - labels)}"
             )
         identity = tuple(
             (
                 item.id,
                 item.case_id,
+                known_cases[item.case_id].judge_view_hash,
                 item.label,
-                item.minimum_score,
-                item.maximum_score,
                 sha256_file(item.candidate_path),
             )
             for item in fixtures
@@ -1109,23 +1156,21 @@ class CalibrationCorpus:
 
 
 @dataclass(frozen=True)
-class CalibrationResult:
-    passed: bool
+class JudgeValidationResult:
+    ordering_consistent: bool
     fixture_scores: Mapping[str, float]
-    fixture_passes: Mapping[str, bool]
     corpus_hash: str
     content_hash: str
 
 
-def calibrate_judge(
+def validate_judge(
     judge: LlmJudge,
-    corpus: CalibrationCorpus,
+    corpus: JudgeValidationCorpus,
     case_bank: CaseBank,
     skill_context: Callable[[str], str],
-) -> CalibrationResult:
+) -> JudgeValidationResult:
     cases = {case.id: case for case in case_bank.cases}
     scores: dict[str, float] = {}
-    passes: dict[str, bool] = {}
     for fixture in corpus.fixtures:
         case = cases[fixture.case_id]
         result = judge.evaluate(
@@ -1134,59 +1179,44 @@ def calibrate_judge(
             skill_context=skill_context(case.skill),
         )
         scores[fixture.id] = result.score
-        passes[fixture.id] = result.passed
-    return calibration_result_from_scores(corpus, scores, fixture_passes=passes)
+    return judge_validation_result_from_scores(corpus, scores)
 
 
-def calibration_result_from_scores(
-    corpus: CalibrationCorpus,
+def judge_validation_result_from_scores(
+    corpus: JudgeValidationCorpus,
     fixture_scores: Mapping[str, float],
-    *,
-    fixture_passes: Mapping[str, bool] | None = None,
-) -> CalibrationResult:
-    """Apply private calibration labels and ranges outside the judge model's view."""
+) -> JudgeValidationResult:
+    """Check the expected ordinal ranking without imposing numeric score cutoffs."""
 
     expected_ids = {fixture.id for fixture in corpus.fixtures}
     actual_ids = set(fixture_scores)
     if actual_ids != expected_ids:
         raise IntegrityError(
-            "calibration scores must cover every fixture exactly: "
+            "judge-validation scores must cover every fixture exactly: "
             f"{sorted(actual_ids)} != {sorted(expected_ids)}"
         )
     scores = {fixture_id: float(score) for fixture_id, score in fixture_scores.items()}
     if any(not 0 <= score <= 1 for score in scores.values()):
-        raise IntegrityError("calibration scores must be in [0, 1]")
-    if fixture_passes is None:
-        fixture_passes = {
-            fixture.id: scores[fixture.id] >= 0.5 for fixture in corpus.fixtures
-        }
-    if set(fixture_passes) != expected_ids:
-        raise IntegrityError("calibration pass decisions must cover every fixture exactly")
+        raise IntegrityError("judge-validation scores must be in [0, 1]")
     scores_by_label: dict[str, list[float]] = {}
-    passed = True
     for fixture in corpus.fixtures:
         score = scores[fixture.id]
         scores_by_label.setdefault(fixture.label, []).append(score)
-        if not fixture.minimum_score <= score <= fixture.maximum_score:
-            passed = False
-        expected_pass = fixture.label == "strong"
-        if fixture_passes[fixture.id] is not expected_pass:
-            passed = False
     strong_floor = min(scores_by_label["strong"])
+    partial_floor = min(scores_by_label["partial"])
     partial_ceiling = max(scores_by_label["partial"])
     negative_ceiling = max(
         score
         for label in ("incorrect", "contradictory", "adversarial")
         for score in scores_by_label[label]
     )
-    passed = passed and strong_floor > partial_ceiling > negative_ceiling
+    ordering_consistent = strong_floor > partial_ceiling and partial_floor > negative_ceiling
     identity = {
-        "passed": passed,
+        "ordering_consistent": ordering_consistent,
         "fixture_scores": scores,
-        "fixture_passes": dict(fixture_passes),
         "corpus_hash": corpus.content_hash,
     }
-    return CalibrationResult(**identity, content_hash=content_hash(identity))
+    return JudgeValidationResult(**identity, content_hash=content_hash(identity))
 
 
 def validate_case_bank(

@@ -1,0 +1,25 @@
+schema_version: 5
+id: platform-code-repository-local-setup-clone-verification-review
+title: 'Verify clone results: review'
+skill: platform/code_repository_local_setup
+group: platform-code-repository-local-setup-clone-verification
+coverage:
+  primary: clone-verification
+  supporting:
+  - authentication-lanes
+  - env-rendering
+  archetype: review
+  difficulty: complex
+source_paths:
+- instructions/mainsequence-platform/skills/pod_manager/code_repository_local_setup/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:cac5fd6df06eb39978eddb3fc53f0e4080347c74a90e4a3a10d01ed1a6e6640a
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

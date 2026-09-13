@@ -97,7 +97,9 @@ def build_workspace_template(
     global_instructions: Sequence[str],
     skills: Mapping[str, object],
     cases_directory: str,
-    api_base_url: str,
+    api_base_url: str | None = None,
+    api_max_concurrent_requests: int = 1,
+    api_endpoints: Sequence[Mapping[str, object]] | None = None,
     solver_model: str,
     judge_model: str,
     solver_deployment_revision: str | None = None,
@@ -116,6 +118,25 @@ def build_workspace_template(
     judge_repetitions: int = 3,
     include_optimization: bool = True,
 ) -> WorkspaceTemplate:
+    if api_endpoints is None:
+        if api_base_url is None:
+            raise ConfigurationError("an OpenAI-compatible endpoint is required")
+        endpoint_payload: list[Mapping[str, object]] = [
+            {
+                "id": "primary",
+                "base_url": api_base_url,
+                "max_concurrent_requests": api_max_concurrent_requests,
+                **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+            }
+        ]
+    else:
+        endpoint_payload = [
+            {
+                **dict(endpoint),
+                **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+            }
+            for endpoint in api_endpoints
+        ]
     runtime: dict[str, object] = {
         "type": runtime_type,
         "python": runtime_python,
@@ -126,14 +147,13 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 9,
+        "schema_version": 11,
         "workspace": workspace,
         "executors": {
             "remote-models": {
                 "type": "endpoint",
                 "adapter": "openai_compatible",
-                "base_url": api_base_url,
-                **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+                "endpoints": endpoint_payload,
             },
             "authoring-harness": {
                 "type": "harness",
@@ -167,7 +187,7 @@ def build_workspace_template(
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 64000, "wall_seconds": 1800},
             },
-            "calibrate_judge": {
+            "validate_judge": {
                 "executor": "remote-models",
                 "model": "judge",
                 "reuse": {"policy": "exact"},
@@ -189,12 +209,12 @@ def build_workspace_template(
                     "wall_seconds": 600,
                 },
             },
-            "optimize": {
+            "fit": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 1800},
             },
-            "final_evaluate": {
+            "select": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
@@ -225,7 +245,7 @@ def build_workspace_template(
             "splits": {"file": f"{cases_directory}/splits.yaml"},
             "judge": {
                 "dspy": _program("judge"),
-                "calibration": {"directory": "judge-calibration"},
+                "validation": {"directory": "judge-validation"},
                 "repetitions": judge_repetitions,
             },
         },
@@ -246,18 +266,13 @@ def build_workspace_template(
         experiments["optimize-few-shot"] = {
             "mode": "optimize",
             "based_on": "baseline",
-            "dataset": {
-                "train": "train",
-                "validation": "validation",
-                "final_evaluation": "test",
-            },
-            "optimizer": {"name": "LabeledFewShot", "parameters": {"k": 2, "seed": 0}},
+            "optimizer": {"name": "LabeledFewShot", "search": {"k": [1, 2, 4]}},
+            "cross_validation": {"folds": 5, "seed": 0},
             "budget": {
                 "solver": {"model_calls": 100, "tokens": 250000},
                 "judge": {"model_calls": 300, "tokens": 500000},
                 "wall_seconds": 1800,
             },
-            "output": {"compiled_program": "content_addressed_json"},
         }
     authoring = (
         files("ms_agent_eval")
@@ -300,7 +315,7 @@ def planned_workspace_paths(
         root / template.cases_directory / "README.md",
         root / template.cases_directory / "coverage.yaml",
         root / template.cases_directory / "splits.yaml",
-        root / "judge-calibration" / "manifest.yaml",
+        root / "judge-validation" / "manifest.yaml",
     ]
     if template.env_example is not None:
         paths.append(root / ".env.example")
@@ -344,14 +359,14 @@ def write_workspace_template(
     cases_root = root / template.cases_directory
     if cases_root.is_absolute() and root not in cases_root.parents:
         raise ConfigurationError("cases directory must remain inside the workspace")
-    calibration = root / "judge-calibration"
+    judge_validation = root / "judge-validation"
     files: dict[Path, str] = {
         workspace_file: template.workspace_yaml,
         root / "case-authoring.md": template.case_authoring_instructions,
         cases_root / "README.md": template.case_bank_readme,
         cases_root / "coverage.yaml": template.capability_catalog,
-        cases_root / "splits.yaml": "schema_version: 2\ngroups: {}\n",
-        calibration / "manifest.yaml": "schema_version: 2\nfixtures: []\n",
+        cases_root / "splits.yaml": "schema_version: 3\ngroups: {}\n",
+        judge_validation / "manifest.yaml": "schema_version: 3\nfixtures: []\n",
     }
     if template.env_example is not None:
         files[root / ".env.example"] = template.env_example
@@ -369,20 +384,20 @@ def write_workspace_template(
     directory_state = {
         root: root.exists(),
         cases_root: cases_root.exists(),
-        calibration: calibration.exists(),
+        judge_validation: judge_validation.exists(),
     }
     created: list[Path] = []
     try:
         root.mkdir(parents=True, exist_ok=True)
         cases_root.mkdir(parents=True, exist_ok=True)
-        calibration.mkdir(parents=True, exist_ok=True)
+        judge_validation.mkdir(parents=True, exist_ok=True)
         for path, value in files.items():
             _atomic_text(path, value, mode=0o600 if path == dotenv else 0o644)
             created.append(path)
     except BaseException:
         for path in reversed(created):
             path.unlink(missing_ok=True)
-        for directory in (calibration, cases_root, root):
+        for directory in (judge_validation, cases_root, root):
             if not directory_state[directory]:
                 try:
                     directory.rmdir()
@@ -395,7 +410,7 @@ def write_workspace_template(
         "case_bank_readme": (cases_root / "README.md").as_posix(),
         "capability_catalog": (cases_root / "coverage.yaml").as_posix(),
         "cases": cases_root.as_posix(),
-        "calibration": (root / "judge-calibration").as_posix(),
+        "judge_validation": judge_validation.as_posix(),
     }
     if template.env_example is not None:
         result["env_example"] = (root / ".env.example").as_posix()

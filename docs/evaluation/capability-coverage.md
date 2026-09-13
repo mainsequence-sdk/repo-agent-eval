@@ -20,7 +20,7 @@ therefore has three separate gates:
 2. **Capability depth** — every capability has enough materially distinct
    primary cases. The default is three.
 3. **Corpus diversity** — every skill meets the workspace-level minimum number
-   of promoted cases and distinct leakage groups.
+   of reviewed cases and distinct leakage groups.
 
 All three gates must pass. Supporting capability tags, paraphrases, or a large
 total case count cannot compensate for a missing primary capability.
@@ -138,7 +138,7 @@ Changing names, prose, or sample numbers is not a new semantic example.
 
 Cases derived from the same source example, defect, fixture, solution, or
 expected artifact share one leakage group. Leakage groups are assigned to
-train, validation, test, or challenge as a unit, preventing near-duplicate
+train, test, or challenge as a unit, preventing near-duplicate
 knowledge from crossing protected splits.
 
 ## Readiness calculation
@@ -162,7 +162,7 @@ AND distinct_leakage_groups(s) >= minimum_leakage_groups_per_skill
 
 This case-bank gate is necessary but not sufficient for a scored run. Immutable
 source resolution, case provenance, split integrity, distinct solver/judge
-identities, and judge calibration must also pass.
+identities, and judge validation must also pass.
 
 Run:
 
@@ -178,7 +178,7 @@ solver calls.
 
 ## Provenance and catalog changes
 
-Every promoted case stores the SHA-256 hash of the exact capability catalog in
+Every reviewed case stores the SHA-256 hash of the exact capability catalog in
 `provenance.capability_catalog_hash`. Changing a capability id, description,
 depth, or any other catalog byte changes that hash. Existing cases must then be
 reviewed, reclassified when necessary, and rehashed before they can be used.
@@ -197,7 +197,7 @@ cases/README.md
 cases/coverage.yaml
 cases/splits.yaml
 cases/<skill>/<case>/...
-judge-calibration/...
+judge-validation/...
 ```
 
 Do not commit repository snapshots, model calls, optimizer state, runs,

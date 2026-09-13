@@ -1,0 +1,22 @@
+schema_version: 3
+fixtures:
+  - id: metatable-graph-strong
+    case: metatable-related-model-graph
+    candidate: strong.md
+    label: strong
+  - id: metatable-graph-partial
+    case: metatable-related-model-graph
+    candidate: partial.md
+    label: partial
+  - id: metatable-graph-incorrect
+    case: metatable-related-model-graph
+    candidate: incorrect.md
+    label: incorrect
+  - id: metatable-graph-contradictory
+    case: metatable-related-model-graph
+    candidate: contradictory.md
+    label: contradictory
+  - id: metatable-graph-adversarial
+    case: metatable-related-model-graph
+    candidate: adversarial.md
+    label: adversarial

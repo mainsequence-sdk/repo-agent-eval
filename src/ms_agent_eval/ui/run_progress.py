@@ -11,19 +11,19 @@ from ms_agent_eval.core.progress import ProgressEvent
 
 _STAGE_LABELS = {
     "author": ("Authoring cases", "Authoring"),
-    "calibrate_judge": ("Calibrating judge", "Calibrating"),
+    "validate_judge": ("Validating judge ranking", "Validating"),
     "solve": ("Solving cases", "Solving"),
     "judge": ("Judging responses", "Judging"),
-    "optimize": ("Optimizing DSPy program", "Optimizing"),
-    "final_evaluate": ("Opening held-out evaluation", "Validating"),
+    "fit": ("Fitting DSPy programs", "Fitting"),
+    "select": ("Selecting by cross-validation", "Selecting"),
     "aggregate": ("Aggregating results", "Aggregating"),
 }
 
 _STAGE_SUBJECTS = {
     "author": "case campaign",
-    "calibrate_judge": "judge calibration",
-    "optimize": "DSPy program",
-    "final_evaluate": "held-out evaluation gate",
+    "validate_judge": "judge validation",
+    "fit": "DSPy program",
+    "select": "cross-validation candidate",
     "aggregate": "results",
 }
 
@@ -49,6 +49,11 @@ class TerminalRunReporter:
             self._packet_failed(event)
         elif event.kind == "packet_waiting":
             self._packet_waiting(event)
+        elif event.kind in {
+            "judge_validation_vote_completed",
+            "judge_validation_vote_failed",
+        }:
+            self._judge_validation_vote(event)
         elif event.kind == "cleanup_completed":
             self._cleanup(event)
         elif event.kind == "run_status":
@@ -116,6 +121,29 @@ class TerminalRunReporter:
         self._stop_status()
         self.console.print(f"[yellow]●[/] {_subject(event)} is ready for harness execution")
 
+    def _judge_validation_vote(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        failed = event.kind == "judge_validation_vote_failed"
+        fixture = str(event.details.get("fixture_id", "fixture"))
+        vote = event.details.get("vote")
+        endpoint = event.details.get("endpoint_id")
+        progress = (
+            f"[{event.position}/{event.total}] "
+            if event.position is not None and event.total is not None
+            else ""
+        )
+        description = f"{progress}{fixture}"
+        if isinstance(vote, int):
+            description += f" · vote {vote}"
+        if isinstance(endpoint, str):
+            description += f" · {endpoint}"
+        if failed:
+            error = event.details.get("error")
+            if isinstance(error, str) and error:
+                description += f": {error}"
+        mark = "[red]✗[/]" if failed else "[green]✓[/]"
+        self.console.print(f"{mark} {description}{_duration(event)}")
+
     def _cleanup(self, event: ProgressEvent) -> None:
         blobs = event.details.get("deleted_blobs", 0)
         temporary = event.details.get("deleted_temporary", 0)
@@ -133,12 +161,20 @@ class TerminalRunReporter:
         labels = {
             "paused": "Paused",
             "awaiting_execution": "Awaiting external execution",
-            "calibration_failed": "Judge calibration failed",
+            "execution_failed": "Automatic execution failed",
+            "judge_validation_failed": "Judge validation failed",
         }
-        color = "red" if status == "calibration_failed" else "yellow"
+        color = (
+            "red"
+            if status in {"execution_failed", "judge_validation_failed", "report_failed"}
+            else "yellow"
+        )
         label = labels.get(status, status.replace("_", " ").title())
         stage = f" at {event.stage}" if event.stage else ""
-        self.console.print(f"[{color}]{label}{stage}[/{color}]")
+        error = event.details.get("result", {})
+        message = error.get("error") if isinstance(error, Mapping) else None
+        suffix = f": {message}" if isinstance(message, str) and message else ""
+        self.console.print(f"[{color}]{label}{stage}{suffix}[/{color}]")
 
     def _summary(self, event: ProgressEvent, result: Mapping[str, object]) -> None:
         table = Table(title="Experiment complete", show_header=False, box=None)
@@ -149,8 +185,6 @@ class TerminalRunReporter:
         table.add_row("Cases", str(result.get("case_count", 0)))
         if isinstance(result.get("mean_score"), (int, float)):
             table.add_row("Mean score", f"{float(result['mean_score']):.3f}")
-        if isinstance(result.get("pass_rate"), (int, float)):
-            table.add_row("Pass rate", f"{float(result['pass_rate']):.1%}")
         if result.get("diagnostic_only") is True:
             table.add_row("Metrics", "Diagnostic only (pilot)")
         execution = result.get("execution")
@@ -160,6 +194,21 @@ class TerminalRunReporter:
                 f"{execution.get('executed_this_run', 0)} executed · "
                 f"{execution.get('reused_this_run', 0)} reused",
             )
+        endpoint_execution = result.get("endpoint_execution")
+        if isinstance(endpoint_execution, Mapping):
+            endpoints = endpoint_execution.get("endpoints")
+            if isinstance(endpoints, list) and endpoints:
+                calls = sum(
+                    int(item.get("model_calls", 0))
+                    for item in endpoints
+                    if isinstance(item, Mapping)
+                )
+                table.add_row(
+                    "Endpoint pool",
+                    f"{len(endpoints)} replicas · "
+                    f"{endpoint_execution.get('configured_capacity', 0)} slots · "
+                    f"{calls} calls",
+                )
         data_root = event.details.get("data_root")
         if isinstance(data_root, str):
             table.add_row("Data", data_root)
@@ -194,13 +243,23 @@ def _model_suffix(event: ProgressEvent) -> str:
 
 
 def _start_detail(event: ProgressEvent) -> str:
+    details: list[str] = []
     fixtures = event.details.get("fixture_count")
-    if event.stage == "calibrate_judge" and isinstance(fixtures, int):
-        return f" [dim]· {fixtures} fixtures[/]"
+    if event.stage == "validate_judge" and isinstance(fixtures, int):
+        details.append(f"{fixtures} fixtures")
+    requests = event.details.get("request_count")
+    if event.stage == "validate_judge" and isinstance(requests, int):
+        details.append(f"{requests} votes")
+    capacity = event.details.get("pool_capacity")
+    if isinstance(capacity, int):
+        details.append(f"{capacity} slots")
     training_cases = event.details.get("training_case_count")
-    if event.stage == "optimize" and isinstance(training_cases, int):
-        return f" [dim]· {training_cases} training cases[/]"
-    return ""
+    if event.stage == "fit" and isinstance(training_cases, int):
+        details.append(f"{training_cases} training cases")
+    endpoint = event.details.get("endpoint_id")
+    if isinstance(endpoint, str):
+        details.append(f"endpoint {endpoint}")
+    return "" if not details else f" [dim]· {' · '.join(details)}[/]"
 
 
 def _duration(event: ProgressEvent) -> str:
@@ -210,27 +269,31 @@ def _duration(event: ProgressEvent) -> str:
 
 
 def _completion_detail(event: ProgressEvent) -> str:
+    detail = ""
     if event.stage == "judge" and isinstance(event.details.get("score"), (int, float)):
-        passed = event.details.get("passed") is True
-        verdict = "passed" if passed else "failed"
-        color = "green" if passed else "red"
-        return f" · [{color}]{float(event.details['score']):.3f} {verdict}[/{color}]"
-    if event.stage == "calibrate_judge":
-        passed = event.details.get("passed") is True
-        return " · judge accepted" if passed else " · judge rejected"
-    if event.stage == "author" and isinstance(event.details.get("produced_count"), int):
-        return f" · {event.details['produced_count']} candidates"
-    return ""
+        detail = f" · [green]{float(event.details['score']):.3f}[/green]"
+    elif event.stage == "validate_judge":
+        consistent = event.details.get("ordering_consistent") is True
+        detail = " · ordering consistent" if consistent else " · ordering inconsistent"
+    elif event.stage == "author" and isinstance(event.details.get("produced_count"), int):
+        detail = f" · {event.details['produced_count']} candidates"
+    endpoint = event.details.get("endpoint_id")
+    if isinstance(endpoint, str):
+        detail += f" [dim]· {endpoint}[/]"
+    endpoint_ids = event.details.get("endpoint_ids")
+    if isinstance(endpoint_ids, list) and endpoint_ids:
+        detail += f" [dim]· endpoints {', '.join(map(str, endpoint_ids))}[/]"
+    return detail
 
 
 def _past_tense(stage: str | None) -> str:
     return {
         "author": "Authored",
-        "calibrate_judge": "Calibrated",
+        "validate_judge": "Validated",
         "solve": "Solved",
         "judge": "Judged",
-        "optimize": "Optimized",
-        "final_evaluate": "Validated",
+        "fit": "Fitted",
+        "select": "Selected",
         "aggregate": "Aggregated",
     }.get(stage or "", "Completed")
 

@@ -1,28 +1,7 @@
-First define success, for example: repository-relevant updater tests pass
-locally; an authorized validation run uses an explicit isolation namespace;
-the intended exact Git commit is available to the registered branch runtime;
-and the resulting published `TimeIndexMetaTable` contains the expected rows and
-time-index contract, with concrete run/log/table evidence.
+The plan should make **Derive context from Git** the central decision: Use Git-native branch, remote, and worktree facts as the repository context authority.
 
-Read `AGENTS.md`, current repository docs, and the updater skill. From the
-repository root run the read-only context check:
+For `eval-63c12e2d`, first freeze the repository and environment identities and resolve every referenced resource rather than guessing identifiers. Then apply the selected skill's ordered operations. The governing boundary is: read repository instructions first, derive remote/branch/worktree context from Git, freeze it before operations, route specialized work, define success evidence, and stop on material ambiguity. The plan should preserve the distinction between configuration, the concrete operation or release, and later runtime state.
 
-```bash
-mainsequence code-repository current --debug --json
-```
+The response should explicitly reject shortcuts that erase ownership or identity boundaries. It must not expose credentials, invent observations, use removed APIs, or report a live outcome from this response-only task.
 
-Require its Git-derived remote/repository, `git_branch=feature/prices`, exact
-commit context, `code_repository_branch_status=resolved`, and a nonempty
-resolved branch UID before live branch-owned operations. Git remote, attached
-branch, and HEAD are the source identity. Authentication grants access but does
-not select source context. Never request or persist Environment,
-CodeRepository, or branch UID selectors in `.env`. If the branch is
-unregistered, local development and tests may continue, but platform-derived
-MetaTable, Job, image, release, or live validation operations are blocked until
-that actual Git branch is registered and a fresh process resolves it.
-
-Route updater configuration, dependency, incremental logic, storage contract,
-and namespace-first validation to
-`data_publishing/time_index_table_updates`. Return here only to verify the
-agreed repository context and evidence boundary; this skill does not absorb the
-updater implementation.
+The closing evidence checklist should include Git-native identity, applied instruction chain, selected skill route, bounded commands, and the observations in the task's success definition. Static review can establish that the plan and declarations conform to the skill; only observed platform state, logs, health, and representative behavior can establish successful execution where those observations apply.

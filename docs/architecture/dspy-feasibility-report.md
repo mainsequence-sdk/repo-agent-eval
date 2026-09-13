@@ -114,7 +114,7 @@ proved:
 - a permanent failure with no retry;
 - a terminal outer-budget rejection.
 
-Contract/calibration evidence is stored as
+Contract/judge validation evidence is stored as
 `sha256:ebcf84af1f6e7c1776434cc6bed736942c89b9d734a2ed90db80d2035aaf13d8`.
 
 Observability limitations remain:
@@ -144,7 +144,7 @@ invokes it exactly once, stores its complete `DetailedEvaluationResult`, and pro
 numeric score or DSPy's score-plus-feedback prediction. Evaluator exceptions raise
 `MetricEvaluationError`; they are not converted into a legitimate zero score.
 
-Calibration outcomes were:
+Judge validation outcomes were:
 
 | Candidate | Score |
 |---|---:|
@@ -152,9 +152,11 @@ Calibration outcomes were:
 | plausible lowercase answer | 0.0 |
 | keyword-stuffed answer | 0.0 |
 
-The optimizer-visible loader exposes only train and validation records. It has no test attribute
-or test-loading method. Group overlap and duplicate IDs are hard errors. The held-out loader is a
-separate API invoked only after both compile calls return.
+The production design derived from this spike exposes only the training cases
+for fitting and grouped cross-validation. It has no test attribute or
+test-loading method. Group overlap and duplicate IDs are hard errors. The
+held-out loader is a separate API invoked only after model selection and the
+final refit return.
 
 Compile results:
 
@@ -163,7 +165,7 @@ Compile results:
 - GEPA used a distinct student model and reflection model, made 8 observed student calls and 2
   observed reflection calls, received evaluator feedback through the metric adapter, and produced
   an immutable optimization lock and selected state;
-- the synthetic selected program scored 1.0 on validation and 1.0 on held-out test;
+- the synthetic selected program scored 1.0 out of fold and 1.0 on held-out test;
 - both few-shot and GEPA programs scored 1.0 on the synthetic held-out set.
 
 Those scores validate lifecycle wiring only. The dummy provider was scripted, the dataset is tiny,
@@ -261,8 +263,9 @@ Before task 002 starts, revise task 000 to make these findings normative:
    package threat/dependency review. Continue rejecting pickle even when the dependency exists.
 7. Make a real configured Ollama raw/DSPy integration run, with usage and model identity evidence,
    a task-002 provider gate rather than claiming it was completed by this network-free spike.
-8. Record validation and held-out results separately and never expose the held-out loader to an
-   optimizer-facing service or process.
+8. Record out-of-fold model-selection estimates and held-out test results
+   separately, and never expose the held-out loader to an optimizer-facing
+   service or process.
 
 ## Decision and handoff
 

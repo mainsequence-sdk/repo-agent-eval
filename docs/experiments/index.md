@@ -19,9 +19,9 @@ flowchart TB
     subgraph Corpus[Evaluation definition]
         Policy[case-authoring.md]
         Catalog[cases/coverage.yaml]
-        Cases[Promoted case packages]
+        Cases[Reviewed case packages]
         Splits[cases/splits.yaml]
-        Fixtures[Judge-calibration fixtures]
+        Fixtures[Judge-validation fixtures]
     end
 
     subgraph Runtime[Execution definition]
@@ -43,9 +43,9 @@ flowchart TB
     Splits --> Ready
     Fixtures --> Ready
     Lock --> Ready
-    Ready -->|Pass| Calibrate[Run judge calibration]
-    Calibrate -->|Pass| Run[Solver stages allowed]
-    Calibrate -->|Fail| Stop[Stop before solver calls]
+    Ready -->|Valid| ValidateJudge[Run judge validation]
+    ValidateJudge -->|Ordinally consistent| Run[Solver stages allowed]
+    ValidateJudge -->|Inconsistent| Stop[Stop before solver calls]
 ```
 
 The framework will not begin a scored run until each required identity and
@@ -58,8 +58,8 @@ integrity check can be locked.
 | Authoring policy | `evaluation.case_authoring.instructions` | The versioned file exists and its exact bytes are included in provenance. |
 | Capability catalog | `evaluation.cases.coverage.catalog` | Status is complete and every selected skill/capability is represented. |
 | Case bank | `evaluation.cases.directory` | Packages validate, retain provenance, and meet capability depth and diversity floors. |
-| Splits | `evaluation.splits` | Whole leakage groups map deterministically to train, validation, test, or challenge. |
-| Judge calibration | `evaluation.judge.calibration` | Controlled fixtures exist and the configured judge passes their accepted score ranges. |
+| Splits | `evaluation.splits` | Whole leakage groups map deterministically to train, test, or challenge. |
+| Judge validation | `evaluation.judge.validation` | Controlled training-case fixtures cover every required label and the judge preserves their ordinal quality ordering. |
 | Execution | `executors`, `models`, and `stages` | Every stage has a valid executor, model where required, and finite budget. |
 | Run definition | `experiments` | The selected experiment is either an evaluation or an optimization based on an evaluation. |
 
@@ -78,7 +78,7 @@ integrity check can be locked.
 │       ├── case.yaml
 │       ├── solver/
 │       └── judge/
-└── judge-calibration/
+└── judge-validation/
     ├── manifest.yaml
     └── *.md
 ```
@@ -93,7 +93,7 @@ and reports do not belong in this directory. See the
    explicit configuration.
 2. Resolve the target and optional reference sources to immutable snapshots.
 3. Ask the configured author stage to build the capability catalog, case bank,
-   grouped splits, and calibration corpus.
+   grouped splits, and judge-validation set.
 4. Run `validate` and `inspect`. Address every reported blocker.
 5. Use a pilot while the corpus is incomplete; treat its output only as
    diagnostics.

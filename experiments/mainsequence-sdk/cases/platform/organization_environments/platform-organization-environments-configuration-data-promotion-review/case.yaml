@@ -1,0 +1,25 @@
+schema_version: 5
+id: platform-organization-environments-configuration-data-promotion-review
+title: 'Separate configuration and data promotion: review'
+skill: platform/organization_environments
+group: platform-organization-environments-configuration-data-promotion
+coverage:
+  primary: configuration-data-promotion
+  supporting:
+  - lifecycle-transition
+  - organization-owned-partition
+  archetype: review
+  difficulty: complex
+source_paths:
+- instructions/mainsequence-platform/skills/platform/organization_environments/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:a18706c5a4fb24ab809d716532f7e22e976bdb9e8a98f1f0b10d45d512f90f7f
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

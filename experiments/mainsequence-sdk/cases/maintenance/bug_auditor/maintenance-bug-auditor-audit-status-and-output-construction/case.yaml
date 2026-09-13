@@ -1,0 +1,25 @@
+schema_version: 5
+id: maintenance-bug-auditor-audit-status-and-output-construction
+title: 'Communicate audit status and findings: design'
+skill: maintenance/bug_auditor
+group: maintenance-bug-auditor-audit-status-and-output
+coverage:
+  primary: audit-status-and-output
+  supporting:
+  - read-only-status
+  - evidence-record
+  archetype: construction
+  difficulty: easy
+source_paths:
+- agent_scaffold/skills/maintenance/bug_auditor/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:8fbe2815aeedab7056d04b6b3fa39361736c33be9fe4f4326de6bee4ac967ecc
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

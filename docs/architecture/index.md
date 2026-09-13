@@ -12,7 +12,7 @@ flowchart TB
         Workspace[workspace.yaml]
         Policy[case-authoring.md]
         Cases[Cases, rubrics, coverage, and splits]
-        Calibration[Judge-calibration fixtures]
+        Judge validation[Judge-validation fixtures]
     end
 
     subgraph Sources[Immutable sources]
@@ -60,7 +60,7 @@ flowchart LR
     subgraph Repository[Git repository]
         Code[src/ms_agent_eval]
         Definition[workspace.yaml and case-authoring.md]
-        Corpus[Cases, splits, coverage, and calibration fixtures]
+        Corpus[Cases, splits, coverage, and judge-validation fixtures]
         Docs[Documentation and tests]
     end
 
@@ -87,8 +87,8 @@ flowchart LR
 | Workspace configuration | Experiment and run locks |
 | Authoring policy | Rendered model requests and responses |
 | Capability catalog and grouped splits | Solver and judge results |
-| Promoted cases and rubrics | Compiled DSPy state |
-| Reviewed calibration candidates | Reports, traces, and temporary attempts |
+| Reviewed cases and rubrics | Compiled DSPy state |
+| Reviewed judge-validation candidates | Reports, traces, and temporary attempts |
 
 The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
 `workspace.data_root` may select another location outside the Git workspace.
@@ -106,6 +106,9 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
 - [ADR-003](003-content-addressed-experiment-graph.md) defines immutable
   experiment revisions, stage work identities, incremental invalidation, and
   safe cross-run result reuse.
+- [ADR-004](004-pooled-endpoint-concurrency.md) defines capacity-aware pools of
+  equivalent OpenAI-compatible endpoints, bounded local concurrency, routing,
+  failure handling, and attempt-level endpoint provenance.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

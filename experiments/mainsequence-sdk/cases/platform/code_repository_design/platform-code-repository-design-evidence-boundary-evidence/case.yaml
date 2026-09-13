@@ -1,0 +1,24 @@
+schema_version: 5
+id: platform-code-repository-design-evidence-boundary-evidence
+title: 'Design the automatic-deployment matrix: evidence analysis'
+skill: platform/code_repository_design
+group: platform-code-repository-design-evidence-boundary
+coverage:
+  primary: automatic-deployment-matrix
+  supporting:
+  - intent-and-success
+  archetype: evidence
+  difficulty: complex
+source_paths:
+- instructions/mainsequence-platform/skills/platform/code_repository_design/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:be9fe1fc562b1e0dc7ee3154b01de8f88bd012774ff6c94952147671e06e36a3
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

@@ -1,14 +1,23 @@
-schema_version: 9
+schema_version: 11
 
 workspace:
   id: mainsequence-sdk-evaluation
   # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
 
 executors:
-  remote-qwen:
+  lan-inference:
     type: endpoint
     adapter: openai_compatible
-    base_url: http://192.168.1.10:11434/v1
+    endpoints:
+      - id: llama-cpp-17-18081
+        base_url: http://192.168.1.17:18081/v1
+        max_concurrent_requests: 4
+      - id: llama-cpp-17-18080
+        base_url: http://192.168.1.17:18080/v1
+        max_concurrent_requests: 4
+      - id: llama-server-10-11436
+        base_url: http://192.168.1.10:11436/v1
+        max_concurrent_requests: 8
   artifact-harness:
     type: harness
     adapter: artifact_exchange
@@ -44,26 +53,26 @@ stages:
     model: author
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
-  calibrate_judge:
-    executor: remote-qwen
+  validate_judge:
+    executor: lan-inference
     model: judge
     reuse: {policy: exact}
     budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
   solve:
-    executor: remote-qwen
+    executor: lan-inference
     model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
-    executor: remote-qwen
+    executor: lan-inference
     model: judge
     reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
-  optimize:
+  fit:
     executor: local-process
     reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 1800}
-  final_evaluate:
+  select:
     executor: local-process
     reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
@@ -75,12 +84,22 @@ stages:
 evaluation:
   repository:
     url: https://github.com/mainsequence-sdk/mainsequence-sdk
-    ref: v8.1.9
+    ref: v8.1.12
   instructions:
     global:
       - agent_scaffold/AGENTS.md
     skills:
       directory: agent_scaffold/skills
+    imports:
+      - id: platform
+        source: mcp
+        note: >-
+          Platform-owned skills imported from the authenticated Main Sequence MCP
+          catalog and pinned by its manifest, ontology, resource paths, and content
+          hashes. The imported files are experiment inputs; runs never refresh them.
+        manifest: instructions/mainsequence-platform/manifest.yaml
+        skills:
+          directory: instructions/mainsequence-platform/skills
   case_authoring:
     instructions: case-authoring.md
     sources:
@@ -178,14 +197,13 @@ evaluation:
     directory: cases
     coverage:
       catalog: cases/coverage.yaml
-      minimum_cases_per_skill: 12
-      minimum_leakage_groups_per_skill: 6
+      minimum_cases_per_skill: 20
+      minimum_leakage_groups_per_skill: 10
   splits:
     file: cases/splits.yaml
     policy:
       seed: mainsequence-sdk-foundations-v1
-      train: 0.5
-      validation: 0.2
+      train: 0.7
       test: 0.2
       challenge: 0.1
   judge:
@@ -203,8 +221,8 @@ evaluation:
           criterion_scores: dict[str, float]
           hard_failures: list[str]
           feedback: str
-    calibration:
-      directory: judge-calibration
+    validation:
+      directory: judge-validation
     repetitions: 3
 
 experiments:
@@ -227,15 +245,13 @@ experiments:
   optimize-few-shot:
     mode: optimize
     based_on: baseline
-    dataset:
-      train: train
-      validation: validation
-      final_evaluation: test
     optimizer:
       name: LabeledFewShot
-      parameters:
-        k: 2
-        seed: 0
+      search:
+        k: [1, 2, 4]
+    cross_validation:
+      folds: 5
+      seed: 0
     budget:
       solver:
         model_calls: 100
@@ -244,5 +260,3 @@ experiments:
         model_calls: 300
         tokens: 500000
       wall_seconds: 1800
-    output:
-      compiled_program: content_addressed_json

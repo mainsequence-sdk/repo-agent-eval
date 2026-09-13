@@ -316,3 +316,4 @@ class ProgramResult:
     trace_artifact: ArtifactReference | None
     status: Literal["completed", "failed"]
     error_kind: str | None
+    error_message: str | None

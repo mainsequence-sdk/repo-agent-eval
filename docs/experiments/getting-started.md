@@ -36,6 +36,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
   --skills-directory .agents/skills \
   --cases cases \
   --api-base-url http://127.0.0.1:8000/v1 \
+  --api-max-concurrent-requests 4 \
   --solver-model solver-model \
   --solver-reasoning-effort high \
   --judge-model judge-model \
@@ -45,9 +46,9 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v9 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v11 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
-case bank, grouped split manifest, and judge-calibration manifest. It does not
+case bank, grouped split manifest, and judge-validation manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
 absent, generated data defaults to `~/ms_agent_eval/<workspace-id>`.
 
@@ -87,7 +88,7 @@ under `cases/<skill>/<case>/`. A requested number is a lower bound. The campaign
 must create at least three distinct cases per selected skill and expand until
 every catalog capability has its configured number of primary cases. Before it
 returns, the same authoring campaign also updates grouped splits and creates the
-complete `judge-calibration/` corpus. Calibration is not a manual phase left to
+complete `judge-validation/` set. Judge validation is not a manual phase left to
 the user after case creation.
 
 Read the [capability coverage contract](../evaluation/capability-coverage.md) before marking
@@ -112,21 +113,24 @@ use the same configured model:
 
 ```yaml
 executors:
-  remote-models:
+  inference-pool:
     type: endpoint
     adapter: openai_compatible
-    base_url: http://127.0.0.1:8000/v1
+    endpoints:
+      - id: primary
+        base_url: http://127.0.0.1:8000/v1
+        max_concurrent_requests: 4
 models:
   shared-runtime:
     name: qwen3.6:27b-coding
     reasoning_effort: medium
 stages:
-  solve: {executor: remote-models, model: shared-runtime, budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}}
-  judge: {executor: remote-models, model: shared-runtime, budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}}
+  solve: {executor: inference-pool, model: shared-runtime, budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}}
+  judge: {executor: inference-pool, model: shared-runtime, budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}}
 ```
 
 If the API requires a credential, set `api_key_env: OPENAI_API_KEY` on the
-endpoint executor and put only the secret in the ignored local `.env` file:
+specific endpoint item and put only the secret in the ignored local `.env` file:
 
 ```dotenv
 OPENAI_API_KEY=your-secret
@@ -140,25 +144,24 @@ setup wizard or set it to `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 `max`, or `ultra` when supported by that model and executor. Omit it to use the
 provider/model default. Do not place it inside `parameters`.
 
-## 5. Review the authored judge calibration
+## 5. Review the authored judge validation
 
 As part of case authoring, Codex must populate
-`judge-calibration/manifest.yaml` and its candidate files with controlled,
+`judge-validation/manifest.yaml` and its candidate files with controlled,
 reference-labelled responses covering `strong`, `partial`, `incorrect`,
 `contradictory`, and `adversarial`. Every fixture references an existing
-promoted train/validation case and declares its accepted score range. Review
+reviewed training case. Review
 the fixtures with the cases and rubrics; do not replace them with real solver
-outputs or judge feedback. The LLM judge must pass calibration before any solver
-request.
+outputs or judge feedback. The framework checks that the judge preserves the
+expected ordinal quality ordering before any solver request.
 
 ```yaml
-schema_version: 2
+schema_version: 3
 fixtures:
   - id: strong-example
     case: case-id
     candidate: strong.md
     label: strong
-    score_range: [0.9, 1.0]
 ```
 
 ## 6. Validate and inspect
@@ -172,7 +175,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval inspect \
 ```
 
 Inspection reports source commits/snapshots, exact skills, authoring policy and
-source-set hashes, case/split coverage, solver/judge identities, calibration,
+source-set hashes, case/split coverage, solver/judge identities, judge validation,
 runtime, projected calls, and experiment lock hashes. An incomplete result
 lists the remaining readiness blockers without making model calls.
 
@@ -185,12 +188,12 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval run baseline --pilot \
 ```
 
 An interactive terminal shows each case as it is solved and judged, including
-case identity, progress, elapsed time, score, and verdict. Add `--json` for one
+case identity, progress, elapsed time, and continuous score. Add `--json` for one
 machine-readable result document; redirected output uses JSON automatically.
 
-The pilot executes judge calibration and the train/validation solver and judge
+The pilot executes judge validation and the train solver and judge
 packets. It excludes test/challenge cases, rejects optimization experiments,
-uses one diagnostic judge vote per calibration fixture and case, stores
+uses one diagnostic judge vote per judge-validation fixture and case, stores
 per-case diagnostics under the external data root, records `benchmark_valid:
 false`, and emits no aggregate benchmark metrics. Use `--pilot` again when
 resuming or operating a pilot's stage packets.
@@ -206,7 +209,8 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval run optimize-few-shot \
 ```
 
 The baseline sends each case only to the solver, then sends the candidate plus
-the hidden rubric/reference material to the judge. Optimization sees train and
-validation cases only, publishes state-only DSPy JSON, and only then loads the
-untouched test set for final evaluation. All generated outputs stay under the
-external data root.
+the hidden rubric/reference material to the judge. Optimization compares the
+baseline and configured few-shot candidates by grouped K-fold cross-validation
+within train, refits the highest-mean configuration on all training cases, and
+then evaluates the untouched test set once. All generated outputs stay under
+the external data root.

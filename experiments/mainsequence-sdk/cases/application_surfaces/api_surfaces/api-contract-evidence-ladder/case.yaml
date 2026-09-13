@@ -16,10 +16,10 @@ source_paths:
 - references/tutorial/src/mainsequence_sdk_tutorial/command_center_api.py
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:28115cfa37076da04275468d209a8decf5fae4abf4ef17e6ba9ea2b2e6860757
-  capability_catalog_hash: sha256:9560a15d8ec6149ce48d7398064c9225957121e55fb61dd7a56bd10c51a0a871
-  source_snapshot_hash: sha256:4eefa35ce27f041f43000d7ed932e3c70eba14d6a527305d204b33b8e0179f01
-  case_content_hash: sha256:9d1961647aa8d465f4892547540f524145646cdca0e20046bfd9293384f689c0
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:06b932364e9649f0e206b2e5c99f1d6ba964e071ea9a5cdc934e37a61282f3e9
 solver:
   prompt: solver/prompt.md
 judge:

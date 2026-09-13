@@ -152,6 +152,18 @@ def test_model_call_and_trace_manifests_make_evidence_reachable(tmp_path: Path) 
     )
     trace = _json_blob(store, {"role": "solver", "outputs": {"response": "answer"}})
     observer.record_trace(trace, (record,))
+    repeated_record = observer.completed(
+        provider_id="openai_compatible",
+        model="solver-model",
+        parameters={"temperature": 0.0},
+        messages=({"role": "user", "content": "solve"},),
+        request={"messages": [{"role": "user", "content": "solve"}]},
+        response={"choices": [{"message": {"content": "answer"}}]},
+        usage={"total_tokens": 2},
+        latency_seconds=0.1,
+        configured_cost=0.0,
+    )
+    observer.record_trace(trace, (repeated_record,))
 
     call_manifest = json.loads(
         (
@@ -165,7 +177,7 @@ def test_model_call_and_trace_manifests_make_evidence_reachable(tmp_path: Path) 
     assert call_manifest["packet_id"] == f"sha256:{'1' * 64}"
     assert call_manifest["request_artifact"]["content_id"] == record.request_artifact.content_id
     trace_manifests = tuple((store.manifest_root / "runs" / "run-1" / "traces").glob("*.json"))
-    assert len(trace_manifests) == 1
+    assert len(trace_manifests) == 2
 
     report = collect_artifact_garbage(
         store,

@@ -26,14 +26,20 @@ Write schema-v5 packages and design rubrics for semantic evaluation by the LLM j
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 9,
+        "schema_version": 11,
         "workspace": {"id": "synthetic-evaluation"},
         "executors": {
             "remote-models": {
                 "type": "endpoint",
                 "adapter": "openai_compatible",
-                "base_url": "http://localhost:8000/v1",
-                "api_key_env": "TEST_API_KEY",
+                "endpoints": [
+                    {
+                        "id": "primary",
+                        "base_url": "http://localhost:8000/v1",
+                        "max_concurrent_requests": 1,
+                        "api_key_env": "TEST_API_KEY",
+                    }
+                ],
             },
             "authoring-harness": {
                 "type": "harness",
@@ -65,7 +71,7 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
             },
-            "calibrate_judge": {
+            "validate_judge": {
                 "executor": "remote-models",
                 "model": "judge",
                 "reuse": {"policy": "exact"},
@@ -83,12 +89,12 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 30, "tokens": 10000, "wall_seconds": 300},
             },
-            "optimize": {
+            "fit": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
-            "final_evaluate": {
+            "select": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
@@ -139,7 +145,7 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                         },
                     },
                 },
-                "calibration": {"directory": "judge-calibration"},
+                "validation": {"directory": "judge-validation"},
                 "repetitions": 1,
             },
         },
@@ -165,21 +171,16 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
             "optimize": {
                 "mode": "optimize",
                 "based_on": "baseline",
-                "dataset": {
-                    "train": "train",
-                    "validation": "validation",
-                    "final_evaluation": "test",
-                },
                 "optimizer": {
                     "name": "LabeledFewShot",
-                    "parameters": {"k": 1, "seed": 0},
+                    "search": {"k": [1]},
                 },
+                "cross_validation": {"folds": 2, "seed": 0},
                 "budget": {
                     "solver": {"model_calls": 20, "tokens": 10000},
                     "judge": {"model_calls": 30, "tokens": 10000},
                     "wall_seconds": 300,
                 },
-                "output": {"compiled_program": "content_addressed_json"},
             },
         },
     }
@@ -217,7 +218,7 @@ def create_workspace(root: Path) -> WorkspaceRepository:
         ),
         encoding="utf-8",
     )
-    (root / "judge-calibration").mkdir()
+    (root / "judge-validation").mkdir()
     return WorkspaceRepository.from_file(root / "workspace.yaml")
 
 
@@ -269,7 +270,6 @@ def create_case(
     (directory / "judge" / "rubric.yaml").write_text(
         yaml.safe_dump(
             {
-                "passing_score": 0.8,
                 "criteria": [
                     {
                         "id": "correctness",
@@ -320,7 +320,7 @@ def create_case(
     return CaseDefinition.load(directory)
 
 
-def seed_cases_and_calibration(
+def seed_cases_and_judge_validation(
     repository: WorkspaceRepository,
     *,
     authoring_instructions_hash: str = f"sha256:{'1' * 64}",
@@ -338,7 +338,7 @@ def seed_cases_and_calibration(
         ),
         create_case(
             repository.cases_root,
-            case_id="case-validation",
+            case_id="case-train-two",
             skill="beta",
             group="group-17",
             source_path="skills/beta/SKILL.md",
@@ -358,10 +358,10 @@ def seed_cases_and_calibration(
     (repository.cases_root / "splits.yaml").write_text(
         yaml.safe_dump(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "groups": {
                     "group-0": "train",
-                    "group-17": "validation",
+                    "group-17": "train",
                     "group-1": "test",
                 },
             },
@@ -370,15 +370,8 @@ def seed_cases_and_calibration(
         encoding="utf-8",
     )
     fixtures = []
-    ranges = {
-        "strong": [0.9, 1.0],
-        "partial": [0.4, 0.7],
-        "incorrect": [0.0, 0.2],
-        "contradictory": [0.0, 0.2],
-        "adversarial": [0.0, 0.2],
-    }
-    for label, score_range in ranges.items():
-        candidate = repository.calibration_root / f"{label}.md"
+    for label in ("strong", "partial", "incorrect", "contradictory", "adversarial"):
+        candidate = repository.judge_validation_root / f"{label}.md"
         candidate.write_text(f"{label} candidate\n", encoding="utf-8")
         fixtures.append(
             {
@@ -386,11 +379,10 @@ def seed_cases_and_calibration(
                 "case": cases[0].id,
                 "candidate": candidate.name,
                 "label": label,
-                "score_range": score_range,
             }
         )
-    (repository.calibration_root / "manifest.yaml").write_text(
-        yaml.safe_dump({"schema_version": 2, "fixtures": fixtures}, sort_keys=False),
+    (repository.judge_validation_root / "manifest.yaml").write_text(
+        yaml.safe_dump({"schema_version": 3, "fixtures": fixtures}, sort_keys=False),
         encoding="utf-8",
     )
 

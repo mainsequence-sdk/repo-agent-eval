@@ -27,10 +27,10 @@ observed model, output artifacts, usage, timestamps, and failure evidence.
 
 | Executor | Use it for | Model authentication | Isolation |
 | --- | --- | --- | --- |
-| OpenAI-compatible endpoint | Solver, judge, or other model-driven DSPy stages served over HTTP | Optional key named by `api_key_env` | Remote service boundary |
+| OpenAI-compatible endpoint pool | Solver, judge, or other model-driven DSPy stages served over one or more HTTP replicas | Optional per-endpoint key named by `api_key_env` | Remote service boundary plus explicit per-replica capacity |
 | Codex CLI harness | Subscription-backed model stages in disposable containers | Dedicated ChatGPT subscription store | Digest-pinned container plus restricted control-plane network |
 | Artifact-exchange harness | A human or external agent that claims packets and submits structured results | Owned by the external worker | Defined by the external worker |
-| Local process | Deterministic coordination such as optimization publication, final-evaluation release, and aggregation | None | Framework process |
+| Local process | Deterministic coordination such as fold assignment, candidate selection, final refit, and aggregation | None | Framework process |
 
 The executor, model, and stage binding are separate configuration objects. This
 allows two roles to share an endpoint while keeping distinct model identities,
@@ -66,3 +66,5 @@ The security and protocol rationale lives in
 For cross-run cache eligibility, invalidation, model deployment revisions,
 replication, storage, and report accounting, read
 [Incremental execution and reuse](incremental-execution.md).
+Capacity-aware replica scheduling is specified by
+[ADR-004](../architecture/004-pooled-endpoint-concurrency.md).

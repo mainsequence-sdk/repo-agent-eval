@@ -4,7 +4,7 @@
 - Date: 2026-09-12
 - Decision owners: MS Agent Eval maintainers
 - Scope: Isolated local Codex execution for model-driven authoring, solving,
-  judge-calibration, and judging stages
+  judge-validation, and judging stages
 - Refines: [ADR-001: Portable Staged Execution](001-portable-staged-execution.md)
 
 ## Context
@@ -196,11 +196,11 @@ hidden files is prohibited.
 | Stage | Permitted input view | Explicitly excluded |
 | --- | --- | --- |
 | `author` | Authoring policy, capability catalog, selected immutable target/reference evidence, campaign request, output schema | Solver outputs, judge outputs, optimizer traces, held-out results |
-| `calibrate_judge` | Assigned calibration fixtures, their cases, rubrics, expected evidence, output schema | Real solver responses and unrelated fixtures |
+| `validate_judge` | Assigned judge-validation fixtures, their cases, rubrics, expected evidence, output schema | Real solver responses and unrelated fixtures |
 | `solve` | Case prompt, declared global context, selected skill context, permitted repository snapshot, runtime/test files | Rubric, expected answer, judge prompt, judge feedback, other split data |
 | `judge` | Assigned case prompt, rubric, expected evidence, locked candidate response, permitted supporting snapshot | Other candidates, aggregate scores, previous judge decisions, unrelated cases |
-| `optimize` | Train/validation inputs and explicitly admitted prior results | Test and challenge inputs, answers, responses, and feedback |
-| `final_evaluate` | Published optimizer artifact plus the assigned untouched case view | Other held-out cases and any post-evaluation feedback |
+| `fit` | One grouped training-fold view | Held-out fold, test, and challenge inputs or feedback |
+| `select` | Complete out-of-fold scores and candidate metadata | Test and challenge inputs, answers, responses, and feedback |
 
 An artifact referenced by an allowed directory is not automatically safe. The
 materializer must create a new tree from the allowlist rather than bind-mount a
@@ -217,7 +217,7 @@ cases/<skill>/<case>/
 │   ├── prompt.md                     public task
 │   └── attachments/                  optional public fixtures
 └── judge/
-    ├── rubric.yaml                   semantic criteria plus private threshold
+    ├── rubric.yaml                   semantic criteria and critical violations
     └── expected/
         ├── response.md               judge reference evidence
         └── artifacts/                optional judge reference artifacts
@@ -236,11 +236,11 @@ judge/rubric.yaml  X                                  input/judge/expected-*
 judge/expected/*   X
 ```
 
-The judge view contains rubric criteria and weights but not `passing_score`.
-For judge calibration, the model sees one candidate fixture at a time and never
-sees its reference label or accepted score range. The coordinator applies
-thresholds, calibration labels, ordering checks, and final pass/fail decisions
-after schema-valid model output is returned.
+The judge view contains rubric criteria, weights, and named critical violations.
+For judge validation, the model sees one candidate fixture at a time and never
+sees its reference label. The coordinator validates the expected ordinal
+ordering after schema-valid model output is returned. It does not derive an
+overall case verdict.
 
 ## Repository instruction policy
 
@@ -257,7 +257,7 @@ instruction_policy:
 - `controlled` includes only runner-owned, content-addressed instruction files.
   Candidate `AGENTS.md`, `AGENTS.override.md`, and fallback instruction files
   are excluded from automatic discovery. This is the default for `author`,
-  `calibrate_judge`, and `judge`.
+  `validate_judge`, and `judge`.
 - `none` disables project instruction discovery and includes no instruction
   files beyond the explicit stage prompt.
 
@@ -316,7 +316,7 @@ The adapter selects the named permission profile through its isolated config.
 
 Workspace access is stage-specific:
 
-- `author`, `calibrate_judge`, and `judge` receive read-only workspaces and
+- `author`, `validate_judge`, and `judge` receive read-only workspaces and
   return their semantic result through stdout;
 - a read-only response-only `solve` case uses the same profile;
 - a coding `solve` or local `optimize` stage may receive `"." = "write"`, but
@@ -501,7 +501,7 @@ for inputs, hashes the files, and only then writes them to the external artifact
 store. The agent cannot browse that store or previous output during execution.
 
 Partial output from a timed-out, killed, or invalid attempt is quarantined and
-is never promoted as a completed stage result.
+is never accepted as a completed stage result.
 
 ## Provenance
 
@@ -645,13 +645,13 @@ The implementation is complete only when automated tests prove:
    judge, while `candidate` mode includes and hashes it intentionally;
 10. a solve packet cannot access its rubric, expected answer, judge feedback,
     another split, or another candidate;
-11. an optimize packet cannot access test or challenge data;
+11. fit and select packets cannot access test or challenge data;
 12. read-only stages cannot mutate the workspace, and writable stages can
     mutate only their disposable workspace;
 13. only declared, validated output paths can be extracted;
 14. malformed, oversized, duplicated, or schema-invalid final output is
     rejected;
-15. timeouts and crashes create failed attempts without promoting partial
+15. timeouts and crashes create failed attempts without accepting partial
     output;
 16. no session, cache, workspace mutation, or temporary volume survives the
     attempt; and
@@ -688,7 +688,7 @@ prompt is not an isolation test.
 
 Container isolation reduces host-data leakage but does not make the model or
 provider trusted. Results still depend on the pinned model, evaluator prompt,
-rubric quality, calibration suite, and absence of upstream benchmark leakage.
+rubric quality, judge validation suite, and absence of upstream benchmark leakage.
 
 ## Alternatives rejected
 

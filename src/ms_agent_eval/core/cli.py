@@ -46,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
     setup.add_argument("--workspace", type=Path)
 
-    init = commands.add_parser("init", help="Create a schema-v9 incremental DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v11 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -56,7 +56,21 @@ def _parser() -> argparse.ArgumentParser:
     skills.add_argument("--skill-file", action="append")
     init.add_argument("--cases", type=Path, default=Path("cases"))
     init.add_argument("--workspace", type=Path, default=Path("workspace.yaml"))
-    init.add_argument("--api-base-url", required=True)
+    endpoint_source = init.add_mutually_exclusive_group(required=True)
+    endpoint_source.add_argument("--api-base-url")
+    endpoint_source.add_argument(
+        "--endpoint",
+        action="append",
+        nargs=3,
+        metavar=("ID", "BASE_URL", "MAX_CONCURRENT_REQUESTS"),
+        help="Add a named endpoint replica; repeat to create a pool.",
+    )
+    init.add_argument(
+        "--api-max-concurrent-requests",
+        type=int,
+        default=1,
+        help="Capacity for the single --api-base-url endpoint (default: 1).",
+    )
     init.add_argument("--api-key-env")
     init.add_argument("--solver-model", required=True)
     init.add_argument("--judge-model", required=True)
@@ -99,11 +113,11 @@ def _parser() -> argparse.ArgumentParser:
         "--through",
         choices=(
             "author",
-            "calibrate_judge",
+            "validate_judge",
             "solve",
             "judge",
-            "optimize",
-            "final_evaluate",
+            "fit",
+            "select",
             "aggregate",
         ),
     )
@@ -122,11 +136,11 @@ def _parser() -> argparse.ArgumentParser:
         "stage_kind",
         choices=(
             "author",
-            "calibrate_judge",
+            "validate_judge",
             "solve",
             "judge",
-            "optimize",
-            "final_evaluate",
+            "fit",
+            "select",
             "aggregate",
         ),
     )
@@ -195,6 +209,31 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         skills_block = {"directory": arguments.skills_directory}
     else:
         skills_block = {"files": arguments.skill_file}
+    api_endpoints = None
+    if arguments.endpoint:
+        if arguments.api_max_concurrent_requests != 1:
+            raise ConfigurationError(
+                "--api-max-concurrent-requests is only valid with --api-base-url"
+            )
+        api_endpoints = []
+        for endpoint_id, base_url, raw_capacity in arguments.endpoint:
+            try:
+                capacity = int(raw_capacity)
+            except ValueError as error:
+                raise ConfigurationError(
+                    "--endpoint MAX_CONCURRENT_REQUESTS must be a positive integer"
+                ) from error
+            if capacity < 1:
+                raise ConfigurationError(
+                    "--endpoint MAX_CONCURRENT_REQUESTS must be a positive integer"
+                )
+            api_endpoints.append(
+                {
+                    "id": endpoint_id,
+                    "base_url": base_url,
+                    "max_concurrent_requests": capacity,
+                }
+            )
     template = build_workspace_template(
         workspace_id=arguments.id,
         repository_url=arguments.repo,
@@ -203,6 +242,8 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         skills=skills_block,
         cases_directory=cases.as_posix(),
         api_base_url=arguments.api_base_url,
+        api_max_concurrent_requests=arguments.api_max_concurrent_requests,
+        api_endpoints=api_endpoints,
         api_key_env=arguments.api_key_env,
         solver_model=arguments.solver_model,
         judge_model=arguments.judge_model,

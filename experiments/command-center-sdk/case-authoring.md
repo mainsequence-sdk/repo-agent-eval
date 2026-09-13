@@ -6,7 +6,7 @@ write rigorous, grounded cases directly into the versioned case bank. Case
 authoring is the configured `author` stage; solver and judge are separate later
 stages. Create one package per campaign slot and
 multiple materially different packages per skill. The same campaign must create
-or update the complete judge-calibration corpus; calibration is not a separate
+or update the complete judge-validation corpus; judge validation is not a separate
 manual follow-up.
 
 ## Locked authoring basis
@@ -115,11 +115,11 @@ Read seven authoring inputs:
    authoring sources.
 4. `coverage_request`: the behavior, risk, misconception, or gap requested for
    this invocation.
-5. `existing_case_summaries`: promoted cases that must not be duplicated.
+5. `existing_case_summaries`: reviewed cases that must not be duplicated.
 6. `cases/coverage.yaml`: the complete capability catalog and required primary
    depth for every selected skill.
-7. `judge-calibration/manifest.yaml` plus every referenced candidate response,
-   to create, audit, or update calibration with the case campaign.
+7. `judge-validation/manifest.yaml` plus every referenced candidate response,
+   to create, audit, or update judge validation with the case campaign.
 
 Use evidence in this order:
 
@@ -453,7 +453,6 @@ alternatives that preserve the required contracts.
 
 Return a rubric mapping with exactly:
 
-- `passing_score`: a number from 0 through 1;
 - `criteria`: a non-empty list of mappings with `id`, `weight`, and
   `description`; and
 - `hard_failures`: a list of mappings with `id` and `description`, or an empty
@@ -513,27 +512,29 @@ rewriting prose does not make an independent case.
 
 Return one lowercase semantic `leakage_group`. Cases exposing the same
 underlying solution, tutorial flow, project defect, contract fixture, or
-misconception must share a group so they cannot cross train, validation, test,
-and challenge boundaries. Do not choose or name a split.
+misconception must share a group so they cannot cross train, test, and challenge
+boundaries. Do not choose or name a split.
 
-DSPy optimization may load train and validation only. The compiled state-only
-program must be published before untouched test cases are loaded. Test and
-challenge results must never influence authoring instructions, case wording,
+DSPy optimization may load training cases only during fitting and selection.
+Model selection uses grouped K-fold cross-validation within the training split.
+After selecting the highest-mean out-of-fold candidate, refit it on all training
+cases and evaluate the untouched test set once. Test and challenge results must
+never influence authoring instructions, case wording,
 reference answers, rubrics, demonstrations, or optimizer settings.
 
-Reviewed train/validation examples may later support distillation or
+Reviewed train examples may later support distillation or
 fine-tuning exports, but those exports remain outside Git and retain source-set,
 authoring, case, split, and review provenance. Test and challenge prompts,
 answers, responses, and judge feedback are never training material.
 
-## Mandatory judge-calibration deliverable
+## Mandatory judge-validation deliverable
 
-Judge calibration is part of case authoring. Do not stop after writing cases,
+Judge validation is part of case authoring. Do not stop after writing cases,
 coverage metadata, and grouped splits, and do not tell the user to populate the
 folder later. Before returning from every campaign, Codex must create or update:
 
 ```text
-judge-calibration/
+judge-validation/
 ├── manifest.yaml
 ├── strong.md
 ├── partial.md
@@ -543,46 +544,46 @@ judge-calibration/
 ```
 
 Additional fixtures are allowed where the rubric set needs broader coverage.
-The minimum `manifest.yaml` uses schema version 2 and contains at least one
+The minimum `manifest.yaml` uses schema version 3 and contains at least one
 fixture for every exact label: `strong`, `partial`, `incorrect`,
 `contradictory`, and `adversarial`.
 
 ```yaml
-schema_version: 2
+schema_version: 3
 fixtures:
   - id: strong-example
-    case: existing-train-or-validation-case-id
+    case: existing-training-case-id
     candidate: strong.md
     label: strong
-    score_range: [0.9, 1.0]
 ```
 
-Each fixture id is unique, references an existing promoted Command Center case,
-uses a safe candidate path relative to `judge-calibration/`, and declares an
-inclusive ordered range inside `[0, 1]`. Codex writes controlled candidates
+Each fixture id is unique, references an existing reviewed Command Center
+training case, and uses a safe candidate path relative to
+`judge-validation/`. Codex writes controlled candidates
 specific to the referenced prompt, expected response, rubric, and selected
 skill:
 
-- `strong` is correct and complete and must pass;
-- `partial` makes meaningful progress but has material omissions and must fail;
-- `incorrect` is substantively wrong or non-responsive and must fail;
+- `strong` is correct and complete;
+- `partial` makes meaningful progress but has material omissions;
+- `incorrect` is substantively wrong or non-responsive;
 - `contradictory` conflicts with itself or the locked SDK evidence and must
-  fail; and
+  be recognized as inconsistent; and
 - `adversarial` tries to manipulate the judge or override the rubric and must
-  fail without containing secrets or executable attack instructions.
+  contain no secrets or executable attack instructions.
 
-Choose non-overlapping score ranges that permit the strict runtime ordering
-`strong > partial > incorrect/contradictory/adversarial`. Exercise real semantic
+The runtime checks only the strict ordinal relation
+`strong > partial > incorrect/contradictory/adversarial`; it applies no score
+range or cutoff. Exercise real semantic
 criteria and hard failures rather than keywords. Never use actual solver
 responses, judge outputs, optimizer traces, results, or held-out feedback as
 fixtures.
 
-Because this workspace includes DSPy optimization, fixtures may reference train
-and validation cases only—never test or challenge. If there is no eligible
+Because this workspace includes DSPy optimization, fixtures may reference
+training cases only—never test or challenge. If there is no eligible
 representative case, author and split one instead of weakening the requirement.
-Review calibration whenever a referenced prompt, expected response, rubric,
-case id, or split changes. Calibration inputs are versioned with the experiment;
-calibration execution records stay under the external data root.
+Review judge validation whenever a referenced prompt, expected response, rubric,
+case id, or split changes. Judge-validation inputs are versioned with the experiment;
+judge-validation execution records stay under the external data root.
 
 ## Versioned case package
 
@@ -600,12 +601,11 @@ hash, and the framework-computed case-content hash. Use
 `pending` only while calculating the final case-content hash. The prompt and
 expected response must not be identical.
 
-`solver/` is the complete public surface. Never expose `case.yaml`, `judge/`,
-pass thresholds, calibration labels, or calibration ranges to a solver. Never
+`solver/` is the complete public surface. Never expose `case.yaml`, `judge/`, or
+judge-validation labels to a solver. Never
 mount the canonical case package into a model runtime: the coordinator creates
 separate solver and judge stage views. The judge may see the task, candidate,
-rubric criteria, reference evidence, and skill context, while the pass
-threshold remains coordinator-only.
+rubric criteria, reference evidence, and skill context.
 
 ## Final self-review
 
@@ -630,8 +630,7 @@ Before returning, verify:
 - Expected artifacts exist only when requested and use safe relative paths.
 - Source paths are exact, relevant, immutable, and non-empty.
 - The leakage group keeps related cases together.
-- `judge-calibration/manifest.yaml` and its candidates cover all five labels,
-  reference eligible existing train/validation cases, and use defensible score
-  ranges.
+- `judge-validation/manifest.yaml` and its candidates cover all five labels,
+  reference eligible existing training cases, and define no numeric ranges.
 - No held-out feedback, judge output, optimizer trace, secret, mutable checkout,
   or unsupported external fact appears in the case.

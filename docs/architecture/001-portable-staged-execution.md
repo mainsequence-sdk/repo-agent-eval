@@ -13,7 +13,7 @@ parts of an experiment:
 - case authoring is performed directly by the active Codex session;
 - solver and judge calls are executed synchronously through an
   OpenAI-compatible endpoint;
-- judge calibration is embedded inside the run before solver execution; and
+- judge validation is embedded inside the run before solver execution; and
 - DSPy optimization and held-out evaluation are controlled by one monolithic
   runner invocation.
 
@@ -38,10 +38,10 @@ executor adapter.
 Experiment coordinator
         │
         ├── author cases ───── remote endpoint OR local harness
-        ├── calibrate judge ── remote endpoint OR local harness
+        ├── validate judge ─── remote endpoint OR local harness
         ├── solve cases ────── remote endpoint OR local harness
         ├── judge responses ── remote endpoint OR local harness
-        └── optimize/validate ─ remote worker OR local process/harness
+        └── fit/select ─────── remote worker OR local process/harness
 ```
 
 The coordinator owns experiment state and artifact identity. Executors perform
@@ -95,12 +95,12 @@ The coordinator recognizes these stage kinds:
 
 | Stage | Main input | Main output | Sensitive visibility |
 | --- | --- | --- | --- |
-| `author` | Locked instructions, capability catalog, source evidence, campaign | Candidate or promoted case packages | No solver responses, judge results, optimizer traces, or held-out feedback |
-| `calibrate_judge` | Calibration fixtures, case rubrics, expected evidence | Typed calibration judgments and pass/fail result | May see calibration-only hidden material |
+| `author` | Locked instructions, capability catalog, source evidence, campaign | Candidate or reviewed case packages | No solver responses, judge results, optimizer traces, or held-out feedback |
+| `validate_judge` | Judge-validation fixtures, case rubrics, expected evidence | Fixture scores and ordinal-consistency result | May see judge-validation-only hidden material |
+| `fit` | One grouped cross-validation training fold or the full training set | State-only DSPy artifact | Never loads test/challenge inputs or results |
 | `solve` | Global context, one skill context, case prompt | Candidate response and optional artifacts | Never sees rubric, expected response, or judge feedback |
 | `judge` | Prompt, skill context, rubric, expected evidence, candidate response | Criterion scores, hard failures, feedback | Sees hidden judging material for its assigned case only |
-| `optimize` | Train/validation cases and permitted results | Published state-only DSPy artifact | Never loads test/challenge inputs or results |
-| `final_evaluate` | Published optimizer artifact and untouched test cases | Solver responses and judge evaluations | Test data becomes visible only after publication |
+| `select` | Complete out-of-fold scores for every candidate | Candidate means and deterministic argmax | Never loads test/challenge inputs or results |
 | `aggregate` | Validated evaluation records | Run summary and report inputs | Deterministic; no model is required |
 
 Source resolution, schema validation, hash verification, split calculation,
@@ -192,10 +192,19 @@ environment or provider credential store.
 
 ```yaml
 executors:
-  remote-qwen:
+  lan-inference:
     type: endpoint
     adapter: openai_compatible
-    base_url: http://192.168.1.10:11434/v1
+    endpoints:
+      - id: llama-cpp-17-18081
+        base_url: http://192.168.1.17:18081/v1
+        max_concurrent_requests: 4
+      - id: llama-cpp-17-18080
+        base_url: http://192.168.1.17:18080/v1
+        max_concurrent_requests: 4
+      - id: llama-server-10-11436
+        base_url: http://192.168.1.10:11436/v1
+        max_concurrent_requests: 8
 
   local-codex:
     type: harness
@@ -207,11 +216,11 @@ stages:
     model: gpt-5.6-sol
 
   solve:
-    executor: remote-qwen
+    executor: lan-inference
     model: qwen3.6:27b-coding
 
   judge:
-    executor: remote-qwen
+    executor: lan-inference
     model: qwen3.6:27b-coding
 ```
 
@@ -281,24 +290,25 @@ root. They are not committed to the framework or experiment repository.
 ## Evaluation integrity
 
 Solver and judge are distinct stage roles, but may deliberately use the same
-configured model identity. A judge must pass the locked calibration stage
+configured model identity. A judge must pass the locked judge validation stage
 before its judgments can complete the run. The MainSequence experiment uses
 `qwen3.6:27b-coding` for both roles and records the role on every call.
 
-The protocol permits a development run to reuse an authoring harness as the
+The protocol permits a pilot run to reuse an authoring harness as the
 judge, because executor portability and independence policy are separate
 concerns. Such a run must record the shared executor/session relationship and
 be marked non-independent. Benchmark-quality runs should use an independent
 judge task and must never expose solver-only or held-out information across
 stage boundaries.
 
-Optimization retains the existing firewall:
+Optimization enforces this firewall:
 
-1. train cases are available to compilation;
-2. validation results may guide the optimization run;
-3. a state-only compiled artifact is persisted and published;
-4. only then may `final_evaluate` load untouched test cases; and
-5. test/challenge results never flow back into authoring or optimization.
+1. grouped K-fold fitting and model selection use training cases only;
+2. every candidate receives one out-of-fold score per training case;
+3. selection maximizes mean out-of-fold score without a cutoff;
+4. the selected configuration is refit on all training cases;
+5. test is evaluated once and never influences selection; and
+6. challenge results never flow back into authoring or optimization.
 
 ## CLI direction
 
@@ -373,15 +383,15 @@ same validation as endpoint results.
 1. Define versioned stage-packet, stage-result, transition, and executor schemas.
 2. Add append-only stage persistence and run state reconstruction to the
    external artifact store.
-3. Split the current runner into coordinator operations for calibration, solve,
-   judge, aggregation, optimization, publication, and final evaluation.
+3. Split the current runner into coordinator operations for judge validation,
+   fit, solve, judge, selection, and aggregation.
 4. Reimplement the current OpenAI-compatible path as the first endpoint
    executor.
 5. Add artifact-exchange prepare/claim/submit commands and validate round trips
    without a model dependency.
 6. Add the isolated Codex CLI harness executor defined by ADR-002.
 7. Move case authoring onto the same portable contract while preserving its
-   write/review/promotion boundaries.
+   write/review boundaries.
 8. Migrate workspace configuration to separate executors, models, and stage
    assignments; reject the old monolithic schema rather than retaining shims.
 9. Prove full-run equivalence, mixed-executor runs, interruption recovery,
@@ -397,9 +407,8 @@ This decision is implemented only when:
 - a full run invokes exactly the same stage operations as manual execution;
 - completed stage results are never recomputed unless explicitly retried;
 - solver packets cannot resolve hidden judging material;
-- judge calibration remains a hard prerequisite for accepted judgments;
-- optimization cannot resolve test/challenge inputs before compiled-state
-  publication;
+- judge validation remains a hard prerequisite for accepted judgments;
+- fitting and model selection cannot resolve test/challenge inputs;
 - all stage evidence is content-addressed outside Git;
 - secrets are absent from packets, results, logs, and content identities; and
 - tests cover restart, duplicate submission, conflicting submission, expired

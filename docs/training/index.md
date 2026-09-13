@@ -1,136 +1,57 @@
-# Training and Optimization
+# Training and Model Selection
 
-In MS Agent Eval, “training” means compiling a DSPy solver program from reviewed
-train cases. The current framework does not update model weights and does not
-produce a fine-tuned model. Its primary training output is a content-addressed,
-state-only DSPy JSON artifact.
+In MS Agent Eval, training means fitting a DSPy solver from reviewed training
+cases. The framework does not update LLM weights. Its fitted output is a
+content-addressed, state-only DSPy JSON artifact.
 
-## Split and lifecycle boundaries
+## Method
 
 ```mermaid
 flowchart LR
-    Cases[Reviewed case bank] --> Groups[Leakage groups]
-    Groups --> Train[Train split]
-    Groups --> Validation[Validation split]
-    Groups --> Test[Test split]
-    Groups --> Challenge[Challenge split]
-
-    Calibration[Judge calibration] --> Compile
-    Train --> Compile[LabeledFewShot compile]
-    Compile --> Publish[Publish immutable DSPy state]
-    Publish --> ValidationSolve[Validation solve]
-    Dev --> DevSolve
-    ValidationSolve --> ValidationJudge[Validation judge]
-    DevJudge --> Boundary{Record final-evaluation boundary}
-    Boundary --> TestSolve[Test solve]
-    Test --> TestSolve
-    TestSolve --> TestJudge[Test judge]
-    TestJudge --> Aggregate[Held-out metrics and evidence]
-
-    Challenge -. never used for optimization .-> Hold[Reserved analysis]
+    Train[Grouped training cases] --> Folds[K deterministic group folds]
+    Candidates[Baseline plus configured k values] --> Fit[Fit on K-1 folds]
+    Folds --> Fit
+    Fit --> OOF[Score held-out fold]
+    OOF --> Select[Argmax mean out-of-fold score]
+    Select --> Refit[Refit on all training cases]
+    Refit --> Test[Evaluate untouched test once]
 ```
 
-Leakage groups, rather than individual prompts, are assigned to splits. Examples
-derived from the same source, defect, design, or likely solution remain in one
-group so near-duplicates cannot cross the training boundary.
+The permanent case splits are `train`, `test`, and optional `challenge`.
+Cross-validation folds are derived within `train`, and all cases sharing a
+leakage group stay together. Test and challenge data are unavailable during
+fitting and model selection.
 
-## Inputs
-
-An optimization experiment requires:
-
-| Input | Purpose |
-| --- | --- |
-| A baseline experiment | Defines the typed DSPy solver, runtime, and ordinary evaluation behavior. |
-| Reviewed train cases | Supply tasks and expected responses used by `LabeledFewShot`. |
-| Validation cases | Measure the compiled candidate before held-out evaluation. |
-| Untouched test cases | Produce the final comparable result after publication. |
-| A calibrated judge | Scores validation and test responses with the locked correctness contract. |
-| Optimizer configuration | Selects `LabeledFewShot` parameters such as `k` and `seed`. |
-| Solver/judge budgets | Bound calls, tokens, and wall-clock time. |
-
-The workspace shape is:
+An optimization experiment declares the candidate hyperparameters and the
+cross-validation procedure:
 
 ```yaml
-experiments:
-  baseline:
-    mode: evaluate
-    solver:
-      dspy:
-        module: Predict
-        signature:
-          inputs: {global_context: str, skill_context: str, task: str}
-          outputs: {response: str}
-    runtime: {type: response_only, python: "3.12"}
-
-  optimize-few-shot:
-    mode: optimize
-    based_on: baseline
-    dataset:
-      train: train
-      validation: validation
-      final_evaluation: test
-    optimizer:
-      name: LabeledFewShot
-      parameters: {k: 2, seed: 0}
-    output:
-      compiled_program: content_addressed_json
+optimize-few-shot:
+  mode: optimize
+  based_on: baseline
+  optimizer:
+    name: LabeledFewShot
+    search:
+      k: [1, 2, 4]
+  cross_validation:
+    folds: 5
+    seed: 0
+  budget:
+    solver: {model_calls: 100, tokens: 250000}
+    judge: {model_calls: 300, tokens: 500000}
+    wall_seconds: 1800
 ```
 
-## What happens during an optimization run
-
-1. The framework locks the repository snapshot, case bytes, grouped splits,
-   authoring policy, capability catalog, model identities, judge program, and
-   calibration corpus.
-2. Judge calibration runs before any solver request. A failed calibration stops
-   the run.
-3. `LabeledFewShot` compiles demonstrations from train cases and publishes
-   state-only JSON; pickle and unsafe LM state are not accepted.
-4. The compiled solver answers validation cases and the calibrated judge scores
-   those responses.
-5. A final-evaluation packet records the compiled artifact and validation
-   judgments before the test assignment is opened.
-6. The same compiled solver answers test cases. The judge scores them without
-   exposing rubrics or expected responses to the solver.
-7. Aggregation emits held-out scores, pass rates, model usage, and artifact
-   identities.
-8. Finalization collects unreachable internal artifacts and deterministically
-   publishes Markdown, CSV, JSON, and per-case reports without an LLM call.
+The baseline (`k=0`) is always included. Selection maximizes mean out-of-fold
+score. Ties prefer smaller `k`, then candidate id. There is no score cutoff.
 
 ## Outputs
 
-Machine-oriented outputs are stored below `workspace.data_root/operations` or
-the default `~/ms_agent_eval/<workspace-id>/operations`. Human-readable derived
-outputs are published automatically below `summary/runs/<run-id>/`.
+The run records fold assignments, every candidate's out-of-fold scores and
+mean, the selected configuration, the final fit on all training cases, the
+single held-out test evaluation, model usage, and content hashes. Reports expose
+continuous scores and named critical violations, not binary pass/fail fields.
 
-| Output | Meaning |
-| --- | --- |
-| Compiled state artifact | Safe JSON state needed to reconstruct the optimized DSPy solver. |
-| Compiled program hash | Stable identity of the published candidate. |
-| Train-case hash | Identity of the exact cases used for compilation. |
-| Validation-assignment hash | Identity of the validation set used before final evaluation. |
-| Test-assignment hash | Identity of the held-out assignment opened after publication. |
-| Stage packets and results | Append-only evidence for calibration, solve, judge, optimization, final evaluation, and aggregation. |
-| Model-call evidence | Rendered requests, responses, usage, latency, model identity, and parameters. |
-| Run summary | Per-case results plus benchmark mean score and pass rate. |
-
-## What training does not produce
-
-- It does not modify the underlying LLM or create model weights.
-- It does not use test or challenge prompts, answers, responses, or judge
-  feedback as training data.
-- It does not make pilot output a benchmark; optimization cannot run in pilot
-  mode.
-- It does not make incompatible runs comparable. Changes to the source, cases,
-  splits, judge, or calibration produce a different locked evaluation identity.
-
-Run the optimization with:
-
-```bash
-uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
-```
-
-See [Evaluation](../evaluation/index.md) for readiness and scoring, and
-[Architecture](../architecture/index.md) for persistence and stage boundaries.
-Detailed references cover the [optimization lifecycle](optimization-lifecycle.md),
-[data splits](data-splits.md), [outputs and artifacts](outputs-and-artifacts.md),
-and [candidate publication](promotion.md).
+See [Data splits and cross-validation](data-splits.md), the
+[optimization lifecycle](optimization-lifecycle.md), and
+[outputs and artifacts](outputs-and-artifacts.md).

@@ -1,4 +1,3 @@
-passing_score: 0.75
 criteria:
   - id: preflight_and_preview
     weight: 0.3

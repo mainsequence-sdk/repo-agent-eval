@@ -1,31 +1,7 @@
-Do not rerun the entire sync. It may calculate another patch bump, create a
-second commit, or collide with the existing tag. Preserve current state and
-inspect:
+The evidence analysis should center **Recover partial maintenance state**: Diagnose and safely resume or unwind a partially completed update or synchronization.
 
-```bash
-git status --short
-git log -1 --decorate --oneline
-git tag --points-at HEAD
-git branch -vv
-git ls-remote --heads origin <current-branch>
-git ls-remote --tags origin refs/tags/v1.4.3
-```
+Local configuration presence and schema validation support only a declaration-level conclusion. They do not prove that the intended identity was selected, that an owned operation completed, or that runtime behavior is correct. The governing boundary is: freeze Git context, protect credentials, update dependency and lock state, refresh managed content from its canonical source, recover partial work, and report validation precisely.
 
-Also inspect the current package version and confirm `uv.lock`/exported
-requirements match the committed version. Re-run `mainsequence
-code-repository current --debug --json` to confirm the attached branch still
-resolves. These observations determine whether the local commit and tag exist,
-whether the branch commit reached the remote despite the client error, whether
-the remote tag exists, and whether anything remains uncommitted.
+The unsupported column should explicitly reject live success or failure claims that require absent state. The response must preserve ambiguity instead of inventing uids, credentials, logs, releases, runs, or outputs.
 
-Choose the smallest documented recovery from the actual state. If both refs
-are already remote, do not push or sync again; verify the remote commit/tag and
-then separately check backend reconciliation if required. If neither ref is
-remote and local state exactly matches the completed sync stages, diagnose the
-network/auth failure and resume only the required publication step through the
-canonical supported workflow. If branch/tag state diverges or is ambiguous,
-stop and report it rather than rewriting history or inventing a tag.
-
-The failed command proves local mutation stages occurred according to its
-output, but it does not prove either remote ref or backend webhook
-reconciliation succeeded.
+The ordered observation column should request the narrowest relevant chain: branch and remote identity, dependency and lock diff, managed-source pin, focused tests, remaining failures, and exact changed state. It should stop when an earlier identity, authorization, or lifecycle prerequisite fails and should preserve unrelated state.

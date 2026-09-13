@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from io import BytesIO
 from uuid import uuid4
 
-from .hashing import canonical_json_bytes, json_value
+from .hashing import canonical_json_bytes, content_hash, json_value
 from .models import ArtifactReference, ModelCallRecord
 from .storage import ArtifactStore
 
@@ -24,11 +24,11 @@ def _failure_kind(error: Exception) -> str:
         return "authentication_error"
     if status_code == 429 or "rate limit" in text:
         return "rate_limit_error"
-    if isinstance(status_code, int) and status_code >= 500:
-        return "provider_server_error"
     if any(token in text for token in ("connection", "connecterror", "timeout", "dns")):
         return "connection_error"
-    return type(error).__name__
+    if isinstance(status_code, int) and status_code >= 500:
+        return "provider_server_error"
+    return type(error).__name__.lower()
 
 
 class ModelCallObserver:
@@ -146,20 +146,22 @@ class ModelCallObserver:
         self.trace_artifacts.append(artifact)
         if self.run_id is None:
             return
-        digest = artifact.content_id.removeprefix("sha256:")
+        attempt_digest = self.attempt_id.removeprefix("sha256:")
+        manifest = {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "packet_id": self.packet_id,
+            "work_id": self.work_id,
+            "attempt_id": self.attempt_id,
+            "experiment_revision_id": self.experiment_revision_id,
+            "stage": self.stage,
+            "trace_artifact": json_value(artifact),
+            "model_call_ids": [item.call_id for item in calls],
+        }
+        observation_digest = content_hash(manifest).removeprefix("sha256:")
         self.store.put_manifest(
-            f"runs/{self.run_id}/traces/{digest}",
-            {
-                "schema_version": 1,
-                "run_id": self.run_id,
-                "packet_id": self.packet_id,
-                "work_id": self.work_id,
-                "attempt_id": self.attempt_id,
-                "experiment_revision_id": self.experiment_revision_id,
-                "stage": self.stage,
-                "trace_artifact": json_value(artifact),
-                "model_call_ids": [item.call_id for item in calls],
-            },
+            f"runs/{self.run_id}/traces/{attempt_digest}-{observation_digest}",
+            manifest,
         )
 
     def _persist(self, record: ModelCallRecord) -> None:

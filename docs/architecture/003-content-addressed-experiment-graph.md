@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-09-13
+- Refined by:
+  [ADR-004: Capacity-Aware Pooled Endpoint Concurrency](004-pooled-endpoint-concurrency.md)
 - Decision owners: MS Agent Eval maintainers
 - Scope: Experiment identity, incremental execution, cross-run stage reuse,
   invalidation, provenance, and artifact retention
@@ -60,7 +62,7 @@ solver program ─────┤                                          │
 solver deployment ──┼──► solver work ──► candidate response ──┤
 compiled state ─────┘                                          │
                                                                ▼
-calibration result ─────────────────────────────────────► judge work
+judge validation result ─────────────────────────────────────► judge work
 judge program and deployment ───────────────────────────►      │
                                                                ▼
                                                        evaluation result
@@ -119,7 +121,7 @@ inputs:
   case_solver_view: sha256:...
   instruction_context: sha256:...
 dependencies:
-  calibration_result: sha256:...
+  judge_validation_result: sha256:...
   compiled_solver_state: sha256:...
 program:
   id: dspy-solver
@@ -172,20 +174,19 @@ Author work is keyed by:
 - author model deployment and generation parameters; and
 - model-visible execution environment.
 
-An exact validated candidate package can be reused. Human review and promotion
-remain a separate boundary: a cached author output is never silently promoted
-into the versioned case bank.
+An exact validated candidate package can be reused. Human review remains a
+separate boundary: a cached author output is never silently accepted into the
+versioned case bank.
 
-### Judge calibration
+### Judge validation
 
-Calibration model work is keyed by fixture ids, candidate-response hashes,
+Judge validation model work is keyed by fixture ids, candidate-response hashes,
 judge-view projections of its cases, judge program, repetitions, judge
 deployment, generation parameters, and execution environment. Private labels
-and acceptable score ranges are not shown to the judge and do not force the
-same scores to be regenerated; the coordinator recomputes the gate and its
-calibration-corpus hash whenever compatible score output is attached. Only a
-validated passing calibration result is published as reusable work. A failed
-calibration remains run evidence, not a reusable success gate.
+are not shown to the judge. The coordinator recomputes the ordinal-consistency
+result and judge-validation-set hash whenever compatible fixture scores are
+attached. Only an ordering-consistent result is reusable; an inconsistent
+result remains run evidence.
 
 ### Solver
 
@@ -205,7 +206,7 @@ hash(
     case judge-view hash,
     candidate response content hash,
     producing solver work and model-deployment hashes,
-    judge calibration result hash,
+    judge validation result hash,
     judge program hash,
     judge model deployment hash,
     judge generation parameters,
@@ -220,20 +221,22 @@ mandatory. Model name plus case identity is not sufficient: stochastic calls
 from the same solver may produce different responses and therefore require
 different judgments.
 
-### Optimize
+### Fit and select
 
-Optimization work is keyed by the ordered train-case projections, permitted
-validation evidence, optimizer implementation and parameters, teacher and
-student deployment identities where applicable, base solver program, seed,
-and output contract. Test and challenge material is forbidden from both the
-node inputs and its transitive dependency graph.
+Fold-specific fitting work is keyed by the ordered training-case projections,
+fold assignment, candidate hyperparameters, optimizer implementation, model
+identities, base solver program, seed, and output contract. Selection work is
+keyed by the complete out-of-fold judgments for every candidate. Test and
+challenge material is forbidden from both nodes and their transitive dependency
+graphs.
 
-### Final evaluation and aggregate
+### Final refit, test evaluation, and aggregate
 
-The final-evaluation boundary is keyed by the published compiled state,
-validation decisions, and held-out assignment hash. Aggregate work is keyed
-by the ordered validated judgment result IDs, split assignments, benchmark or
-pilot mode, and aggregation implementation/policy hash.
+The final refit is keyed by the selected hyperparameters and all training cases.
+Test solving is keyed by that refitted program and the held-out assignment hash.
+Aggregate work is keyed by the ordered test judgment result IDs, split
+assignments, benchmark or pilot mode, and aggregation implementation/policy
+hash.
 
 ## Case projections
 
@@ -344,7 +347,7 @@ immutable effective definition. It is known before stochastic work executes:
 ```text
 experiment_revision_id = hash(
     selected experiment configuration,
-    immutable source, case, split, and calibration identities,
+    immutable source, case, split, and judge-validation identities,
     program, model-deployment, executor, and reuse identities,
     aggregation policy
 )
@@ -370,7 +373,7 @@ that can still reference unchanged nodes from previous revisions.
 Creating an experiment revision persists a schema-v2 definition before any
 stage executes. It contains the selected experiment configuration rather than
 the entire mutable workspace, CAS references for every loaded case,
-calibration, catalog, split, and authoring-policy file, the target and
+judge validation, catalog, split, and authoring-policy file, the target and
 authoring-source snapshot identities, reconstructed context, validation
 result, case projections, judging material, model and execution identities,
 output contracts, and split assignments.
@@ -439,14 +442,14 @@ not be reported as newly consumed capacity.
 
 | Change | Reusable | Invalidated |
 | --- | --- | --- |
-| Judge model or reasoning changes | Author outputs and solver responses | Calibration, judgments, aggregate |
+| Judge model or reasoning changes | Author outputs and solver responses | Judge validation, judgments, aggregate |
 | Rubric or expected response changes | Author source evidence and solver responses | Judgment for that case, aggregate |
-| Solver deployment changes | Cases and compatible judge calibration | Solver responses, dependent judgments, aggregate |
+| Solver deployment changes | Cases and compatible judge validation | Solver responses, dependent judgments, aggregate |
 | Case prompt changes | Source snapshots and unrelated cases | Solver response, judgment, aggregate |
 | Reporting title changes | All model results | Human summary only |
 | Split assignment changes | Compatible solver and judge results | Final gate and aggregate |
-| Author model changes | Source snapshots and policy | Candidate author output and anything based on newly promoted cases |
-| DSPy compiled state changes | Cases and judge calibration | Optimized solver responses and downstream judgments |
+| Author model changes | Source snapshots and policy | Candidate author output and anything based on newly reviewed cases |
+| DSPy compiled state changes | Cases and judge validation | Optimized solver responses and downstream judgments |
 | Aggregation implementation changes | All validated judgments | Aggregate only |
 
 ## Security and trust boundaries

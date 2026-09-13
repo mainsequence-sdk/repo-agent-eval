@@ -131,10 +131,10 @@ def _reasoning_effort(prompt: PromptBackend, role: str) -> str | None:
 
 def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
     cases = len(repository.case_paths()) if repository.cases_root.exists() else 0
-    calibration_manifest = repository.calibration_root / "manifest.yaml"
-    calibration = False
-    if calibration_manifest.is_file():
-        payload = yaml.safe_load(calibration_manifest.read_text(encoding="utf-8"))
+    judge_validation_manifest = repository.judge_validation_root / "manifest.yaml"
+    judge_validation = False
+    if judge_validation_manifest.is_file():
+        payload = yaml.safe_load(judge_validation_manifest.read_text(encoding="utf-8"))
         fixtures = payload.get("fixtures", []) if isinstance(payload, dict) else []
         if not isinstance(fixtures, list):
             fixtures = []
@@ -143,7 +143,7 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
             for fixture in fixtures
             if isinstance(fixture, dict) and isinstance(fixture.get("label"), str)
         }
-        calibration = {
+        judge_validation = {
             "strong",
             "partial",
             "incorrect",
@@ -154,16 +154,16 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
         next_command = (
             "ask Codex to use the case-authoring skill with "
             f"{repository.workspace_file} and create the required cases, splits, "
-            "and judge calibration"
+            "and judge validation"
         )
-    elif not calibration:
+    elif not judge_validation:
         next_command = (
             "ask Codex to continue the case-authoring campaign for "
-            f"{repository.workspace_file} and create the mandatory judge calibration"
+            f"{repository.workspace_file} and create the mandatory judge validation set"
         )
     else:
         next_command = f"ms-agent-eval validate --workspace {repository.workspace_file}"
-    inputs_ready = cases > 0 and calibration
+    inputs_ready = cases > 0 and judge_validation
     has_optimization = any(
         experiment.mode.value == "optimize"
         for experiment in repository.workspace.experiments.values()
@@ -171,8 +171,8 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
     return {
         "source": "configured",
         "instructions": "configured",
-        "promoted_cases": cases,
-        "judge_calibration": "configured" if calibration else "missing",
+        "authored_cases": cases,
+        "judge_validation": "configured" if judge_validation else "missing",
         "baseline": "validate" if inputs_ready else "blocked",
         "optimization": (
             "validate" if inputs_ready else "blocked"
@@ -187,10 +187,10 @@ def _show_checklist(prompt: PromptBackend, checklist: Mapping[str, object]) -> N
     prompt.write("\nWorkspace readiness")
     prompt.write("[configured] immutable source")
     prompt.write("[configured] global instructions and skill selection")
-    cases = int(checklist["promoted_cases"])
-    prompt.write(f"[{'ready' if cases else 'missing'}] promoted cases ({cases})")
-    calibration = str(checklist["judge_calibration"])
-    prompt.write(f"[{'ready' if calibration == 'configured' else 'missing'}] judge calibration")
+    cases = int(checklist["authored_cases"])
+    prompt.write(f"[{'ready' if cases else 'missing'}] authored cases ({cases})")
+    judge_validation = str(checklist["judge_validation"])
+    prompt.write(f"[{'ready' if judge_validation == 'configured' else 'missing'}] judge validation")
     prompt.write(f"[{checklist['baseline']}] baseline run")
     if checklist["optimization"] != "not_configured":
         prompt.write(f"[{checklist['optimization']}] optimization run")
@@ -302,6 +302,10 @@ def run_guided_setup(
         api_base_url = validate_api_base_url(
             prompt.text("OpenAI-compatible API base URL")
         )
+        api_max_concurrent_requests = _positive_integer(
+            prompt.text("Maximum concurrent requests for this endpoint", default="1"),
+            "endpoint maximum concurrent requests",
+        )
         use_api_key = prompt.confirm("Does this API require a key?", default=False)
         api_key = prompt.secret("API key") if use_api_key else None
         api_key_env = "OPENAI_API_KEY" if use_api_key else None
@@ -356,6 +360,7 @@ def run_guided_setup(
             skills=skills,
             cases_directory=cases_directory,
             api_base_url=api_base_url,
+            api_max_concurrent_requests=api_max_concurrent_requests,
             api_key_env=api_key_env,
             solver_model=solver_model,
             judge_model=judge_model,
@@ -397,6 +402,7 @@ def run_guided_setup(
         for unit in validated_units:
             prompt.write(f"  - {unit.unit_id}: {unit.source_path}")
         prompt.write(f"API base URL: {api_base_url}")
+        prompt.write(f"Endpoint capacity: {api_max_concurrent_requests}")
         prompt.write(
             "Stage models: "
             f"author=gpt-5.6-sol, solver={solver_model}, judge={judge_model}"

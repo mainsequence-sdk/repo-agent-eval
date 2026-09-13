@@ -1,0 +1,25 @@
+schema_version: 5
+id: maintenance-bug-auditor-upstream-source-inspection-review
+title: 'Inspect upstream evidence: review'
+skill: maintenance/bug_auditor
+group: maintenance-bug-auditor-upstream-source-inspection
+coverage:
+  primary: upstream-source-inspection
+  supporting:
+  - duplicate-and-escalation-boundary
+  - uncertainty-and-next-actions
+  archetype: review
+  difficulty: complex
+source_paths:
+- agent_scaffold/skills/maintenance/bug_auditor/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:1f3f3d43c3ccfc9a9f8ded24b38a8146cc9feed186ddb3e97817f77daee35cf2
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

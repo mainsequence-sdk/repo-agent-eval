@@ -15,7 +15,7 @@ from ms_agent_eval.programs.dspy.engine import (
 from .authoring import SnapshotContext, load_snapshot_context
 from .errors import ConfigurationError, IntegrityError, PreflightError, ResolutionError
 from .evaluation import (
-    CalibrationCorpus,
+    JudgeValidationCorpus,
     CapabilityCatalog,
     CaseBank,
     SplitManifest,
@@ -65,7 +65,7 @@ class ExperimentLock:
     source_commit: str
     case_bank_hash: str
     split_hash: str
-    calibration_hash: str
+    judge_validation_hash: str
     authoring_instructions_hash: str
     capability_catalog_hash: str
     solver_program_hash: str
@@ -86,7 +86,7 @@ class CompiledWorkspace:
     capability_catalog: CapabilityCatalog
     case_bank: CaseBank
     splits: SplitManifest
-    calibration: CalibrationCorpus
+    judge_validation: JudgeValidationCorpus
     validation: Mapping[str, object]
 
     def experiment_lock(
@@ -126,11 +126,11 @@ class CompiledWorkspace:
         )
         referenced_stage_ids = (
             "author",
-            "calibrate_judge",
+            "validate_judge",
             "solve",
             "judge",
-            "optimize",
-            "final_evaluate",
+            "fit",
+            "select",
             "aggregate",
         )
         referenced_executor_ids = {
@@ -164,7 +164,7 @@ class CompiledWorkspace:
             },
         }
         identity = {
-            "schema_version": 5,
+            "schema_version": 6,
             "id": f"{workspace.id}-{experiment.id}",
             "workspace_id": workspace.id,
             "mode": experiment.mode.value,
@@ -172,7 +172,7 @@ class CompiledWorkspace:
             "source_commit": self.snapshot.resolved_commit,
             "case_bank_hash": self.case_bank.content_hash,
             "split_hash": self.splits.content_hash,
-            "calibration_hash": self.calibration.content_hash,
+            "judge_validation_hash": self.judge_validation.content_hash,
             "authoring_instructions_hash": authoring_hash,
             "capability_catalog_hash": catalog_hash,
             "solver_program_hash": solver_hash,
@@ -222,13 +222,16 @@ class CompiledWorkspace:
                 ],
                 "skills": [
                     {
-                        "id": item.unit_id,
+                        "id": item.id,
                         "path": item.source_path,
                         "content_hash": item.content_hash,
+                        "source_id": item.source_id,
+                        "source_type": item.source_type,
                     }
-                    for item in self.snapshot.units
+                    for item in self.context.instruction_units
                 ],
-                "skill_count": len(self.snapshot.units),
+                "imports": json_value(self.context.instruction_imports),
+                "skill_count": len(self.context.instruction_units),
             },
             "cases": {
                 "count": len(self.case_bank.cases),
@@ -279,9 +282,9 @@ class CompiledWorkspace:
             "judge": {
                 "program_hash": program_hash(create_judge_program()),
                 "model": json_value(next(iter(locks.values())).models["judge"]),
-                "calibration": {
-                    "fixture_count": len(self.calibration.fixtures),
-                    "content_hash": self.calibration.content_hash,
+                "validation": {
+                    "fixture_count": len(self.judge_validation.fixtures),
+                    "content_hash": self.judge_validation.content_hash,
                     "status": "configured",
                 },
             },
@@ -371,6 +374,8 @@ def _load_context(
         snapshot_directory,
         global_paths=repository.workspace.evaluation.instructions.global_paths,
         authoring_snapshots=acquire_authoring_snapshots(repository),
+        workspace_root=repository.root,
+        instruction_imports=repository.workspace.evaluation.instructions.imports,
     )
 
 
@@ -395,7 +400,6 @@ def _validate_splits(repository: WorkspaceRepository, splits: SplitManifest) -> 
         splits,
         seed=policy.seed,
         train=policy.train,
-        validation=policy.validation,
         test=policy.test,
     )
 
@@ -422,7 +426,9 @@ def compile_workspace(
     )
     splits = SplitManifest.load(repository.split_file, case_bank)
     _validate_splits(repository, splits)
-    calibration = CalibrationCorpus.load(repository.calibration_root, case_bank)
+    judge_validation = JudgeValidationCorpus.load(
+        repository.judge_validation_root, case_bank
+    )
     validation = validate_case_bank(
         case_bank,
         capability_catalog=capability_catalog,
@@ -460,7 +466,7 @@ def compile_workspace(
         capability_catalog,
         case_bank,
         splits,
-        calibration,
+        judge_validation,
         validation,
     )
 
@@ -504,14 +510,14 @@ def inspect_workspace(
             repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
         ),
     )
-    calibration = CalibrationCorpus.load(
-        repository.calibration_root,
+    judge_validation = JudgeValidationCorpus.load(
+        repository.judge_validation_root,
         case_bank,
         require_complete=False,
     )
     required_labels = {"strong", "partial", "incorrect", "contradictory", "adversarial"}
-    calibration_labels = {item.label for item in calibration.fixtures}
-    missing_labels = sorted(required_labels - calibration_labels)
+    judge_validation_labels = {item.label for item in judge_validation.fixtures}
+    missing_labels = sorted(required_labels - judge_validation_labels)
 
     values = environment if environment is not None else repository.environment()
     resolved: dict[str, Mapping[str, ResolvedRoleModel]] = {}
@@ -539,7 +545,7 @@ def inspect_workspace(
     if validation["capability_gaps"]:
         blockers.append("case bank does not satisfy required primary capability coverage")
     if missing_labels:
-        blockers.append("judge calibration is missing labels: " + ", ".join(missing_labels))
+        blockers.append("judge validation is missing labels: " + ", ".join(missing_labels))
     if unresolved_models:
         blockers.append("one or more LLM role models are unresolved")
 
@@ -553,7 +559,7 @@ def inspect_workspace(
             capability_catalog,
             case_bank,
             splits,
-            calibration,
+            judge_validation,
             validation,
         )
         locks = {
@@ -600,13 +606,16 @@ def inspect_workspace(
             ],
             "skills": [
                 {
-                    "id": item.unit_id,
+                    "id": item.id,
                     "path": item.source_path,
                     "content_hash": item.content_hash,
+                    "source_id": item.source_id,
+                    "source_type": item.source_type,
                 }
-                for item in snapshot.units
+                for item in context.instruction_units
             ],
-            "skill_count": len(snapshot.units),
+            "imports": json_value(context.instruction_imports),
+            "skill_count": len(context.instruction_units),
         },
         "cases": {
             "count": len(case_bank.cases),
@@ -653,11 +662,11 @@ def inspect_workspace(
         "judge": {
             "program_hash": program_hash(create_judge_program()),
             "model": judge_model,
-            "calibration": {
-                "fixture_count": len(calibration.fixtures),
-                "labels": sorted(calibration_labels),
+            "validation": {
+                "fixture_count": len(judge_validation.fixtures),
+                "labels": sorted(judge_validation_labels),
                 "missing_labels": missing_labels,
-                "content_hash": calibration.content_hash,
+                "content_hash": judge_validation.content_hash,
                 "status": "configured" if not missing_labels else "incomplete",
             },
         },
@@ -700,7 +709,20 @@ def inspect_workspace(
             }
             for experiment_id, experiment in workspace.experiments.items()
         },
-        "executors": json_value(workspace.executors),
+        "executors": {
+            executor_id: {
+                **dict(json_value(executor)),
+                **(
+                    {
+                        "pool_hash": executor.pool_hash,
+                        "total_concurrency": executor.total_concurrency,
+                    }
+                    if executor.endpoints
+                    else {}
+                ),
+            }
+            for executor_id, executor in workspace.executors.items()
+        },
         "stages": json_value(workspace.stages),
     }
 
@@ -714,8 +736,15 @@ def _unresolved_model(
         "provider": executor.adapter,
         "name": configuration.model,
         "deployment_revision": configuration.deployment_revision,
-        "base_url": executor.base_url,
-        "api_key_env": executor.api_key_env,
+        "endpoints": [
+            {
+                "id": endpoint.id,
+                "base_url": endpoint.base_url,
+                "max_concurrent_requests": endpoint.max_concurrent_requests,
+                "api_key_env": endpoint.api_key_env,
+            }
+            for endpoint in executor.endpoints
+        ],
         "reasoning_effort": configuration.reasoning_effort,
         "parameters": dict(configuration.parameters),
     }

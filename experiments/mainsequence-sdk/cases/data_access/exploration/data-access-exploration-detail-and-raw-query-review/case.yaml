@@ -1,0 +1,25 @@
+schema_version: 5
+id: data-access-exploration-detail-and-raw-query-review
+title: 'Inspect details and query safely: review'
+skill: data_access/exploration
+group: data-access-exploration-detail-and-raw-query
+coverage:
+  primary: detail-and-raw-query
+  supporting:
+  - evidence-and-ambiguity
+  - implementation-handoff
+  archetype: review
+  difficulty: complex
+source_paths:
+- agent_scaffold/skills/data_access/exploration/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:a3068932bdf5a608fd81b6a41ad6fa1f12a6d1d7fb6868e2581c2d6f535a0fa3
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

@@ -1,34 +1,35 @@
-# Training Data Splits
+# Data Splits and Cross-Validation
 
-`cases/splits.yaml` assigns leakage groups—not individual prompts—to a split.
-The workspace supplies deterministic ratios and a seed:
+`cases/splits.yaml` assigns leakage groups—not individual prompts—to one of
+three permanent splits:
+
+| Split | Used for fitting? | Used for model selection? | Purpose |
+| --- | --- | --- | --- |
+| Train | Yes | Yes, through grouped K-fold cross-validation | Fit candidates and estimate their generalization within the available training data. |
+| Test | No | No | Evaluate the selected, refitted candidate once. |
+| Challenge | No | No | Optional out-of-distribution or stress evaluation. |
+
+The workspace records deterministic train/test/challenge ratios and a split
+seed. It has no permanent validation or development split.
+
+An optimization experiment separately configures grouped K-fold
+cross-validation:
 
 ```yaml
-evaluation:
-  splits:
-    file: cases/splits.yaml
-    policy:
-      seed: example-foundations-v1
-      train: 0.5
-      validation: 0.2
-      test: 0.2
-      challenge: 0.1
+optimizer:
+  name: LabeledFewShot
+  search:
+    k: [1, 2, 4]
+cross_validation:
+  folds: 5
+  seed: 0
 ```
 
-| Split | Optimization may read it? | Purpose |
-| --- | --- | --- |
-| Train | Yes | Supplies expected responses used to compile demonstrations. |
-| Validation | For evaluation, not compilation | Scores the fixed compiled candidate before final evaluation. |
-| Test | No, until final-evaluation boundary | Produces the held-out benchmark for the published candidate. |
-| Challenge | No | Reserved for separate stress and generalization analysis. |
+For each candidate, every training case receives exactly one out-of-fold score.
+All cases in the same leakage group stay in the same fold. The candidate with
+the highest mean out-of-fold score is selected; ties prefer the smaller `k`,
+then candidate id. The selected configuration is refit on all training cases
+before the test set is loaded.
 
-All paraphrases or variants derived from the same project example, defect,
-architecture slice, fixture, or likely solution share one group. This prevents
-the optimizer from memorizing an answer whose near-duplicate appears in test.
-
-Judge calibration used by a pilot or optimization run may reference train and
-validation cases only. Test/challenge prompts, expected responses, candidates,
-and feedback never become optimization or fine-tuning inputs.
-
-See the [Capability coverage contract](../evaluation/capability-coverage.md) for
-the distinct-leakage-group readiness floor.
+Test and challenge prompts, expected responses, solver responses, judge
+feedback, and metrics never become fitting, selection, or fine-tuning inputs.

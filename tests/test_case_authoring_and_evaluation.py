@@ -6,12 +6,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ms_agent_eval.core.errors import ConfigurationError, IntegrityError
+from ms_agent_eval.core.errors import ConfigurationError, IntegrityError, PreflightError
 from ms_agent_eval.core.evaluation import (
-    CalibrationCorpus,
+    JudgeValidationCorpus,
     CapabilityCatalog,
     CaseBank,
     CaseDefinition,
+    deterministic_group_k_fold,
     deterministic_group_split,
     LlmJudge,
     SplitManifest,
@@ -47,7 +48,7 @@ def test_case_bank_reports_per_skill_case_and_group_coverage(tmp_path: Path) -> 
         source_path="skills/alpha/SKILL.md",
     )
     (repository.cases_root / "splits.yaml").write_text(
-        "schema_version: 2\ngroups:\n  one-group: train\n", encoding="utf-8"
+        "schema_version: 3\ngroups:\n  one-group: train\n", encoding="utf-8"
     )
     bank = CaseBank.discover(repository.cases_root)
     splits = SplitManifest.load(repository.split_file, bank)
@@ -93,7 +94,7 @@ def test_capability_depth_is_a_separate_readiness_gate(tmp_path: Path) -> None:
         source_path="skills/alpha/SKILL.md",
     )
     (repository.cases_root / "splits.yaml").write_text(
-        "schema_version: 2\ngroups:\n  one-group: train\n", encoding="utf-8"
+        "schema_version: 3\ngroups:\n  one-group: train\n", encoding="utf-8"
     )
     bank = CaseBank.discover(repository.cases_root)
     result = validate_case_bank(
@@ -157,15 +158,15 @@ def test_mainsequence_capability_catalog_uses_only_current_time_index_api() -> N
     assert "TimeIndexTableRef" in text
 
 
-def test_experiment_authoring_policies_make_calibration_a_campaign_output() -> None:
+def test_experiment_authoring_policies_make_judge_validation_a_campaign_output() -> None:
     root = Path(__file__).resolve().parents[1]
     for experiment_id in ("mainsequence-sdk", "command-center-sdk"):
         policy = (
             root / "experiments" / experiment_id / "case-authoring.md"
         ).read_text(encoding="utf-8")
-        assert "Mandatory judge-calibration deliverable" in policy
+        assert "Mandatory judge-validation deliverable" in policy
         assert re.search(r"not a separate\s+manual follow-up", policy)
-        assert "judge-calibration/manifest.yaml" in policy
+        assert "judge-validation/manifest.yaml" in policy
         for label in ("strong", "partial", "incorrect", "contradictory", "adversarial"):
             assert f"`{label}`" in policy
 
@@ -177,11 +178,11 @@ def test_judge_program_treats_candidate_response_as_untrusted_data() -> None:
     assert "Assess each criterion independently" in instructions
 
 
-def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None:
+def test_mainsequence_judge_validation_is_complete_and_not_held_out() -> None:
     root = Path(__file__).resolve().parents[1]
     experiment = root / "experiments/mainsequence-sdk"
     bank = CaseBank.discover(experiment / "cases")
-    corpus = CalibrationCorpus.load(experiment / "judge-calibration", bank)
+    corpus = JudgeValidationCorpus.load(experiment / "judge-validation", bank)
     splits = SplitManifest.load(experiment / "cases/splits.yaml", bank)
     cases = {case.id: case for case in bank.cases}
     fixtures = {fixture.label: fixture for fixture in corpus.fixtures}
@@ -194,13 +195,8 @@ def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None
         "adversarial",
     }
     assert all(
-        splits.split_for(cases[fixture.case_id]) in {"train", "validation"}
+        splits.split_for(cases[fixture.case_id]) == "train"
         for fixture in corpus.fixtures
-    )
-    assert fixtures["partial"].maximum_score < fixtures["strong"].minimum_score
-    assert all(
-        fixtures[label].maximum_score < fixtures["partial"].minimum_score
-        for label in ("incorrect", "contradictory", "adversarial")
     )
 
 
@@ -253,7 +249,7 @@ def test_llm_judge_uses_median_votes_and_weighted_arithmetic(tmp_path: Path) -> 
     )
     result = judge.evaluate(case, "answer", skill_context="skill")
     assert result.score == 0.8
-    assert result.passed is True
+    assert result.hard_failures == ()
 
 
 def test_schema_v4_case_rejects_removed_evaluator_field(tmp_path: Path) -> None:
@@ -329,13 +325,12 @@ def test_group_splits_are_reproducible_and_policy_checked(tmp_path: Path) -> Non
         case.group,
         seed="fixed-seed",
         train=0.5,
-        validation=0.2,
-        test=0.2,
+        test=0.3,
     )
-    wrong = next(item for item in ("train", "validation", "test", "challenge") if item != expected)
+    wrong = next(item for item in ("train", "test", "challenge") if item != expected)
     split_file = repository.cases_root / "splits.yaml"
     split_file.write_text(
-        f"schema_version: 2\ngroups:\n  {case.group}: {wrong}\n", encoding="utf-8"
+        f"schema_version: 3\ngroups:\n  {case.group}: {wrong}\n", encoding="utf-8"
     )
     manifest = SplitManifest.load(split_file, CaseBank.discover(repository.cases_root))
 
@@ -344,6 +339,37 @@ def test_group_splits_are_reproducible_and_policy_checked(tmp_path: Path) -> Non
             manifest,
             seed="fixed-seed",
             train=0.5,
-            validation=0.2,
-            test=0.2,
+            test=0.3,
         )
+
+
+def test_group_k_fold_is_deterministic_balanced_and_leakage_safe(tmp_path: Path) -> None:
+    repository = create_workspace(tmp_path / "workspace")
+    from .helpers import create_case
+
+    cases = tuple(
+        create_case(
+            repository.cases_root,
+            case_id=f"case-{index}",
+            skill="alpha",
+            group=group,
+            source_path="skills/alpha/SKILL.md",
+        )
+        for index, group in enumerate(
+            ("large", "large", "large", "medium", "medium", "small"),
+            start=1,
+        )
+    )
+
+    assignments = deterministic_group_k_fold(cases, folds=2, seed=17)
+    assert assignments == deterministic_group_k_fold(cases, folds=2, seed=17)
+    assert {item.group for item in assignments} == {"large", "medium", "small"}
+    fold_by_group = {item.group: item.fold for item in assignments}
+    fold_sizes = [
+        sum(1 for case in cases if fold_by_group[case.group] == fold)
+        for fold in range(2)
+    ]
+    assert sorted(fold_sizes) == [3, 3]
+
+    with pytest.raises(PreflightError, match="training leakage groups"):
+        deterministic_group_k_fold(cases, folds=4, seed=17)

@@ -1,0 +1,24 @@
+schema_version: 5
+id: data-publishing-meta-tables-integration-01-construction
+title: 'Select the management mode: design'
+skill: data_publishing/meta_tables
+group: data-publishing-meta-tables-integration-01
+coverage:
+  primary: management-mode-selection
+  supporting:
+  - sqlalchemy-source-contract
+  archetype: construction
+  difficulty: easy
+source_paths:
+- agent_scaffold/skills/data_publishing/meta_tables/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:f0b4cd2bab4bdf3a5290f7b95291314a96058326e010d857f3c3d7ffe10a90d5
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

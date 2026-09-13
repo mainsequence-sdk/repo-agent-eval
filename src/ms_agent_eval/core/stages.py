@@ -25,11 +25,11 @@ _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 class StageKind(str, Enum):
     AUTHOR = "author"
-    CALIBRATE_JUDGE = "calibrate_judge"
+    VALIDATE_JUDGE = "validate_judge"
     SOLVE = "solve"
     JUDGE = "judge"
-    OPTIMIZE = "optimize"
-    FINAL_EVALUATE = "final_evaluate"
+    FIT = "fit"
+    SELECT = "select"
     AGGREGATE = "aggregate"
 
 

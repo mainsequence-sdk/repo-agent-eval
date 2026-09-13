@@ -1,14 +1,25 @@
-passing_score: 0.75
 criteria:
-  - id: manual_image
-    weight: 0.3
-    description: Full credit requires the exact ready image-202 for the pinned manual Job and rejects latest or blank image behavior; partial credit chooses the UID without explaining exactness; zero credit omits the image or uses moving state.
-  - id: automatic_image
-    weight: 0.35
-    description: Full credit enables automatic deployment without caller image selection and explains backend derivation from the persisted synchronized commit plus future exact promotions; partial credit gets flags right with incomplete ownership; zero credit combines the flags or treats automatic as latest/unpushed code.
-  - id: execution_evidence
-    weight: 0.35
-    description: Full credit distinguishes creation from execution and requires Job, image/commit, JobRun status, and owner-scoped log evidence; partial credit inspects a run but omits important identity evidence; zero credit calls creation successful execution.
+- id: central_correctness
+  weight: 0.45
+  description: Full credit correctly applies distinguish job execution modes to the supplied scenario and reaches
+    a safe, current design; partial credit reaches the main outcome but misses a material edge or lifecycle consequence;
+    zero credit preserves the flawed approach or recommends unsupported behavior.
+- id: instruction_application
+  weight: 0.25
+  description: Full credit follows the selected skill's ordering, ownership, identity, and stop boundaries; partial
+    credit uses the right surface with incomplete sequencing or scope; zero credit bypasses the owning skill, uses
+    removed behavior, or crosses an authorization boundary.
+- id: evidence_and_reasoning
+  weight: 0.2
+  description: Full credit distinguishes supplied facts, design conclusions, and live observations still required
+    while explaining consequences; partial credit has sound conclusions with weak evidence boundaries; zero credit
+    fabricates execution, identifiers, logs, or deployment state.
+- id: completeness_and_safety
+  weight: 0.1
+  description: Full credit covers the bounded deliverable, protects secrets and unrelated state, and gives an actionable
+    evidence checklist; partial credit omits one secondary safeguard; zero credit exposes secrets, recommends destructive
+    broad changes, or leaves the central deliverable unusable.
 hard_failures:
-  - id: invalid_image_mode
-    description: The answer endorses a manual Job without an exact image or an automatic Job with a caller-selected related image.
+- id: fabricated_live_success
+  description: The response claims it executed, deployed, authenticated, or observed live behavior when the prompt
+    supplies no such evidence.

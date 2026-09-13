@@ -1,17 +1,19 @@
-# Task
+# Goal
+Review the proposed `eval-cc6b2072` design for this scenario: The team is working on a relational account, instrument, and position model graph. The requested slice is 'Separate logical and physical identity' and the concrete outcome is to keep logical MetaTable identity distinct from physical storage naming and contract hashes.
 
-Review this proposed platform-managed row table:
+# Supplied evidence
+- Required behavior: Keep logical MetaTable identity distinct from physical storage naming and contract hashes.
+- Two visible resources share the label `eval-cc6b2072`, but their stable uids, namespaces, and owners differ.
+- The governing boundary is: define stable logical and physical identities, explicit grain and keys, real foreign keys, deliberate cascades, rich column metadata, and migration-owned evolution.
+- A success claim must be supported by the model graph, constraints, migration revision, governed operation result, and ownership boundary.
+- Proposed implementation: The current proposal uses display names as identities, stores relationships as unrelated strings, omits composite uniqueness, and registers schemas at runtime.
+- The proposal reports no runtime logs, deployment run, terminal task state, or representative output beyond the statements above.
 
-```python
-class WatchlistItem(PlatformManagedMetaTable, Base):
-    __tablename__ = compute_metatable_contract_hash(columns=["user", "symbol"])
-    __metatable_identifier__ = __tablename__
-    user = mapped_column(String, primary_key=True)
-    symbol = mapped_column(String, primary_key=True)
-    note = mapped_column(String, nullable=True)
-```
+# Constraints
+- Use only the current behavior in the supplied skill context.
+- Treat the proposal as review input, not as evidence that an operation succeeded.
+- Preserve unrelated resources, access, configuration, and repository state.
+- Do not perform or claim live execution.
 
-The repository is `research_portal`; the intended grain is one row per human
-user and symbol. Explain the identity and contract problems and show the key
-metadata corrections. The schema will be managed through an existing Alembic
-MetaTable provider. Do not implement or apply a migration.
+# Deliverable
+Identify the material design errors, provide a corrected ordered design, and state exactly which observations would be required before success could be claimed.

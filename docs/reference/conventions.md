@@ -6,14 +6,14 @@
   provenance, LLM judging, optimization governance, isolation, and reporting.
 - `workspace.yaml` owns a target repository URL/ref, optional case-authoring
   reference repositories, exact instruction selection, stage executors and models, case
-  location, judge calibration, and experiments.
+  location, judge validation, and experiments.
 - `case-authoring.md` owns the durable policy used to generate evaluation cases;
   `workspace.yaml` points to it explicitly.
 - `cases/coverage.yaml` owns the complete skill-to-capability decomposition and
   minimum number of primary cases required for every capability.
 - `cases/README.md` explains that general coverage contract inside every newly
   generated experiment workspace.
-- Promoted case packages and reviewed, reference-labelled calibration inputs
+- Reviewed case packages and reference-labelled judge-validation inputs
   are versioned.
 - External storage owns repository snapshots, solver
   calls, judge calls, compiled state, evaluations, and reports.
@@ -44,7 +44,7 @@ An evaluated repository must never become a core dependency or default path.
   reference snapshots, the user's campaign request, and existing case packages.
   It never sees solver or judge evidence.
   The same campaign owns the capability catalog, grouped splits, and complete
-  judge-calibration inputs; calibration is not deferred to a manual follow-up.
+  judge-validation inputs; judge validation is not deferred to a manual follow-up.
 - `solve` and `judge` are distinct stage roles; they may resolve to the same
   model and executor when explicitly configured.
 - The solver sees global context, skill context, and task only.
@@ -55,7 +55,7 @@ An evaluated repository must never become a core dependency or default path.
 
 ## Cases and semantic judging
 
-A promoted case contains:
+A reviewed case contains:
 
 ```text
 case.yaml
@@ -74,16 +74,16 @@ that change package identity invalidate provenance.
 The coordinator never mounts this canonical package into a model runtime. It
 projects `solver/` and `judge/` into independent, immutable stage views so a
 solver cannot read judging material and a judge cannot read coordinator-only
-pass thresholds or calibration labels/ranges.
+fixture labels.
 
 One Codex-authored package is one atomic case so it can be validated and
 reviewed independently. It is not adequate coverage for
 a skill. Every requested count is a lower bound and every selected skill gets at
 least three materially distinct cases. `evaluation.cases.coverage` defines the
-catalog plus minimum promoted cases and distinct leakage groups required per
+catalog plus minimum reviewed cases and distinct leakage groups required per
 skill. Scored-run preflight blocks until the catalog is complete, every
-capability has its required primary-case depth, and both numeric thresholds are
-met. Supporting tags do not satisfy primary coverage.
+capability has its required primary-case depth, and both minimum counts are met.
+Supporting tags do not satisfy primary coverage.
 
 See [Capability coverage](../evaluation/capability-coverage.md) for the authoritative field
 definitions, decomposition workflow, readiness formula, and change rules.
@@ -112,7 +112,7 @@ judges, or manual-review scoring alternatives. Deterministic code may only:
 - take the median criterion score across judge votes;
 - apply majority voting to declared hard failures.
 
-Judge calibration uses reviewed, reference-labelled strong, partial, incorrect,
+Judge validation uses reviewed, reference-labelled strong, partial, incorrect,
 contradictory, and adversarial candidate responses created with the case bank.
 The candidates are controlled authoring inputs, never real solver or judge
 outputs. Failure blocks every solver call.
@@ -121,16 +121,17 @@ outputs. Failure blocks every solver call.
 
 - Assign a leakage-resistant group, not each paraphrase, to a split.
 - Codex assigns a semantic group; the configured deterministic policy maps it to a split.
-- Optimization can load train and validation only.
-- Judge calibration for optimization may reference train/validation cases,
+- Optimization derives grouped K-fold cross-validation within train.
+- Judge validation may reference training cases,
   never test/challenge cases.
-- Publish state-only DSPy JSON with pickle and unsafe LM state disabled.
-- Load untouched test data only after candidate publication.
+- Persist state-only DSPy JSON with pickle and unsafe LM state disabled.
+- Select by mean out-of-fold score, refit on all training cases, and evaluate
+  untouched test data once.
 - Never use test results to revise cases, prompts, demonstrations, or optimizer
   parameters.
 - Synthetic examples derived from one project example, defect, architecture
   slice, or likely solution share one leakage group across all paraphrases.
-- Distillation/fine-tuning exports may use reviewed promoted train/validation
+- Distillation/fine-tuning exports may use reviewed training
   material only, remain outside Git, and retain source-set, authoring, case,
   split, and review provenance. Test/challenge prompts, answers, responses, and
   judge feedback never become training data.
@@ -148,6 +149,6 @@ outputs. Failure blocks every solver call.
 ## Results
 
 Every comparison locks repository commit/snapshot, case bytes and split,
-authoring policy identity, solver program/model, judge program/model, calibration corpus,
+authoring policy identity, solver program/model, judge program/model, judge-validation set,
 runtime, and compiled artifact. Reports must not aggregate records across a
 changed correctness contract without labeling the difference.

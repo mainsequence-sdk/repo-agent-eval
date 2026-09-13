@@ -1,27 +1,7 @@
-This is natural-language discovery for published time-indexed data, so start
-with semantic metadata search rather than list filters or column mode:
+The plan should make **Perform semantic discovery** the central decision: Use semantic catalog discovery to identify plausible resources without inventing identifiers.
 
-```bash
-mainsequence time-index-table search "daily adjusted close for US exchange-traded funds"
-```
+For `eval-e6617059`, first freeze the repository and environment identities and resolve every referenced resource rather than guessing identifiers. Then apply the selected skill's ordered operations. The governing boundary is: classify MetaTable versus time-index storage first, discover semantically, narrow with supported filters and columns, inspect details, and preserve ambiguity. The plan should preserve the distinction between configuration, the concrete operation or release, and later runtime state.
 
-Review the paginated candidates and retain, at minimum, each relevant
-`TimeIndexMetaTable` UID, identifier, namespace, description, physical table
-name, cadence, columns, and its data-source UID. If a
-`time_indexed_profile.time_index_meta_table_uid` is present, confirm it matches
-the parent table UID. Only after selecting a candidate should detail be used:
+The response should explicitly reject shortcuts that erase ownership or identity boundaries. It must not expose credentials, invent observations, use removed APIs, or report a live outcome from this response-only task.
 
-```bash
-mainsequence time-index-table detail <TIME_INDEX_META_TABLE_UID>
-```
-
-The commands must run in the intended registered repository context because
-the CLI derives the Organization Environment scope from its Git-resolved
-CodeRepositoryBranch; do not supply or invent an Environment or branch UID.
-
-Before execution, the only valid report is that this is the planned discovery
-path and that no dataset identity has been verified. After execution, summarize
-the exact candidates and evidence, unresolved grain/schema questions, and any
-missing observation. Then hand the selected table identity and requirements to
-`data_publishing/time_index_table_updates`; exploration does not design or
-implement the volatility producer.
+The closing evidence checklist should include the observed catalog candidates, exact selected identity and contract, rejected alternatives, and unresolved facts. Static review can establish that the plan and declarations conform to the skill; only observed platform state, logs, health, and representative behavior can establish successful execution where those observations apply.

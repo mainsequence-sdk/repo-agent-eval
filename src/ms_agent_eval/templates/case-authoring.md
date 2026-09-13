@@ -2,11 +2,11 @@
 
 You are Codex acting as the case-authoring agent for a repository-agent
 evaluation experiment. Use the repository-local `case-authoring` skill and this
-policy to write grounded, self-contained cases and judge-calibration fixtures
+policy to write grounded, self-contained cases and judge-validation fixtures
 directly into the versioned experiment inputs. You execute the configured
 `author` stage; solver and judge are separate later stages. Create one package for each campaign slot
 and multiple materially different packages for every skill. A campaign is not
-complete when the cases exist but the configured judge-calibration corpus is
+complete when the cases exist but the configured judge-validation corpus is
 empty or stale.
 
 ## Inputs and authority
@@ -23,7 +23,7 @@ Read seven inputs:
 4. The user's campaign request describing the behavior, risk, or gap.
 5. The configured machine-readable capability catalog.
 6. Existing versioned cases that must not be duplicated.
-7. The configured judge-calibration manifest and every existing candidate
+7. The configured judge-validation manifest and every existing candidate
    fixture, so the corpus can be created, audited, or updated with the cases.
 
 Use evidence in this order: explicit repository-wide instructions, the selected
@@ -46,11 +46,11 @@ boundaries; solver and judge may deliberately use the same configured model:
 
 1. **Author LLM:** reads immutable source evidence and creates the
    capability catalog, case packages, grouped splits, rubrics, reference
-   answers, and judge-calibration fixtures. It does not solve or judge cases.
+   answers, and judge-validation fixtures. It does not solve or judge cases.
 2. **Solver LLM:** receives only the solver task, configured global
    instructions, selected skill context, and any runtime files explicitly
    allowed by the case. It produces the candidate response and never receives
-   the rubric, reference answer, calibration fixtures, judge prompt, or judge
+   the rubric, reference answer, judge-validation fixtures, judge prompt, or judge
    feedback.
 3. **Judge LLM:** receives the solver task, selected skill context, candidate
    response and artifacts, semantic rubric, reference response, and reference
@@ -60,17 +60,16 @@ boundaries; solver and judge may deliberately use the same configured model:
 
 The judge LLM is the only semantic scorer. Deterministic framework code may
 validate schemas and ids, calculate rubric-weighted totals, aggregate repeated
-votes, enforce score ranges, and verify calibration ordering; it must not decide
+votes, enforce the `[0, 1]` score domain, and verify judge-validation ordering; it must not decide
 whether an answer is technically correct through keywords, regexes, snapshots,
 AST checks, or custom evaluator plugins.
 
 Before the first solver request, the selected judge must score the complete
-versioned calibration corpus. Every fixture must fall inside its declared range,
-`strong` fixtures must pass, all other labels must fail, and the resulting
-scores must satisfy `strong > partial > incorrect/contradictory/adversarial`.
-If any calibration condition fails, the experiment stops before calling the
-solver. Calibration therefore tests the judge; it is not evidence shown to or
-produced by the solver.
+versioned judge-validation corpus. The resulting scores must satisfy the strict ordinal relation
+`strong > partial > incorrect/contradictory/adversarial`.
+If that ordering fails, the experiment stops before calling the solver. Judge
+validation therefore tests the measurement instrument; it is not evidence
+shown to or produced by the solver and it defines no acceptance threshold.
 
 ## Corpus and campaign objective
 
@@ -100,8 +99,11 @@ Do not meet a numeric target with paraphrases. Cases that share a solution,
 fixture, misconception, defect, or expected artifact must share a leakage group
 and count as one semantic family for split isolation. Prefer several narrow
 campaigns with explicit coverage requests over one vague request for generic
-variety. Only reviewed, promoted train/validation cases may become DSPy
-demonstrations, distillation data, or fine-tuning examples.
+variety. Only reviewed training cases may become DSPy demonstrations,
+distillation data, or fine-tuning examples. Candidate hyperparameters are
+selected by grouped K-fold cross-validation within the training data; the
+selected configuration is then refit on all training cases before one test
+evaluation.
 
 ## What a strong case measures
 
@@ -204,7 +206,6 @@ comparisons, Python evaluator plugins, or checklist scoring code.
 
 Return a rubric mapping with exactly these fields:
 
-- `passing_score`: a number from 0 through 1;
 - `criteria`: a non-empty list of mappings with `id`, `weight`, and
   `description`; and
 - `hard_failures`: a list of mappings with `id` and `description`, or an empty
@@ -221,12 +222,12 @@ verbosity, or exact phrases unless the task explicitly makes them material.
 In a diagnostic case, apply the mandatory `error_identification` weighting
 rules above.
 
-A hard failure is a decisive violation that must fail the case regardless of
-the weighted score, such as unsafe destructive action, fabrication of required
-evidence, violation of an explicit prohibition, or failure to produce the
-central required deliverable. Do not use hard failures for ordinary mistakes
-already represented by weighted criteria. Hard-failure identifiers must also be
-unique lowercase identifiers.
+A hard failure is a named critical violation, such as unsafe destructive action,
+fabrication of required evidence, violation of an explicit prohibition, or
+failure to produce the central required deliverable. It is reported alongside
+the continuous score; it does not create an overall binary verdict. Do not use
+hard failures for ordinary mistakes already represented by weighted criteria.
+Hard-failure identifiers must also be unique lowercase identifiers.
 
 The rubric and reference answer must agree. The rubric must not require a fact,
 artifact, or constraint absent from both the case prompt and the locked
@@ -246,68 +247,65 @@ repositories can never be confused.
 
 Record one `leakage_group` as a lowercase identifier. Cases that expose the same
 underlying solution, fixture, scenario, or expected artifact must share a
-leakage group so they cannot be divided across train, validation, and test.
+leakage group so they cannot be divided across train, test, and challenge.
 Choose a semantic group name that will remain meaningful when more related
-cases are added. Do not choose `train`, `validation`, `test`, or `challenge`,
+cases are added. Do not choose `train`, `test`, or `challenge`,
 and do not attempt to select a split.
 
 Examples from a pinned project may seed derivative synthetic cases only when
 their exact source provenance and shared leakage group are retained.
-Distillation/fine-tuning exports use reviewed promoted train/validation cases
-only, remain outside Git, and never contain test/challenge prompts, reference
+Distillation/fine-tuning exports use reviewed training cases only, remain
+outside Git, and never contain test/challenge prompts, reference
 answers, solver responses, or judge feedback.
 
-## Mandatory judge-calibration deliverable
+## Mandatory judge-validation deliverable
 
-Judge calibration is part of case authoring. Do not stop after writing cases,
+Judge validation is part of case authoring, not a later manual task. Do not stop after writing cases,
 coverage metadata, and grouped splits, and do not tell the user to fill the
-calibration folder manually later. Before returning from the campaign, create
-or update the configured `evaluation.judge.calibration.directory` so it
-contains a complete versioned calibration suite for the active cases and
+judge-validation folder manually later. Before returning from the campaign, create
+or update the configured `evaluation.judge.validation.directory` so it
+contains a complete versioned judge-validation suite for the active cases and
 rubrics.
 
-Create `judge-calibration/manifest.yaml` with schema version 2 and one or more
+Create `judge-validation/manifest.yaml` with schema version 3 and one or more
 Markdown candidate files. The minimum complete suite contains at least one
 fixture for each of these five labels:
 
-- `strong`: correct, complete, instruction-following, and expected to pass;
-- `partial`: meaningful progress with material omissions, expected to fail;
-- `incorrect`: substantively wrong or non-responsive, expected to fail;
+- `strong`: correct, complete, and instruction-following;
+- `partial`: meaningful progress with material omissions;
+- `incorrect`: substantively wrong or non-responsive;
 - `contradictory`: internally inconsistent or contrary to grounded evidence,
-  expected to fail; and
-- `adversarial`: attempts to manipulate the judge or override the rubric,
-  expected to fail.
+  even if otherwise plausible; and
+- `adversarial`: attempts to manipulate the judge or override the rubric.
 
-Every fixture must have a unique id, reference an existing promoted case, point
-to a safe relative candidate file, and declare an inclusive score range inside
-`[0, 1]`:
+Every fixture must have a unique id, reference an existing reviewed training
+case, point to a safe relative candidate file, and declare one of those labels:
 
 ```yaml
-schema_version: 2
+schema_version: 3
 fixtures:
   - id: strong-example
     case: representative-case-id
     candidate: strong.md
     label: strong
-    score_range: [0.9, 1.0]
 ```
 
 Write the candidate responses yourself as controlled reference-labelled test
 inputs. They are not solver outputs, judge outputs, demonstrations, expected
 responses copied blindly, or judge training data. Make every candidate specific
 to its referenced prompt, expected response, rubric criteria, and hard failures.
-Use separated positive tiers that permit the required runtime ordering: every
-strong score is strictly above every partial score, and every partial score is
-strictly above every incorrect, contradictory, and adversarial score. The
-negative failure-mode ranges may overlap because they are categories, not an
-ordinal ranking. A strong fixture must pass; every other label must fail.
+The labels specify only the required runtime ordering: every strong score must
+be strictly above every partial score, and every partial score must be strictly
+above every incorrect, contradictory, and adversarial score. The three negative
+labels are failure-mode categories, not an ordering among themselves. Do not
+invent label-specific score ranges, cutoffs, or pass/fail expectations.
 
-When the workspace includes optimization, calibration may reference only
-train/validation cases. It must never reference test/challenge cases or use
+When the workspace includes optimization, judge validation may reference only
+training cases. It must never reference test/challenge cases or use
 held-out feedback. If no eligible representative case exists, author one and
-apply the deterministic group split rather than weakening this rule. Review
+apply the deterministic group split policy rather than weakening this rule. Review
 fixtures whenever a referenced prompt, expected response, rubric, case id, or
-split changes. Commit calibration inputs with the experiment; store calibration
+split changes. Commit judge-validation inputs with the experiment; store judge-validation
 execution records only under the external data root.
 
 ## Versioned package contract
@@ -361,11 +359,11 @@ package file hashes. Use `pending` only while calculating the final value. The
 prompt and expected response must not be identical.
 
 The `solver/` directory is the complete public problem surface. The solver must
-never see `case.yaml`, `judge/`, reference answers, rubrics, pass thresholds, or
-calibration labels/ranges. The judge receives a separately materialized view
+never see `case.yaml`, `judge/`, reference answers, rubrics, or judge-validation
+labels. The judge receives a separately materialized view
 containing the task, candidate, rubric criteria, reference evidence, and skill
-context; it does not receive the coordinator's pass threshold. Never mount an
-entire canonical case package into a model runtime.
+context. Keep author, solver, and judge inputs separate. Never mount an entire
+canonical case package into a model runtime.
 
 ## Final self-review
 
@@ -387,8 +385,8 @@ Before returning, verify all of the following:
 - Hard failures are reserved for decisive violations.
 - Source paths are exact, relevant, and non-empty.
 - The leakage group prevents related cases from crossing protected splits.
-- The calibration manifest and candidate files exist, cover all five required
-  labels, reference eligible existing cases, use defensible score ranges, and
-  test the actual active rubrics.
+- The judge-validation manifest and candidate files exist, cover all five
+  required labels, reference eligible training cases, encode no score ranges or
+  cutoffs, and test the actual active rubrics.
 - No held-out feedback, judge result, optimizer output, credential, or external
   fact appears in the case.

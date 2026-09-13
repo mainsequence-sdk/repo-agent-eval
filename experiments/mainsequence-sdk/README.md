@@ -1,7 +1,7 @@
 # MainSequence SDK Evaluation Workspace
 
 This is the complete version-controlled template for evaluating the public
-MainSequence SDK at tag `v8.1.9`. It contains configuration and authored
+MainSequence SDK at tag `v8.1.12`. It contains configuration and authored
 evaluation inputs only. Repository snapshots, DSPy calls, runs, and
 compiled programs go to `~/ms_agent_eval/mainsequence-sdk-evaluation`.
 
@@ -9,9 +9,11 @@ compiled programs go to `~/ms_agent_eval/mainsequence-sdk-evaluation`.
 
 `workspace.yaml` points to the normative evaluation target:
 
-- `https://github.com/mainsequence-sdk/mainsequence-sdk` at `v8.1.9`;
+- `https://github.com/mainsequence-sdk/mainsequence-sdk` at `v8.1.12`;
 - global instructions at `agent_scaffold/AGENTS.md`;
 - every recursively discovered `agent_scaffold/skills/**/SKILL.md`;
+- nine platform-owned skills imported from the authenticated MCP catalog and
+  locked under `instructions/mainsequence-platform/`;
 - versioned Codex authoring policy at `case-authoring.md`;
 - authored cases under `cases/`; and
 - the DSPy solver and rubric-judge contracts.
@@ -34,7 +36,7 @@ repositories:
 
 Each reference is snapshotted outside Git, filtered to the paths declared in
 `evaluation.case_authoring.sources`, and exposed under
-`references/<source-id>/...`. SDK `v8.1.9` remains authoritative for Python SDK
+`references/<source-id>/...`. SDK `v8.1.12` remains authoritative for Python SDK
 and MetaTable behavior. The four Python application repositories are project
 evidence, while Command Center SDK is contract authority for endpoints consumed
 by that frontend. MainSequenceMarkets' older vendored `0.1.13` contract bundle
@@ -47,16 +49,28 @@ evaluates that same `v0.1.21` release directly. This workspace does not read
 files from the sibling directory; both experiments independently pin the same
 GitHub revision so their provenance remains portable and unambiguous.
 
-The first foundational campaign contains 22 authored and validation-checked
-cases: two distinct cases and two leakage groups for each of the 11 configured skills. See
-[`cases/README.md`](cases/README.md) for the inventory. This first round is not
-the completed bank. `workspace.yaml` requires at least 12 reviewed cases and 6
-distinct leakage groups for every one of the 11 skills before the workspace is
-ready for a scored run. That produces a minimum bank of 132 cases across at
-least 66 semantic families. The stricter current capability catalog requires
-three primary cases for each of 95 capabilities, so its effective target is 285
-cases. These are coverage rules, not a claim that the bank is automatically
-sufficient for a production fine-tune.
+The instruction inventory contains 20 skills: 11 SDK-owned skills from the
+pinned Git release and nine platform-owned skills from MCP. The completed bank
+contains 452 cases across 236 semantic leakage groups and covers all 193
+catalogued capabilities. Every skill has at least 20 cases, at least 10 groups,
+and at least two primary cases for every capability. Skills with more than ten
+capabilities exceed the floor. These are coverage gates, not a claim that this
+volume alone is sufficient for a production fine-tune.
+
+Automatic deployment is deliberately over-sampled. Separate construction and
+review families cover standalone Jobs, workflow Jobs, workflow FastAPI
+releases, workflow runtime Agent releases, workflow Static Sites, and workflow
+CodeRepository Coding Agents. Additional cases test target-specific image/build
+ownership, automatic redeployment, and the difference between declaration,
+DeploymentRun, health, and representative behavior evidence.
+
+The imported MCP manifest records the `v8.1.12` retrieval client, resolved SDK
+commit, MCP protocol version, platform manifest and ontology hashes, and every
+resource URI/path/content hash. Runs consume these committed inputs and never
+refresh MCP implicitly. The current catalog has nine skills and intentionally
+does not retain the retired `command_center_connections` skill. It also does not
+expose the former `command_center` skill; neither stale skill is reconstructed
+from SDK tests or older snapshots.
 
 `case-authoring.md` is the long-lived
 policy that tells Codex how to ground cases, construct solver-facing
@@ -76,12 +90,13 @@ For diagnostic cases it also requires a heavily weighted
 finding the real defect instead of blindly accepting an incorrect test or
 premise. A user request defines one campaign slice and the desired number of
 atomic, independently reviewable cases per skill. That count is a lower bound:
-Codex writes at least three cases per selected skill and continues until every
-capability in `cases/coverage.yaml` has three primary examples. Schema-v5 cases
+Codex writes at least 20 cases in at least 10 groups per selected skill and
+continues until every capability in `cases/coverage.yaml` has two primary
+examples. Schema-v5 cases
 separate the public `solver/` surface from private `judge/` evidence and record
 the authoring-policy, capability-catalog, source-set, and package hashes.
 
-Reviewed train/validation cases may later feed DSPy demonstrations,
+Reviewed train cases may later feed DSPy demonstrations,
 distillation, or fine-tuning exports. Those exports stay outside Git and must
 retain source-set and leakage provenance. Test and challenge prompts, answers,
 responses, and judge feedback are never training material.
@@ -90,11 +105,11 @@ responses, and judge feedback are never training material.
 
 The same manifest defines:
 
-- `baseline`, which evaluates the typed DSPy solver against every promoted
-  case;
-- `optimize-few-shot`, which compiles `LabeledFewShot` using train cases,
-  measures validation cases, publishes state-only JSON, and only then scores
-  the untouched test split.
+- `baseline`, which evaluates the typed DSPy solver on the untouched test split;
+- `optimize-few-shot`, which compares the baseline and configured
+  `LabeledFewShot` candidates by grouped K-fold cross-validation, refits the
+  selected configuration on all training cases, and scores the untouched test
+  split once.
 
 Executor definitions, model names, and stage assignments are stored directly in
 `workspace.yaml`. Solver and judge are separate roles and may intentionally use
@@ -102,7 +117,7 @@ the same provider/model pair.
 
 Every model also declares a `deployment_revision`, and every stage declares an
 explicit reuse policy. This workspace uses `exact`: an unchanged validated
-calibration, solver response, judgment, optimizer output, or aggregate is
+judge validation, fitted state, solver response, judgment, selection, or aggregate is
 attached to the new run instead of executed again. Update the Qwen deployment
 revision whenever its weights, quantization, tokenizer, chat template, or
 server behavior changes. The terminal marks these attachments with `↺`; the
@@ -116,8 +131,13 @@ The included `workspace.yaml` uses `gpt-5.6-sol` for case authoring and
 variables are required by its unauthenticated local API configuration. The
 solver uses the model's default reasoning level; the judge sets the first-class
 `reasoning_effort: none` so structured rubric output is not consumed by a hidden
-thinking trace. For an authenticated provider, configure `api_key_env` on the
-applicable executor and keep only the credential value in `.env`.
+thinking trace. Its `lan-inference` executor combines four request slots on each
+of the two `192.168.1.17` llama.cpp servers and eight slots on the
+`192.168.1.10` llama server, for sixteen requests total. All three endpoints must
+serve the deployment named by the shared Qwen deployment revision. For an
+authenticated provider, configure
+`api_key_env` on the applicable endpoint item and keep only the credential
+value in `.env`.
 The author stage is intentionally `artifact_exchange`: the active Codex session
 authors and reviews files in Git. To automate it or any other model-driven stage
 with subscription-backed Codex, configure the isolated `codex_cli` executor in
@@ -135,21 +155,20 @@ uv run ms-agent-eval validate \
 ```
 
 Run multiple precise campaigns per skill rather than one generic campaign per
-skill. A good initial portfolio contains at least three foundational
-applications, three boundary/misconception cases, three project-backed
-integration or architecture cases, and three diagnosis/migration/evidence-limit
-cases. If no real defect supports a diagnostic case, replace it with a review or
-evidence-boundary case; never invent a defect to fill a quota. Across the 12
-accepted cases, use at least six semantic leakage groups and at least three
-applicable archetypes. The policy contains routing for all 11 target skills,
-but explicit source and capability slices produce better evidence selection.
+skill. The minimum portfolio uses five foundational applications, five
+boundary/misconception cases, five project-backed integration or architecture
+cases, and five review/schema-evolution/evidence-limit cases. If no real defect
+supports a diagnostic case, use review or evidence-boundary work; never invent
+a defect to fill a quota. Across the accepted cases, use at least ten semantic
+leakage groups and at least three applicable archetypes. The policy contains
+routing for all 20 configured skills and an explicit deployment-target matrix.
 
 Every package remains one atomic case for validation and provenance. Repeat
 Codex authoring requests with materially different coverage goals until
 `validate` reports no per-skill coverage gaps. The same Codex authoring campaign
 must create or update the controlled `strong`, `partial`, `incorrect`,
-`contradictory`, and `adversarial` candidates under `judge-calibration/`, each
-referencing a promoted train/validation case. Do not leave calibration as a
+`contradictory`, and `adversarial` candidates under `judge-validation/`, each
+referencing a reviewed training case. Do not leave judge validation as a
 manual follow-up. Review the complete authoring deliverable, then validate until
 `ready_for_scored_run` is `true`:
 
@@ -166,13 +185,15 @@ uv run ms-agent-eval run optimize-few-shot \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-`validate` and `inspect` make no LLM requests. The five-fixture calibration
+`validate` and `inspect` make no LLM requests. The five-fixture judge validation
 corpus is configured and uses the train-split
-`metatable-related-model-graph` case. The workspace still reports ten remaining
-cases and four remaining leakage groups per skill, plus capability-depth gaps,
-as explicit blockers. `run` remains strict and cannot start the solver until
-source, authoring provenance, coverage, splits, configured runtime stages,
-and judge calibration are complete. `run --pilot` is the explicit exception for
-diagnostics: it runs only train/validation cases, never optimization or held-out
-splits, uses one diagnostic judge vote per fixture/case, records
-`benchmark_valid: false`, and omits aggregate benchmark metrics.
+`metatable-related-model-graph` case. The 452-case bank passes source,
+authoring-provenance, capability-depth, per-skill case/group, grouped-split,
+runtime-stage, and judge-validation readiness checks. A normal `run` is scored.
+For a normal run, the five fixtures and three judge repetitions form 15
+independent validation votes. They are dispatched across the configured
+16-request endpoint pool and then aggregated in stable fixture/repetition order.
+`run --pilot` remains the explicit exception for future incomplete revisions:
+it runs only train cases, never optimization or held-out splits, uses one
+diagnostic judge vote per fixture/case, records `benchmark_valid: false`, and
+omits aggregate benchmark metrics.

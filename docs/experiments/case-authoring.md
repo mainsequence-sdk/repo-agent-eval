@@ -1,7 +1,7 @@
 # Case Authoring
 
 Case authoring converts locked repository evidence into a versioned capability
-catalog, promoted case packages, grouped splits, and judge-calibration fixtures.
+catalog, reviewed case packages, grouped splits, and judge-validation fixtures.
 Those outputs define the evaluation; they are not disposable model traces.
 
 ## Authoring flow
@@ -16,10 +16,10 @@ flowchart LR
     Author --> Catalog[cases/coverage.yaml]
     Author --> Cases[Case packages]
     Cases --> Splits[cases/splits.yaml]
-    Cases --> Calibration[Judge-calibration fixtures]
+    Cases --> Judge validation[Judge-validation fixtures]
     Catalog --> Review[Human review and validation]
     Splits --> Review
-    Calibration --> Review
+    Judge validation --> Review
 ```
 
 The author reads the complete selected skills and required supporting files. It
@@ -33,10 +33,10 @@ One campaign owns all four connected records:
 1. A complete capability decomposition for every selected skill.
 2. Materially distinct cases until each capability reaches its configured
    primary-case depth and each skill reaches case/group floors.
-3. Leakage-group assignments and deterministic train/validation/test/challenge
+3. Leakage-group assignments and deterministic train/test/challenge
    splits.
 4. Controlled strong, partial, incorrect, contradictory, and adversarial
-   responses for judge calibration.
+   responses for judge validation.
 
 A requested case count is a lower bound, not permission to stop with incomplete
 semantic coverage.
@@ -62,5 +62,5 @@ Changing the policy, capability catalog, source set, or package bytes requires
 review and refreshed provenance before the case can run.
 
 See [Capability coverage](../evaluation/capability-coverage.md) for catalog and
-depth rules and [Judging and calibration](../evaluation/judging-and-calibration.md)
+depth rules and [Judging and judge validation](../evaluation/judging-and-validation.md)
 for fixture and rubric requirements.

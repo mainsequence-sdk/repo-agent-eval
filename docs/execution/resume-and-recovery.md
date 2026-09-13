@@ -50,7 +50,7 @@ uv run ms-agent-eval run resume <run-id> --workspace workspace.yaml
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 ```
 
-Rehydration verifies the selected workspace configuration, case and calibration
+Rehydration verifies the selected workspace configuration, case and judge-validation
 files, capability catalog, split file, target snapshot, every authoring-source
 snapshot, and the reconstructed experiment lock. Missing or corrupt immutable
 inputs fail closed. The current workspace is never used as an approximate

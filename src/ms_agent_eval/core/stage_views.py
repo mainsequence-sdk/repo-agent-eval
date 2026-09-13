@@ -16,7 +16,7 @@ from .stages import StageKind, StageLedger, StagePacket
 _INSTRUCTION_FILENAMES = {"AGENTS.md", "AGENTS.override.md"}
 _MODEL_DRIVEN_STAGES = {
     StageKind.AUTHOR,
-    StageKind.CALIBRATE_JUDGE,
+    StageKind.VALIDATE_JUDGE,
     StageKind.SOLVE,
     StageKind.JUDGE,
 }
@@ -56,7 +56,7 @@ class StageViewMaterializer:
         destination: Path,
         *,
         instruction_policy: str,
-        calibration_fixture_id: str | None = None,
+        judge_validation_fixture_id: str | None = None,
     ) -> StageView:
         if packet.stage not in _MODEL_DRIVEN_STAGES:
             raise ConfigurationError(
@@ -91,7 +91,7 @@ class StageViewMaterializer:
         elif packet.stage is StageKind.JUDGE:
             self._judge_files(inputs, files)
         else:
-            self._calibration_files(inputs, files, calibration_fixture_id)
+            self._judge_validation_files(inputs, files, judge_validation_fixture_id)
 
         inventory = self._write_files(root, files)
         manifest_identity = {
@@ -156,6 +156,10 @@ class StageViewMaterializer:
             "skill",
             "split",
             "repetition",
+            "evaluation_phase",
+            "fold",
+            "candidate_id",
+            "candidate_k",
             "global_context",
             "skill_context",
             "task",
@@ -180,6 +184,10 @@ class StageViewMaterializer:
                 "skill",
                 "split",
                 "repetition",
+                "evaluation_phase",
+                "fold",
+                "candidate_id",
+                "candidate_k",
                 "program_hash",
             )
         }
@@ -230,36 +238,40 @@ class StageViewMaterializer:
         )
 
     @staticmethod
-    def _calibration_files(
+    def _judge_validation_files(
         inputs: Mapping[str, object],
         files: dict[str, bytes],
         fixture_id: str | None,
     ) -> None:
-        calibration = _required_mapping(inputs, "calibration")
-        if set(calibration) != {"corpus_hash", "fixtures"}:
-            raise IntegrityError("calibration stage input has unexpected fields")
-        fixtures = calibration.get("fixtures")
+        judge_validation = _required_mapping(inputs, "judge_validation")
+        if set(judge_validation) != {"corpus_hash", "fixtures"}:
+            raise IntegrityError("judge-validation stage input has unexpected fields")
+        fixtures = judge_validation.get("fixtures")
         if not isinstance(fixtures, list):
-            raise IntegrityError("calibration fixtures must be a list")
+            raise IntegrityError("judge-validation fixtures must be a list")
         selected = [
             item
             for item in fixtures
             if isinstance(item, Mapping) and item.get("id") == fixture_id
         ]
         if fixture_id is None or len(selected) != 1:
-            raise IntegrityError("calibration stage view requires exactly one known fixture")
+            raise IntegrityError(
+                "judge-validation stage view requires exactly one known fixture"
+            )
         fixture = {str(key): value for key, value in selected[0].items()}
         if set(fixture) != {"id", "candidate_response", "case"}:
-            raise IntegrityError("calibration fixture exposes coordinator-only fields")
+            raise IntegrityError(
+                "judge-validation fixture exposes coordinator-only fields"
+            )
         case = fixture.get("case")
         if not isinstance(case, Mapping):
-            raise IntegrityError("calibration fixture case must be a mapping")
+            raise IntegrityError("judge-validation fixture case must be a mapping")
         _add_judge_case(files, {str(key): value for key, value in case.items()})
         files["input/candidate.md"] = _required_text(
             fixture, "candidate_response"
         ).encode("utf-8")
         files["input/metadata.json"] = canonical_json_bytes(
-            {"fixture_id": fixture["id"], "corpus_hash": calibration["corpus_hash"]}
+            {"fixture_id": fixture["id"], "corpus_hash": judge_validation["corpus_hash"]}
         )
 
     def _write_files(self, root: Path, files: Mapping[str, bytes]) -> tuple[StageViewFile, ...]:
@@ -321,7 +333,7 @@ def model_output_schema(stage: StageKind) -> Mapping[str, object]:
                 "additionalProperties": False,
             }
         )
-    if stage in {StageKind.JUDGE, StageKind.CALIBRATE_JUDGE}:
+    if stage in {StageKind.JUDGE, StageKind.VALIDATE_JUDGE}:
         return MappingProxyType(
             {
                 "type": "object",
@@ -391,8 +403,6 @@ def _add_judge_case(files: dict[str, bytes], case: Mapping[str, object]) -> None
         rubric_payload = json.loads(rubric)
     except json.JSONDecodeError as error:
         raise IntegrityError("judge rubric must be valid JSON") from error
-    if isinstance(rubric_payload, Mapping) and "passing_score" in rubric_payload:
-        raise IntegrityError("judge stage view must not expose passing_score")
     files["input/judge/rubric.json"] = canonical_json_bytes(rubric_payload)
     files["input/judge/expected-response.md"] = _required_text(
         case, "expected_response"

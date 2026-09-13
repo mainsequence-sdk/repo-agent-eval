@@ -1,0 +1,7 @@
+The evidence analysis should center **Remove workflow applications safely**: Distinguish declaration removal, release cleanup, and protected resource deletion.
+
+Local configuration presence and schema validation support only a declaration-level conclusion. They do not prove that the intended identity was selected, that an owned operation completed, or that runtime behavior is correct. The governing boundary is: render and validate the current workflow contract, apply each target's exact image rule, keep schedules and navigation explicit, and inspect deployment runs.
+
+The unsupported column should explicitly reject live success or failure claims that require absent state. The response must preserve ambiguity instead of inventing uids, credentials, logs, releases, runs, or outputs.
+
+The ordered observation column should request the narrowest relevant chain: backend validation, created resource and revision identities, image/build ownership, DeploymentRun state and logs, health, and target-specific behavior. It should stop when an earlier identity, authorization, or lifecycle prerequisite fails and should preserve unrelated state.

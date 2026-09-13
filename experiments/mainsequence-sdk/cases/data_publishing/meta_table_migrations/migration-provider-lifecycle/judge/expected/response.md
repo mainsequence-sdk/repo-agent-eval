@@ -7,8 +7,9 @@ platform operation payload.
 Use the Main Sequence migration CLI to inspect/scaffold the provider as needed,
 confirm current state, generate a revision from the model change, and review
 the generated upgrade and downgrade before applying it. The provider root has
-no parent: it moves from `platform_managed` with lifecycle state `reserved` to
-`alembic_managed` with lifecycle state `active` through the migration path.
+no parent: its management mode remains `platform_managed`, its schema management
+mode remains `alembic_managed`, and its lifecycle state moves from `reserved`
+to `active` through the migration path.
 Subsequent schema changes remain owned by that provider and revision chain.
 
 Before upgrade, verify the intended registered CodeRepositoryBranch context,

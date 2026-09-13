@@ -1,0 +1,24 @@
+schema_version: 5
+id: application-surfaces-api-surfaces-integration-01-construction
+title: 'Classify the endpoint surface: design'
+skill: application_surfaces/api_surfaces
+group: application-surfaces-api-surfaces-integration-01
+coverage:
+  primary: endpoint-classification
+  supporting:
+  - contract-authority
+  archetype: construction
+  difficulty: easy
+source_paths:
+- agent_scaffold/skills/application_surfaces/api_surfaces/SKILL.md
+provenance:
+  authoring_agent: codex
+  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
+  source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
+  case_content_hash: sha256:f3c8e9aa0d81d734152286bde1c907a28acf28e7d4361bd02d0fafde4f405027
+solver:
+  prompt: solver/prompt.md
+judge:
+  rubric: judge/rubric.yaml
+  expected_response: judge/expected/response.md

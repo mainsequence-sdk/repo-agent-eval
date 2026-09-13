@@ -1,4 +1,3 @@
-passing_score: 0.75
 criteria:
   - id: error_identification
     weight: 0.4

@@ -117,11 +117,11 @@ read-only. Codex runs with `--ephemeral` and a restrictive permission profile.
 
 For a solver, the view contains only the public task, selected context, and
 declared attachments. For a judge, it contains the locked candidate, rubric
-criteria, and reference evidence, but not the pass threshold. A calibration
-invocation receives only one fixture and never its label or accepted range.
+criteria, critical violations, and reference evidence. A judge-validation
+invocation receives only one fixture and never its label.
 
 After execution, the coordinator validates the structured output, computes
-private pass/fail decisions, stores results and bounded JSONL/stderr artifacts
+continuous weighted scores, stores results and bounded JSONL/stderr artifacts
 under the external data root, and deletes the entire temporary attempt tree.
 Provenance records the image digest, observed CLI version, stage-view hash,
 configuration hash, network policy id, instruction policy, and output artifact

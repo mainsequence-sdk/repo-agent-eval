@@ -13,11 +13,11 @@ cases, rubrics, and models.
 | Technology | How it is used |
 |---|---|
 | Python 3.12+ and Rich | Framework implementation and a live `ms-agent-eval` terminal interface with explicit JSON automation output. |
-| Portable stages | Authoring, calibration, solving, judging, optimization, final evaluation, and aggregation use one immutable packet/result lifecycle. |
+| Portable stages | Authoring, judge validation, fitting, solving, judging, model selection, and aggregation use one immutable packet/result lifecycle. |
 | Codex skills / CLI | The configured author model creates grounded cases; the isolated CLI adapter can execute model-driven stages with subscription authentication in disposable containers. |
 | DSPy 3.2 | The runtime prompt-programming layer. Typed DSPy signatures define the solver and judge; `LabeledFewShot` compiles optimized solver state. |
 | OpenAI-compatible APIs | Endpoint transport for model-driven DSPy stages. Solver and judge remain separate roles but may use the same model. |
-| YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-calibration manifests. |
+| YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-validation manifests. |
 | Git | Resolves the target and optional reference repositories from tags or commits into immutable snapshots with recorded provenance. |
 | Docker | Digest-pinned isolation for automatic Codex CLI stages, with stage-specific read-only views and a restricted control-plane proxy. |
 | SHA-256 + JSON artifacts | Identifies snapshots, programs, inputs, calls, and results so runs are reproducible and auditable. |
@@ -41,8 +41,8 @@ flowchart TB
         Workspace["workspace.yaml"]
         AuthoringPolicy["case-authoring.md"]
         CapabilityCatalog["cases/coverage.yaml"]
-        Cases["Promoted cases + rubrics"]
-        Splits["Grouped train / validation / test splits"]
+        Cases["Reviewed cases + rubrics"]
+        Splits["Grouped train / test / challenge splits"]
         Workspace --> AuthoringPolicy
         Workspace --> CapabilityCatalog
         Workspace --> Cases
@@ -60,8 +60,8 @@ flowchart TB
     end
 
     subgraph Baseline["Baseline evaluation"]
-        Cases --> Calibration["1. Calibrate judge"]
-        Calibration --> Solver["2. DSPy solver LLM"]
+        Cases --> JudgeValidation["1. Validate judge ordering"]
+        JudgeValidation --> Solver["2. DSPy solver LLM"]
         Solver --> Candidate["Candidate response"]
         Candidate --> Judge["3. DSPy LLM judge"]
         Cases -->|"rubric + expected result"| Judge
@@ -70,12 +70,11 @@ flowchart TB
 
     subgraph Optimization["DSPy optimization experiment"]
         Splits --> Train["Train cases"]
-        Train --> Compile["LabeledFewShot compile"]
-        Compile --> Published["Publish state-only DSPy JSON"]
-        Published --> Validation["Validation solve + LLM judge"]
-        Splits --> Validation
-        Validation --> Boundary["Record final-evaluation boundary"]
-        Boundary --> Test["Load untouched test cases"]
+        Train --> Folds["Grouped K-fold cross-validation"]
+        Folds --> Candidates["Fit and score baseline + LabeledFewShot candidates"]
+        Candidates --> Select["Select highest mean out-of-fold score"]
+        Select --> Refit["Refit selected configuration on all train cases"]
+        Refit --> Test["Load untouched test cases"]
         Splits --> Test
         Test --> Final["Optimized solver + LLM judge"]
         Final --> OptimizedResults["External held-out results"]
@@ -95,6 +94,8 @@ flowchart TB
   expected result.
 - The LLM judge is the only semantic scorer. Framework code only validates its
   typed result, aggregates votes, and computes weighted arithmetic.
+- Optimization compares candidates by mean out-of-fold score. It has no
+  numerical acceptance cutoff, permanent validation split, or test-access gate.
 
 There is no raw prompt engine, deterministic evaluator plugin, legacy reader,
 or user-facing engine selector.
@@ -128,7 +129,9 @@ uv run ms-agent-eval init \
   --global-instructions AGENTS.md \
   --skills-directory .agents/skills \
   --cases cases \
-  --api-base-url http://127.0.0.1:8000/v1 \
+  --endpoint llama-cpp-17-18081 http://192.168.1.17:18081/v1 4 \
+  --endpoint llama-cpp-17-18080 http://192.168.1.17:18080/v1 4 \
+  --endpoint llama-server-10-11436 http://192.168.1.10:11436/v1 8 \
   --solver-model solver-model \
   --solver-deployment-revision solver-deployment-v1 \
   --solver-reasoning-effort high \
@@ -137,7 +140,7 @@ uv run ms-agent-eval init \
   --judge-reasoning-effort none
 ```
 
-The generated schema-v9 `workspace.yaml` has these top-level concerns:
+The generated schema-v11 `workspace.yaml` has these top-level concerns:
 
 1. `executors` and `models`: reusable transport and model definitions.
 2. `stages`: the executor, model, and budget assigned to each portable stage.
@@ -155,7 +158,7 @@ snapshotted outside Git; selected paths reach Codex under
 `references/<source-id>/...` and participate in one combined provenance hash.
 
 Case-bank readiness is also workspace configuration. New workspaces default to
-at least eight promoted cases and four distinct leakage groups per skill:
+at least eight reviewed cases and four distinct leakage groups per skill:
 
 ```yaml
 evaluation:
@@ -183,10 +186,19 @@ one executor to an optional model:
 
 ```yaml
 executors:
-  remote-qwen:
+  lan-inference:
     type: endpoint
     adapter: openai_compatible
-    base_url: http://192.168.1.10:11434/v1
+    endpoints:
+      - id: llama-cpp-17-18081
+        base_url: http://192.168.1.17:18081/v1
+        max_concurrent_requests: 4
+      - id: llama-cpp-17-18080
+        base_url: http://192.168.1.17:18080/v1
+        max_concurrent_requests: 4
+      - id: llama-server-10-11436
+        base_url: http://192.168.1.10:11436/v1
+        max_concurrent_requests: 8
 
 models:
   solver:
@@ -202,20 +214,31 @@ models:
 
 stages:
   solve:
-    executor: remote-qwen
+    executor: lan-inference
     model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
-    executor: remote-qwen
+    executor: lan-inference
     model: judge
     reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
 ```
 
+The coordinator runs ready packets through a bounded local thread pool. Each
+endpoint enforces its own request limit, so this example can issue at most sixteen
+requests concurrently (4 + 4 + 8). The model's `deployment_revision` attests that
+every endpoint in the pool serves the same semantic deployment; heterogeneous
+deployments require separate executors and model identities.
+
+Judge validation uses that same pool at request granularity. Each fixture and
+judge repetition is an independent request; five fixtures with three repetitions
+produce 15 concurrent-ready votes, followed by deterministic median/majority
+aggregation. The terminal reports every completed vote and its selected endpoint.
+
 Only credentials remain process-local. When a provider requires a key, add
-`api_key_env: OPENAI_API_KEY` to the endpoint executor and define that secret
-in the ignored `.env` file. Runtime state defaults to
+`api_key_env: OPENAI_API_KEY` to that endpoint item and define that secret in
+the ignored `.env` file. Runtime state defaults to
 `~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
 another external path.
 
@@ -227,9 +250,11 @@ sample count. A model alias is not a safe cache boundary, so
 `deployment_revision` must change whenever local weights, quantization,
 tokenizer, chat template, or serving behavior changes. See
 [Incremental execution and reuse](docs/execution/incremental-execution.md).
+Endpoint topology, scheduling, and provenance are documented in
+[Pooled endpoint execution](docs/execution/openai-compatible-api.md).
 
 Starting a run also freezes its selected workspace configuration and every
-loaded case, split, calibration, catalog, policy, and source-snapshot identity
+loaded case, split, judge-validation, catalog, policy, and source-snapshot identity
 into an immutable revision bundle. `run resume <run-id>` always continues that
 stored revision—even after relevant workspace edits—while `run baseline`
 compiles the edited workspace as a new revision and reuses only compatible work.
@@ -240,8 +265,8 @@ compiles the edited workspace as a new revision and reuses only compatible work.
 uv run ms-agent-eval validate --workspace workspace.yaml
 # Ask Codex to use the case-authoring skill with this workspace and campaign goal.
 uv run ms-agent-eval inspect --workspace workspace.yaml
-# While coverage is incomplete, exercise calibration, solving, and judging on
-# train/validation cases without producing benchmark metrics.
+# While coverage is incomplete, exercise judge validation, solving, and judging on
+# train cases without producing benchmark metrics.
 uv run ms-agent-eval run baseline --pilot --workspace workspace.yaml
 # After validation reports ready_for_scored_run: true:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
@@ -251,7 +276,7 @@ uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 A pilot is immutable and explicitly records `benchmark_valid: false`. It never
 loads test or challenge cases, cannot run optimization, retains per-case judge
 diagnostics, uses one diagnostic judge vote per fixture/case, and omits
-aggregate mean-score and pass-rate fields. Resume or operate its packets with
+aggregate mean-score fields. Resume or operate its packets with
 the same `--pilot` flag.
 
 Every full run is resumable orchestration over the same public stage commands:
@@ -267,11 +292,11 @@ For an external harness, prepare or claim a packet and submit a JSON result with
 model, executor, and usage evidence is append-only under the external data root.
 
 Generated snapshots, solver calls, judge calls, compiled
-state, results, and reports remain outside Git. Only `workspace.yaml`, promoted
+state, results, and reports remain outside Git. Only `workspace.yaml`, reviewed
 case packages, `case-authoring.md`, split assignments, and reviewed
-reference-labelled judge calibration inputs are versioned. The Codex
-case-authoring campaign creates the cases, grouped splits, and calibration
-fixtures together; calibration is not a later manual phase.
+reference-labelled judge validation inputs are versioned. The Codex
+case-authoring campaign creates the cases, grouped splits, and judge-validation
+fixtures together; judge validation is not a later manual phase.
 
 Ask Codex for narrow campaigns covering different capabilities, sources,
 difficulties, and archetypes until `validate` reports that every skill satisfies the configured
@@ -300,8 +325,8 @@ repository/
 │       ├── workspace.yaml      target, instructions, cases, models, runtime
 │       ├── case-authoring.md   versioned Codex authoring policy
 │       ├── .env.example        optional credential-name template
-│       ├── cases/              coverage contract, promoted cases, and splits
-│       └── judge-calibration/  authored and reviewed judge fixtures
+│       ├── cases/              coverage contract, reviewed cases, and splits
+│       └── judge-validation/  authored and reviewed judge fixtures
 ├── tests/                      generic framework acceptance tests
 ├── docs/                       general guides and architecture records
 └── .implementation_tasks/      local ignored implementation plans

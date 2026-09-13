@@ -15,7 +15,7 @@ from typing import Protocol
 
 from ms_agent_eval.core.codex_auth import CodexSubscriptionAuthStore
 from ms_agent_eval.core.errors import ConfigurationError, IntegrityError, PreflightError
-from ms_agent_eval.core.evaluation import LlmJudge, calibration_result_from_scores
+from ms_agent_eval.core.evaluation import LlmJudge, judge_validation_result_from_scores
 from ms_agent_eval.core.hashing import content_hash, json_value
 from ms_agent_eval.core.planning import CompiledWorkspace, ExperimentLock
 from ms_agent_eval.core.stage_executors import AutomaticExecutionFailed, ExecutorOutput
@@ -292,7 +292,7 @@ class CodexCliExecutor:
     def execute(self, packet: StagePacket, ledger: StageLedger) -> ExecutorOutput:
         if packet.stage not in {
             StageKind.AUTHOR,
-            StageKind.CALIBRATE_JUDGE,
+            StageKind.VALIDATE_JUDGE,
             StageKind.SOLVE,
             StageKind.JUDGE,
         }:
@@ -345,6 +345,10 @@ class CodexCliExecutor:
                 "repetition": case["repetition"],
                 "response": _non_empty_string(raw.get("response"), "Codex solver response"),
                 "program_hash": case["program_hash"],
+                "evaluation_phase": case["evaluation_phase"],
+                "fold": case["fold"],
+                "candidate_id": case["candidate_id"],
+                "candidate_k": case["candidate_k"],
                 "call_ids": [],
             }
         elif packet.stage is StageKind.JUDGE:
@@ -374,12 +378,15 @@ class CodexCliExecutor:
                 **result_value,
                 "split": evaluation["split"],
                 "repetition": evaluation["repetition"],
+                "evaluation_phase": evaluation["evaluation_phase"],
+                "fold": evaluation["fold"],
+                "candidate_id": evaluation["candidate_id"],
+                "candidate_k": evaluation["candidate_k"],
             }
         else:
             repetitions = _judge_repetitions(packet, ledger, self.workspace)
             fixture_scores: dict[str, float] = {}
-            fixture_passes: dict[str, bool] = {}
-            for fixture in self.workspace.calibration.fixtures:
+            for fixture in self.workspace.judge_validation.fixtures:
                 case = self._case(fixture.case_id)
                 raw_votes = [
                     invoke(fixture.id)
@@ -397,13 +404,11 @@ class CodexCliExecutor:
                     skill_context=self.workspace.context.skill(case.skill),
                 )
                 fixture_scores[fixture.id] = record.score
-                fixture_passes[fixture.id] = record.passed
-            calibration = calibration_result_from_scores(
-                self.workspace.calibration,
+            judge_validation = judge_validation_result_from_scores(
+                self.workspace.judge_validation,
                 fixture_scores,
-                fixture_passes=fixture_passes,
             )
-            result_value = json_value(calibration)
+            result_value = json_value(judge_validation)
             assert isinstance(result_value, Mapping)
             value = result_value
 
@@ -451,7 +456,7 @@ class CodexCliExecutor:
                 ledger,
                 root / "view",
                 instruction_policy=self.codex.instruction_policy,
-                calibration_fixture_id=fixture_id,
+                judge_validation_fixture_id=fixture_id,
             )
             codex_home = root / "codex-home"
             self.auth_store.install_into(codex_home)

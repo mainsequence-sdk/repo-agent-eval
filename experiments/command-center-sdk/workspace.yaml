@@ -1,14 +1,17 @@
-schema_version: 9
+schema_version: 11
 
 workspace:
   id: command-center-sdk-evaluation
   # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
 
 executors:
-  remote-models:
+  local-inference:
     type: endpoint
     adapter: openai_compatible
-    base_url: http://localhost:11434/v1
+    endpoints:
+      - id: primary
+        base_url: http://localhost:11434/v1
+        max_concurrent_requests: 1
   authoring-harness:
     type: harness
     adapter: artifact_exchange
@@ -36,26 +39,26 @@ stages:
     model: author
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
-  calibrate_judge:
-    executor: remote-models
+  validate_judge:
+    executor: local-inference
     model: judge
     reuse: {policy: exact}
     budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
   solve:
-    executor: remote-models
+    executor: local-inference
     model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
-    executor: remote-models
+    executor: local-inference
     model: judge
     reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
-  optimize:
+  fit:
     executor: local-process
     reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 1800}
-  final_evaluate:
+  select:
     executor: local-process
     reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
@@ -100,8 +103,7 @@ evaluation:
     file: cases/splits.yaml
     policy:
       seed: command-center-sdk-foundations-v1
-      train: 0.5
-      validation: 0.2
+      train: 0.7
       test: 0.2
       challenge: 0.1
   judge:
@@ -119,8 +121,8 @@ evaluation:
           criterion_scores: dict[str, float]
           hard_failures: list[str]
           feedback: str
-    calibration:
-      directory: judge-calibration
+    validation:
+      directory: judge-validation
     repetitions: 3
 
 experiments:
@@ -143,15 +145,13 @@ experiments:
   optimize-few-shot:
     mode: optimize
     based_on: baseline
-    dataset:
-      train: train
-      validation: validation
-      final_evaluation: test
     optimizer:
       name: LabeledFewShot
-      parameters:
-        k: 2
-        seed: 0
+      search:
+        k: [1, 2, 4]
+    cross_validation:
+      folds: 5
+      seed: 0
     budget:
       solver:
         model_calls: 100
@@ -160,5 +160,3 @@ experiments:
         model_calls: 300
         tokens: 500000
       wall_seconds: 1800
-    output:
-      compiled_program: content_addressed_json

@@ -26,7 +26,7 @@ from .helpers import (
     create_checkout,
     create_snapshot,
     create_workspace,
-    seed_cases_and_calibration,
+    seed_cases_and_judge_validation,
     workspace_payload,
 )
 
@@ -38,7 +38,7 @@ def _compiled_workspace_with_cases(tmp_path: Path):  # type: ignore[no-untyped-d
         create_checkout(tmp_path),
         tmp_path / "external",
     )
-    seed_cases_and_calibration(
+    seed_cases_and_judge_validation(
         repository,
         authoring_instructions_hash=sha256_file(repository.case_authoring_path),
         source_snapshot_hash=lock.content_hash,
@@ -50,11 +50,67 @@ def _compiled_workspace_with_cases(tmp_path: Path):  # type: ignore[no-untyped-d
     )
 
 
-def test_schema_v9_rejects_case_authoring_model_configuration() -> None:
+def test_schema_v11_rejects_case_authoring_model_configuration() -> None:
     payload = workspace_payload()
     payload["evaluation"]["case_authoring"]["model"] = {"name": "builder"}  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="unknown fields"):
         WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_endpoint_pool_requires_explicit_structured_capacity() -> None:
+    payload = workspace_payload()
+    payload["executors"]["remote-models"] = {  # type: ignore[index]
+        "type": "endpoint",
+        "adapter": "openai_compatible",
+        "base_url": "http://localhost:8000/v1",
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload = workspace_payload()
+    del payload["executors"]["remote-models"]["endpoints"][0][  # type: ignore[index]
+        "max_concurrent_requests"
+    ]
+    with pytest.raises(ConfigurationError, match="positive integer"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_endpoint_pool_rejects_duplicate_ids_and_urls() -> None:
+    for changed_field in ("id", "base_url"):
+        payload = workspace_payload()
+        endpoints = payload["executors"]["remote-models"]["endpoints"]  # type: ignore[index]
+        duplicate = dict(endpoints[0])
+        duplicate["id"] = "secondary"
+        duplicate["base_url"] = "http://localhost:8001/v1"
+        duplicate[changed_field] = endpoints[0][changed_field]
+        endpoints.append(duplicate)
+        with pytest.raises(ConfigurationError, match="must be unique"):
+            WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_endpoint_topology_is_attempt_identity_not_semantic_model_identity() -> None:
+    original = WorkspaceConfiguration.from_mapping(workspace_payload())
+    changed_payload = workspace_payload()
+    endpoints = changed_payload["executors"]["remote-models"]["endpoints"]  # type: ignore[index]
+    endpoints[0]["max_concurrent_requests"] = 8
+    endpoints.append(
+        {
+            "id": "secondary",
+            "base_url": "http://localhost:8001/v1",
+            "max_concurrent_requests": 4,
+        }
+    )
+    changed = WorkspaceConfiguration.from_mapping(changed_payload)
+    original_executor = original.executors["remote-models"]
+    changed_executor = changed.executors["remote-models"]
+
+    assert original_executor.execution_hash == changed_executor.execution_hash
+    assert original_executor.pool_hash != changed_executor.pool_hash
+    assert original.identity_hash != changed.identity_hash
+    assert (
+        resolve_role_models(original, "baseline")["solver"].content_hash
+        == resolve_role_models(changed, "baseline")["solver"].content_hash
+    )
 
 
 def test_skills_require_exactly_one_selection_form() -> None:
@@ -82,6 +138,134 @@ def test_explicit_skill_files_are_the_only_directory_alternative() -> None:
         "skills/alpha/SKILL.md",
         "skills/beta/SKILL.md",
     )
+
+
+def test_hash_verified_workspace_skill_import_is_namespaced_and_addressed(
+    tmp_path: Path,
+) -> None:
+    repository = create_workspace(tmp_path / "workspace")
+    imported_file = repository.root / "instructions/platform/skills/agents/a2a/SKILL.md"
+    imported_file.parent.mkdir(parents=True)
+    imported_file.write_text("# Platform A2A\n\nUse the locked protocol.\n", encoding="utf-8")
+    manifest = repository.root / "instructions/platform/manifest.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "id": "platform",
+                "source": {
+                    "type": "mcp",
+                    "manifest_hash": f"sha256:{'a' * 64}",
+                    "ontology_hash": f"sha256:{'b' * 64}",
+                },
+                "skills": [
+                    {
+                        "id": "agents/a2a",
+                        "name": "a2a_communication",
+                        "uri": "example://skills/a2a",
+                        "resource_path": "skills/agents/a2a/SKILL.md",
+                        "file": "instructions/platform/skills/agents/a2a/SKILL.md",
+                        "content_hash": sha256_file(imported_file),
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workspace_document = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
+    workspace_document["evaluation"]["instructions"]["imports"] = [
+        {
+            "id": "platform",
+            "source": "mcp",
+            "note": "Platform-owned skills captured from MCP.",
+            "manifest": "instructions/platform/manifest.yaml",
+            "skills": {"directory": "instructions/platform/skills"},
+        }
+    ]
+    repository.workspace_file.write_text(
+        yaml.safe_dump(workspace_document, sort_keys=False), encoding="utf-8"
+    )
+    repository = WorkspaceRepository.from_file(repository.workspace_file)
+    lock, directory = create_snapshot(
+        repository,
+        create_checkout(tmp_path),
+        tmp_path / "external",
+    )
+
+    context = load_snapshot_context(
+        lock,
+        directory,
+        global_paths=repository.workspace.evaluation.instructions.global_paths,
+        workspace_root=repository.root,
+        instruction_imports=repository.workspace.evaluation.instructions.imports,
+    )
+
+    assert context.skill("platform/agents/a2a") == imported_file.read_text(encoding="utf-8")
+    assert context.snapshot_hash != lock.content_hash
+    assert context.workspace_source_paths == (
+        "instructions/platform/manifest.yaml",
+        "instructions/platform/skills/agents/a2a/SKILL.md",
+    )
+    assert context.instruction_imports[0].note == "Platform-owned skills captured from MCP."
+    assert context.instruction_units[-1].source_type == "mcp"
+
+
+def test_workspace_skill_import_rejects_content_drift(tmp_path: Path) -> None:
+    repository = create_workspace(tmp_path / "workspace")
+    imported_file = repository.root / "instructions/platform/skills/a/SKILL.md"
+    imported_file.parent.mkdir(parents=True)
+    imported_file.write_text("# Changed\n", encoding="utf-8")
+    manifest = repository.root / "instructions/platform/manifest.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "id": "platform",
+                "source": {"type": "mcp"},
+                "skills": [
+                    {
+                        "id": "a",
+                        "name": "a",
+                        "uri": "example://skills/a",
+                        "resource_path": "skills/a/SKILL.md",
+                        "file": "instructions/platform/skills/a/SKILL.md",
+                        "content_hash": f"sha256:{'0' * 64}",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
+    payload["evaluation"]["instructions"]["imports"] = [
+        {
+            "id": "platform",
+            "source": "mcp",
+            "note": "Locked external skills.",
+            "manifest": "instructions/platform/manifest.yaml",
+            "skills": {"directory": "instructions/platform/skills"},
+        }
+    ]
+    repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    repository = WorkspaceRepository.from_file(repository.workspace_file)
+    lock, directory = create_snapshot(
+        repository,
+        create_checkout(tmp_path),
+        tmp_path / "external",
+    )
+
+    with pytest.raises(IntegrityError, match="content hash mismatch"):
+        load_snapshot_context(
+            lock,
+            directory,
+            global_paths=repository.workspace.evaluation.instructions.global_paths,
+            workspace_root=repository.root,
+            instruction_imports=repository.workspace.evaluation.instructions.imports,
+        )
 
 
 def test_case_coverage_requires_multiple_cases_and_semantic_groups_per_skill() -> None:
@@ -196,7 +380,7 @@ def test_unrelated_experiment_change_does_not_change_baseline_revision(
     original = compiled.experiment_lock("baseline")
     workspace_file = compiled.repository.workspace_file
     payload = yaml.safe_load(workspace_file.read_text(encoding="utf-8"))
-    payload["experiments"]["optimize"]["optimizer"]["parameters"]["seed"] = 99
+    payload["experiments"]["optimize"]["cross_validation"]["seed"] = 99
     workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(workspace_file)
     changed = compile_workspace(
@@ -229,18 +413,18 @@ def test_reasoning_effort_is_rejected_inside_generic_parameters() -> None:
 def test_configured_api_key_reference_is_required_only_at_request_time() -> None:
     payload = workspace_payload()
     executor = payload["executors"]["remote-models"]  # type: ignore[index]
-    executor["api_key_env"] = "OPENAI_API_KEY"  # type: ignore[index]
+    executor["endpoints"][0]["api_key_env"] = "OPENAI_API_KEY"  # type: ignore[index]
     workspace = WorkspaceConfiguration.from_mapping(payload)
-    resolved = resolve_role_models(workspace, "baseline", {})["solver"]
+    endpoint = workspace.executors["remote-models"].endpoints[0]
 
-    with pytest.raises(ResolutionError, match="solver API credential is required"):
-        resolved.api_key({})
-    assert resolved.api_key({"OPENAI_API_KEY": "secret"}) == "secret"
+    with pytest.raises(ResolutionError, match="endpoint 'primary' requires"):
+        endpoint.api_key({})
+    assert endpoint.api_key({"OPENAI_API_KEY": "secret"}) == "secret"
 
 
-def test_calibration_must_use_the_exact_judge_executor_and_model() -> None:
+def test_judge_validation_must_use_the_exact_judge_executor_and_model() -> None:
     payload = workspace_payload()
-    payload["stages"]["calibrate_judge"]["model"] = "solver"  # type: ignore[index]
+    payload["stages"]["validate_judge"]["model"] = "solver"  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="exact executor and model"):
         WorkspaceConfiguration.from_mapping(payload)
 
@@ -261,7 +445,7 @@ def test_unknown_legacy_workspace_surface_is_rejected() -> None:
         WorkspaceConfiguration.from_mapping(payload)
 
 
-def test_model_name_and_base_url_must_be_stored_directly() -> None:
+def test_model_name_must_be_stored_directly() -> None:
     payload = workspace_payload()
     model = payload["models"]["solver"]  # type: ignore[index]
     del model["name"]  # type: ignore[index]
@@ -478,7 +662,7 @@ def test_policy_change_rejects_cases_authored_under_previous_policy(
         tmp_path / "external",
     )
     environment = {"TEST_API_KEY": "test-secret"}
-    seed_cases_and_calibration(
+    seed_cases_and_judge_validation(
         repository,
         authoring_instructions_hash=sha256_file(repository.case_authoring_path),
         source_snapshot_hash=snapshot.content_hash,
@@ -522,7 +706,7 @@ def test_explicit_data_root_inside_enclosing_git_repository_is_rejected(
         _ = repository.data_root
 
 
-def test_bootstrap_inspection_reports_readiness_without_cases_or_calibration(
+def test_bootstrap_inspection_reports_readiness_without_cases_or_judge_validation(
     tmp_path: Path,
 ) -> None:
     repository = create_workspace(tmp_path / "workspace")
@@ -532,10 +716,10 @@ def test_bootstrap_inspection_reports_readiness_without_cases_or_calibration(
         tmp_path / "external",
     )
     (repository.cases_root / "splits.yaml").write_text(
-        "schema_version: 2\ngroups: {}\n", encoding="utf-8"
+        "schema_version: 3\ngroups: {}\n", encoding="utf-8"
     )
-    (repository.calibration_root / "manifest.yaml").write_text(
-        "schema_version: 2\nfixtures: []\n", encoding="utf-8"
+    (repository.judge_validation_root / "manifest.yaml").write_text(
+        "schema_version: 3\nfixtures: []\n", encoding="utf-8"
     )
 
     result = inspect_workspace(
@@ -547,8 +731,12 @@ def test_bootstrap_inspection_reports_readiness_without_cases_or_calibration(
 
     assert result["status"] == "incomplete"
     assert result["ready_for_scored_run"] is False
+    assert result["executors"]["remote-models"]["total_concurrency"] == 1  # type: ignore[index]
+    assert str(result["executors"]["remote-models"]["pool_hash"]).startswith(  # type: ignore[index]
+        "sha256:"
+    )
     assert result["cases"]["count"] == 0  # type: ignore[index]
-    assert result["judge"]["calibration"]["status"] == "incomplete"  # type: ignore[index]
+    assert result["judge"]["validation"]["status"] == "incomplete"  # type: ignore[index]
     assert result["experiments"]["baseline"]["lock_hash"] is None  # type: ignore[index]
 
 
