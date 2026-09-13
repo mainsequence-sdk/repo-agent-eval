@@ -8,6 +8,7 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval init` | Create an explicit schema-v11 workspace and supporting files. |
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
+| `ms-agent-eval preflight <experiment>` | Render DSPy requests and calculate endpoint-native token fit and usable concurrency without generation. |
 | `ms-agent-eval run <experiment>` | Start a named evaluation or optimization. |
 | `ms-agent-eval run resume <run-id>` | Continue an existing immutable run. |
 | `ms-agent-eval stage list` | List packet attempts and states for a run. |
@@ -31,6 +32,26 @@ Common run options:
 
 Use `ms-agent-eval <command> --help` for the exact arguments supported by the
 installed version.
+
+Run the endpoint diagnostic before spending inference capacity:
+
+```bash
+ms-agent-eval preflight baseline --workspace workspace.yaml
+```
+
+By default it checks judge-validation and solver requests for the selected
+benchmark split. The later judge stage is shown as deferred because its exact
+DSPy message includes the not-yet-produced solver response. Repeat `--stage`
+with `validate_judge`, `solve`, or `judge`; repeat `--case <case-id>` to select
+cases; or use `--pilot` for the train split. `--json` emits the complete
+per-request matrix.
+
+The command uses only bounded capability, chat-template, and tokenizer calls;
+it makes zero generation calls and writes no run data. `guaranteed_parallel_capacity`
+counts only exact native fits. `dispatchable_parallel_capacity` also includes
+endpoints where optional native tokenization is unavailable because normal run
+policy allows those requests through. A request rejected by every endpoint
+makes the command exit with status 2.
 
 For non-interactive `init`, pass `--solver-deployment-revision`,
 `--judge-deployment-revision`, and optionally

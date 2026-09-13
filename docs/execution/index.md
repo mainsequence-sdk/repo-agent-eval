@@ -44,6 +44,13 @@ Run the complete coordinator:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 ```
 
+Calculate token fit and usable endpoint concurrency first, without generation
+or run artifacts:
+
+```bash
+uv run ms-agent-eval preflight baseline --workspace workspace.yaml
+```
+
 Pause after a stage and inspect the ledger:
 
 ```bash
@@ -68,3 +75,5 @@ replication, storage, and report accounting, read
 [Incremental execution and reuse](incremental-execution.md).
 Capacity-aware replica scheduling is specified by
 [ADR-004](../architecture/004-pooled-endpoint-concurrency.md).
+Optional endpoint-native context admission and its graceful skip behavior are
+specified by [ADR-005](../architecture/005-optional-token-preflight.md).

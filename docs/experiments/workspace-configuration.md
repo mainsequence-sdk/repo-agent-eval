@@ -73,18 +73,18 @@ executors:
     endpoints:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-server-10-11436
         base_url: http://192.168.1.10:11436/v1
-        max_concurrent_requests: 8
+        max_concurrent_requests: 4
 ```
 
 The executor id names the pool, not a model or a vague location such as
 "remote." Its capacity is the sum of replica capacities; the example permits
-sixteen concurrent requests. Endpoint ids and normalized URLs must be unique inside
+eight concurrent requests. Endpoint ids and normalized URLs must be unique inside
 the pool. A credential reference, when required, belongs on the relevant
 endpoint item as `api_key_env`.
 

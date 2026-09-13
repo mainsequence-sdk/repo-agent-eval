@@ -144,6 +144,19 @@ def load_state_json(program: dspy.Module, path: Path) -> None:
 def _failure_kind(error: Exception) -> str:
     name = type(error).__name__
     message = str(error).lower()
+    context_text = f"{name} {message}".lower()
+    if any(
+        token in context_text
+        for token in (
+            "contextwindowexceeded",
+            "context window",
+            "context_length_exceeded",
+            "maximum context length",
+            "context size",
+            "too many tokens",
+        )
+    ):
+        return "context_window_exceeded"
     if "parse" in name.lower() or "parse" in message or "output fields" in message:
         return "typed_output_parse_error"
     if any(token in message for token in ("connection", "connecterror", "dns")):

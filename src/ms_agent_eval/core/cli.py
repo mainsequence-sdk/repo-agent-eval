@@ -6,7 +6,11 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ms_agent_eval.ui import QuestionaryPromptBackend, TerminalRunReporter
+from ms_agent_eval.ui import (
+    QuestionaryPromptBackend,
+    TerminalPreflightReporter,
+    TerminalRunReporter,
+)
 
 from .errors import AgentEvalError, ConfigurationError
 from .hashing import json_value
@@ -105,6 +109,27 @@ def _parser() -> argparse.ArgumentParser:
 
     inspect = commands.add_parser("inspect", help="Resolve and display every generated identity.")
     _workspace_argument(inspect)
+
+    preflight = commands.add_parser(
+        "preflight",
+        help="Calculate DSPy request token fit and usable endpoint concurrency.",
+    )
+    preflight.add_argument("target", help="Experiment id to inspect.")
+    preflight.add_argument(
+        "--stage",
+        action="append",
+        choices=("all", "validate_judge", "solve", "judge"),
+        help="Stage to inspect; repeat as needed (default: all model request stages).",
+    )
+    preflight.add_argument(
+        "--case",
+        action="append",
+        dest="case_ids",
+        help="Inspect one case id; repeat to select multiple cases.",
+    )
+    _pilot_argument(preflight)
+    _json_argument(preflight)
+    _workspace_argument(preflight)
 
     run = commands.add_parser("run", help="Start or resume a staged evaluation.")
     run.add_argument("target", help="Experiment id, or the literal 'resume'.")
@@ -356,11 +381,24 @@ def _run(
             "reports": publications,
         }
     from .planning import compile_workspace
-    from .coordinator import StageCoordinator
-    from .stages import StageKind
 
     pilot = bool(getattr(arguments, "pilot", False))
     compiled = compile_workspace(repository, allow_incomplete_coverage=pilot)
+    if arguments.command == "preflight":
+        from .preflight_diagnostics import calculate_preflight
+
+        return calculate_preflight(
+            compiled,
+            arguments.target,
+            environment=environment,
+            stages=tuple(arguments.stage or ("all",)),
+            case_ids=tuple(arguments.case_ids or ()),
+            pilot=pilot,
+        )
+
+    from .coordinator import StageCoordinator
+    from .stages import StageKind
+
     coordinator = StageCoordinator(compiled, progress_sink=progress_sink)
     if arguments.command == "run":
         if arguments.target == "resume":
@@ -471,9 +509,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if reporter is not None:
         reporter.close()
         return 0
+    if _human_preflight(arguments):
+        assert isinstance(payload, Mapping)
+        TerminalPreflightReporter().render(payload)
+        return 2 if payload.get("status") == "blocked" else 0
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
-    return 0
+    return (
+        2
+        if arguments.command == "preflight"
+        and isinstance(payload, Mapping)
+        and payload.get("status") == "blocked"
+        else 0
+    )
 
 
 def _human_progress(arguments: argparse.Namespace) -> bool:
@@ -485,6 +533,14 @@ def _human_progress(arguments: argparse.Namespace) -> bool:
         "execute",
         "submit",
     }
+
+
+def _human_preflight(arguments: argparse.Namespace) -> bool:
+    return (
+        arguments.command == "preflight"
+        and not getattr(arguments, "json", False)
+        and sys.stdout.isatty()
+    )
 
 
 if __name__ == "__main__":

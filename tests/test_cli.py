@@ -128,6 +128,26 @@ def test_cli_exposes_deterministic_report_backfill() -> None:
     assert arguments.all is False
 
 
+def test_cli_exposes_generation_free_token_preflight() -> None:
+    arguments = _parser().parse_args(
+        [
+            "preflight",
+            "baseline",
+            "--stage",
+            "solve",
+            "--case",
+            "case-1",
+            "--workspace",
+            "workspace.yaml",
+        ]
+    )
+
+    assert arguments.command == "preflight"
+    assert arguments.target == "baseline"
+    assert arguments.stage == ["solve"]
+    assert arguments.case_ids == ["case-1"]
+
+
 def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from .helpers import create_checkout, create_snapshot, create_workspace
 

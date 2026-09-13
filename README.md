@@ -129,9 +129,9 @@ uv run ms-agent-eval init \
   --global-instructions AGENTS.md \
   --skills-directory .agents/skills \
   --cases cases \
-  --endpoint llama-cpp-17-18081 http://192.168.1.17:18081/v1 4 \
-  --endpoint llama-cpp-17-18080 http://192.168.1.17:18080/v1 4 \
-  --endpoint llama-server-10-11436 http://192.168.1.10:11436/v1 8 \
+  --endpoint llama-cpp-17-18081 http://192.168.1.17:18081/v1 2 \
+  --endpoint llama-cpp-17-18080 http://192.168.1.17:18080/v1 2 \
+  --endpoint llama-server-10-11436 http://192.168.1.10:11436/v1 4 \
   --solver-model solver-model \
   --solver-deployment-revision solver-deployment-v1 \
   --solver-reasoning-effort high \
@@ -192,13 +192,13 @@ executors:
     endpoints:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-server-10-11436
         base_url: http://192.168.1.10:11436/v1
-        max_concurrent_requests: 8
+        max_concurrent_requests: 4
 
 models:
   solver:
@@ -226,8 +226,8 @@ stages:
 ```
 
 The coordinator runs ready packets through a bounded local thread pool. Each
-endpoint enforces its own request limit, so this example can issue at most sixteen
-requests concurrently (4 + 4 + 8). The model's `deployment_revision` attests that
+endpoint enforces its own request limit, so this example can issue at most eight
+requests concurrently (2 + 2 + 4). The model's `deployment_revision` attests that
 every endpoint in the pool serves the same semantic deployment; heterogeneous
 deployments require separate executors and model identities.
 
@@ -265,6 +265,8 @@ compiles the edited workspace as a new revision and reuses only compatible work.
 uv run ms-agent-eval validate --workspace workspace.yaml
 # Ask Codex to use the case-authoring skill with this workspace and campaign goal.
 uv run ms-agent-eval inspect --workspace workspace.yaml
+# Render the real DSPy requests and check native token fit/capacity without generation.
+uv run ms-agent-eval preflight baseline --workspace workspace.yaml
 # While coverage is incomplete, exercise judge validation, solving, and judging on
 # train cases without producing benchmark metrics.
 uv run ms-agent-eval run baseline --pilot --workspace workspace.yaml
@@ -272,6 +274,13 @@ uv run ms-agent-eval run baseline --pilot --workspace workspace.yaml
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
 ```
+
+`preflight` makes zero generation calls and creates no run or result artifacts. It
+shows the configured endpoint slots, the exact-fit and dispatchable parallel
+capacity, endpoint context windows, largest rendered request, and minimum
+dispatch waves. Judge requests are reported as deferred until their solver
+responses exist; this is explicit because candidate-response size is part of
+the real judge request.
 
 A pilot is immutable and explicitly records `benchmark_valid: false`. It never
 loads test or challenge cases, cannot run optimization, retains per-case judge

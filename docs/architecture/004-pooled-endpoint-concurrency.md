@@ -49,17 +49,17 @@ logical executor capacity.
 
 ```text
                               lan-inference
-                      logical capacity = 4 + 4 + 8 = 16
+                       logical capacity = 2 + 2 + 4 = 8
                                     │
                       local bounded request scheduler
                                     │
                  ┌────────────────┼────────────────┐
                  │                │                │
        llama.cpp :18081      llama.cpp :18080      llama server :11436
-            4 slots               4 slots                 8 slots
+            2 slots               2 slots                 4 slots
 ```
 
-Sixteen is an upper bound, not a promise that every stage always has sixteen
+Eight is an upper bound, not a promise that every stage always has eight
 requests in flight. Effective concurrency is:
 
 ```text
@@ -85,13 +85,13 @@ executors:
     endpoints:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-server-10-11436
         base_url: http://192.168.1.10:11436/v1
-        max_concurrent_requests: 8
+        max_concurrent_requests: 4
 
 models:
   qwen-solver:
@@ -197,11 +197,11 @@ timeouts, parsing failures, and cancellation.
 ready packet queue
        │
        ▼
-bounded worker pool (16)
+bounded worker pool (8)
        │
-       ├── acquire llama-cpp-17-18081 slot 1..4 ──► request
-       ├── acquire llama-cpp-17-18080 slot 1..4 ──► request
-       └── acquire llama-server-10-11436 slots 1..8 ──► requests
+       ├── acquire llama-cpp-17-18081 slots 1..2 ──► requests
+       ├── acquire llama-cpp-17-18080 slots 1..2 ──► requests
+       └── acquire llama-server-10-11436 slots 1..4 ──► requests
 ```
 
 The dispatcher uses capacity-aware availability rather than assigning requests
@@ -216,8 +216,8 @@ bypassing endpoint capacity. Packet-level concurrency supplies most throughput:
 independent solver cases run together, and independent judge cases run together.
 Judge validation is a single graph packet but is internally expanded into one
 request task per `(fixture, repetition)` pair. With five fixtures and three
-repetitions, all 15 votes can therefore run concurrently in this 16-slot pool;
-the sixteenth slot remains idle because there is no sixteenth independent vote.
+repetitions, 15 votes become ready independently and up to eight run concurrently
+in this pool.
 Votes are restored to stable manifest/repetition order before median and majority
 aggregation, so transport completion order cannot change the validation result.
 
@@ -338,7 +338,7 @@ final summary reports replica count, total capacity, and calls:
 [37/102] Solved case-037 · llama-cpp-17-18081
 [38/102] Solved case-041 · llama-cpp-17-18080
 [1/15] metatable-graph-partial · vote 2 · llama-server-10-11436
-Endpoint pool  3 replicas · 16 slots · 423 calls
+Endpoint pool  3 replicas · 8 slots · 423 calls
 ```
 
 Case-level start, reuse, completion, and failure events retain the case id. UI
@@ -364,16 +364,16 @@ lines or corrupt counters.
 9. Make progress reporting thread-safe and add endpoint-level utilization to
    run summaries.
 10. Validate with deterministic instrumented endpoint workers, an end-to-end
-   three-slot run, and compilation of the MainSequence 4+4+8 LAN workspace.
+   three-slot run, and compilation of the MainSequence 2+2+4 LAN workspace.
 
 ## Acceptance criteria
 
-- Three instrumented fake endpoints configured for capacities four, four, and
-  eight observe no more than four, four, and eight concurrent requests per
-  endpoint, and no more than sixteen across the pool.
+- Three instrumented fake endpoints configured for capacities two, two, and
+  four observe no more than two, two, and four concurrent requests per
+  endpoint, and no more than eight across the pool.
 - A one-endpoint pool behaves identically to the current sequential executor when
   configured with capacity one.
-- At least sixteen ready packets cause sixteen concurrent requests when all
+- At least eight ready packets cause eight concurrent requests when all
   three fake endpoints are healthy and response times overlap.
 - Solver and judge profiles can share the pool without sharing mutable DSPy or
   observer state.

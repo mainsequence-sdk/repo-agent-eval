@@ -14,7 +14,7 @@ from .engine import (
     program_state,
     save_state_json,
 )
-from .observed_lm import ObservedDspyLM
+from .observed_lm import ObservedDspyLM, RoutedDspyLM
 
 __all__ = [
     "BudgetExceeded",
@@ -26,6 +26,7 @@ __all__ = [
     "DspyExecutor",
     "InstructionResponse",
     "ObservedDspyLM",
+    "RoutedDspyLM",
     "PROGRAM_SIGNATURES",
     "RubricJudge",
     "create_author_program",

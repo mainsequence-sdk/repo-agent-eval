@@ -28,6 +28,7 @@ from ms_agent_eval.programs.dspy.engine import (
     load_state_json,
     program_hash,
 )
+from ms_agent_eval.programs.dspy.observed_lm import RoutedDspyLM
 from ms_agent_eval.providers.openai_compatible import create_observed_lm
 
 from .errors import (
@@ -84,6 +85,11 @@ from .stages import (
 )
 from .storage import FilesystemArtifactStore
 from .snapshots import ExternalSnapshotStore
+from .token_preflight import (
+    ContextWindowExceededError,
+    EndpointTokenPreflight,
+    TokenPreflightResult,
+)
 from .workspace import (
     ExecutorConfiguration,
     ExecutorType,
@@ -130,7 +136,7 @@ class _JudgeValidationVoteExecution:
     fixture_id: str
     repetition: int
     vote: JudgeVote | None
-    endpoint_lease: EndpointLease
+    endpoint_id: str | None
     usage: Mapping[str, object]
     duration_seconds: float
     error: Exception | None
@@ -147,20 +153,14 @@ class _ExecutionSession:
         self.lock = lock
         self.environment = environment
         self.observers: dict[str, list[ModelCallObserver]] = {}
-        self.endpoints: dict[str, EndpointLease] = {}
         self.budgets: dict[str, BudgetLedger] = {}
+        self.delegates: dict[tuple[int, str], dspy.BaseLM] = {}
         self._lock = Lock()
-
-    def bind_endpoint(self, packet_id: str, lease: EndpointLease) -> None:
-        with self._lock:
-            self.endpoints[packet_id] = lease
 
     def lm(
         self,
         role: str,
         packet: StagePacket,
-        *,
-        endpoint_lease: EndpointLease | None = None,
     ) -> tuple[dspy.BaseLM, ModelCallObserver]:
         model = self.lock.models.get(role) or resolve_stage_model(
             self.coordinator.workspace.repository.workspace,
@@ -170,12 +170,6 @@ class _ExecutionSession:
         if model is None:
             raise ConfigurationError(f"stage {packet.stage.value!r} has no model")
         executor = self.coordinator.workspace.repository.workspace.executors[model.executor_id]
-        with self._lock:
-            endpoint = endpoint_lease or self.endpoints.get(packet.packet_id)
-        if executor.type is ExecutorType.ENDPOINT:
-            if endpoint is None:
-                raise IntegrityError("endpoint-backed model call has no acquired endpoint permit")
-            model = model.bind_endpoint(endpoint.endpoint)
         observer = ModelCallObserver(
             self.coordinator.artifacts,
             role=role,
@@ -199,13 +193,141 @@ class _ExecutionSession:
                     ),
                 )
                 self.budgets[packet.packet_id] = budget
-        lm = self.coordinator.lm_factory(
-            model,
-            observer,
-            budget,
-            endpoint.endpoint.api_key(self.environment) if endpoint is not None else None,
-        )
+        if executor.type is ExecutorType.ENDPOINT:
+            lm = RoutedDspyLM(
+                model=f"openai/{model.model}",
+                route_factory=lambda messages, parameters: self._route_lm(
+                    model,
+                    executor,
+                    observer,
+                    budget,
+                    messages,
+                    parameters,
+                ),
+            )
+        else:
+            lm = self.coordinator.lm_factory(model, observer, budget, None)
         return lm, observer
+
+    @contextmanager
+    def _route_lm(
+        self,
+        model: ResolvedRoleModel,
+        executor: ExecutorConfiguration,
+        observer: ModelCallObserver,
+        budget: BudgetLedger,
+        messages: Sequence[Mapping[str, object]],
+        call_parameters: Mapping[str, object],
+    ):  # type: ignore[no-untyped-def]
+        try:
+            pool = self.coordinator.endpoint_pools[executor.id]
+        except KeyError as error:
+            raise IntegrityError("endpoint executor pool is unavailable") from error
+        configured_ids = {endpoint.id for endpoint in executor.endpoints}
+        excluded: set[str] = set()
+        maximum_output_tokens = call_parameters.get("max_tokens")
+        if maximum_output_tokens is None:
+            maximum_output_tokens = call_parameters.get("max_completion_tokens")
+        if maximum_output_tokens is None:
+            maximum_output_tokens = model.parameters.get("max_tokens")
+        if maximum_output_tokens is None:
+            maximum_output_tokens = model.parameters.get("max_completion_tokens")
+        if not isinstance(maximum_output_tokens, int) or isinstance(
+            maximum_output_tokens, bool
+        ):
+            maximum_output_tokens = None
+
+        while True:
+            rejected: ContextWindowExceededError | None = None
+            with pool.lease(excluded_endpoint_ids=frozenset(excluded)) as lease:
+                endpoint = lease.endpoint
+                api_key = endpoint.api_key(self.environment)
+                preflight = self.coordinator.token_preflight.evaluate(
+                    endpoint,
+                    model=model.model,
+                    deployment_revision=model.deployment_revision,
+                    messages=messages,
+                    maximum_output_tokens=maximum_output_tokens,
+                    reasoning_effort=model.reasoning_effort,
+                    api_key=api_key,
+                )
+                if not preflight.permits_dispatch:
+                    observer.record_endpoint_route(
+                        self._endpoint_route(
+                            lease,
+                            model,
+                            preflight,
+                            generation_attempted=False,
+                            request_status="not_dispatched",
+                            usage=_usage(()),
+                        )
+                    )
+                    rejected = ContextWindowExceededError(endpoint.id, preflight)
+                else:
+                    started = time.monotonic()
+                    record_start = len(observer.records)
+                    request_status = "completed"
+                    try:
+                        delegate_key = (id(observer), endpoint.id)
+                        with self._lock:
+                            delegate = self.delegates.get(delegate_key)
+                            if delegate is None:
+                                delegate = self.coordinator.lm_factory(
+                                    model.bind_endpoint(endpoint),
+                                    observer,
+                                    budget,
+                                    api_key,
+                                )
+                                self.delegates[delegate_key] = delegate
+                        yield delegate
+                    except BaseException:
+                        request_status = "failed"
+                        raise
+                    finally:
+                        records = tuple(observer.records[record_start:])
+                        if records and records[-1].status == "failed":
+                            request_status = "failed"
+                        observer.record_endpoint_route(
+                            self._endpoint_route(
+                                lease,
+                                model,
+                                preflight,
+                                generation_attempted=True,
+                                request_status=request_status,
+                                usage=_usage(records),
+                                duration_seconds=time.monotonic() - started,
+                            )
+                        )
+                    return
+            assert rejected is not None
+            excluded.add(rejected.endpoint_id)
+            if configured_ids <= excluded:
+                raise rejected
+
+    @staticmethod
+    def _endpoint_route(
+        lease: EndpointLease,
+        model: ResolvedRoleModel,
+        preflight: TokenPreflightResult,
+        *,
+        generation_attempted: bool,
+        request_status: str,
+        usage: Mapping[str, object],
+        duration_seconds: float = 0.0,
+    ) -> Mapping[str, object]:
+        route = dict(lease.provenance()["endpoint_pool"])
+        route.update(
+            {
+                "preflight": preflight.as_dict(),
+                "model": model.model,
+                "deployment_revision": model.deployment_revision,
+                "generation_attempted": generation_attempted,
+                "request_status": request_status,
+                "request_duration_seconds": duration_seconds,
+                **dict(usage),
+            }
+        )
+        return route
 
     def evidence(self, packet_id: str) -> Mapping[str, object]:
         with self._lock:
@@ -230,6 +352,123 @@ class _ExecutionSession:
             ]
         )
 
+    def endpoint_provenance(self, packet_id: str) -> Mapping[str, object]:
+        with self._lock:
+            observers = tuple(self.observers.get(packet_id, ()))
+        observed = [
+            dict(route)
+            for observer in observers
+            for route in observer.endpoint_routes
+        ]
+        if not observed:
+            return {}
+        grouped: dict[str, dict[str, object]] = {}
+        for route in observed:
+            endpoint_id = route.get("endpoint_id")
+            if not isinstance(endpoint_id, str):
+                continue
+            aggregate = grouped.setdefault(
+                endpoint_id,
+                {
+                    "pool_hash": route.get("pool_hash"),
+                    "endpoint_id": endpoint_id,
+                    "endpoint_configuration_hash": route.get(
+                        "endpoint_configuration_hash"
+                    ),
+                    "model": route.get("model"),
+                    "deployment_revision": route.get("deployment_revision"),
+                    "max_concurrent_requests": route.get(
+                        "max_concurrent_requests"
+                    ),
+                    "requests": 0,
+                    "completed_requests": 0,
+                    "failed_requests": 0,
+                    "preflight_checks": 0,
+                    "preflight_rejections": 0,
+                    "preflight_skips": 0,
+                    "model_calls": 0,
+                    "completed_calls": 0,
+                    "failed_calls": 0,
+                    "tokens": 0,
+                    "configured_cost": 0.0,
+                    "latency_seconds": 0.0,
+                    "queue_wait_seconds": 0.0,
+                    "peak_observed_endpoint_concurrency": 0,
+                    "peak_observed_pool_concurrency": 0,
+                },
+            )
+            preflight = route.get("preflight")
+            if isinstance(preflight, Mapping):
+                status = preflight.get("status")
+                aggregate["preflight_checks"] = int(aggregate["preflight_checks"]) + 1
+                if status == "exceeds":
+                    aggregate["preflight_rejections"] = int(
+                        aggregate["preflight_rejections"]
+                    ) + 1
+                elif status == "skipped":
+                    aggregate["preflight_skips"] = int(
+                        aggregate["preflight_skips"]
+                    ) + 1
+                aggregate["context_window"] = preflight.get("context_window")
+                aggregate["last_preflight"] = dict(preflight)
+            if route.get("generation_attempted") is True:
+                aggregate["requests"] = int(aggregate["requests"]) + 1
+                outcome = (
+                    "completed_requests"
+                    if route.get("request_status") == "completed"
+                    else "failed_requests"
+                )
+                aggregate[outcome] = int(aggregate[outcome]) + 1
+            for key in ("model_calls", "completed_calls", "failed_calls", "tokens"):
+                value = route.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    aggregate[key] = int(aggregate[key]) + value
+            for key in ("configured_cost", "latency_seconds", "queue_wait_seconds"):
+                value = route.get(key, 0.0)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    aggregate[key] = float(aggregate[key]) + float(value)
+            aggregate["peak_observed_endpoint_concurrency"] = max(
+                int(aggregate["peak_observed_endpoint_concurrency"]),
+                int(route.get("endpoint_active_at_start", 0)),
+            )
+            aggregate["peak_observed_pool_concurrency"] = max(
+                int(aggregate["peak_observed_pool_concurrency"]),
+                int(route.get("pool_active_at_start", 0)),
+            )
+
+        routes = [grouped[key] for key in sorted(grouped)]
+        role = observers[0].role
+        resolved_model = self.lock.models.get(role) or resolve_stage_model(
+            self.coordinator.workspace.repository.workspace,
+            self.coordinator.ledger.load_packet(packet_id).stage.value,
+            role=role,
+        )
+        if resolved_model is None:
+            raise IntegrityError("endpoint provenance has no resolved model")
+        executor = self.coordinator.workspace.repository.workspace.executors[
+            resolved_model.executor_id
+        ]
+        pool_value: dict[str, object] = {
+            "pool_hash": executor.pool_hash,
+            "total_concurrency": executor.total_concurrency,
+            "requests": sum(int(route["requests"]) for route in routes),
+            "completed_requests": sum(
+                int(route["completed_requests"]) for route in routes
+            ),
+            "failed_requests": sum(int(route["failed_requests"]) for route in routes),
+            "preflight_checks": sum(int(route["preflight_checks"]) for route in routes),
+            "preflight_rejections": sum(
+                int(route["preflight_rejections"]) for route in routes
+            ),
+            "preflight_skips": sum(int(route["preflight_skips"]) for route in routes),
+            "routes": routes,
+        }
+        if len(routes) == 1:
+            singular = dict(routes[0])
+            singular["total_concurrency"] = executor.total_concurrency
+            return {"endpoint_pool": singular}
+        return {"endpoint_pool": pool_value}
+
 
 class StageCoordinator:
     """Advance experiments exclusively through the portable stage contract."""
@@ -240,6 +479,7 @@ class StageCoordinator:
         *,
         lm_factory: LmFactory = default_lm_factory,
         progress_sink: ProgressSink | None = None,
+        token_preflight: EndpointTokenPreflight | None = None,
     ) -> None:
         self.workspace = workspace
         repository = (
@@ -254,6 +494,7 @@ class StageCoordinator:
         self.ledger = StageLedger(self.artifacts)
         self.dspy = DspyExecutor(self.artifacts)
         self.lm_factory = lm_factory
+        self.token_preflight = token_preflight or EndpointTokenPreflight()
         self.progress_sink = progress_sink
         self._progress_lock = Lock()
         executor_lock_root = self.artifacts.operations_root / "locks" / "executors"
@@ -1498,51 +1739,33 @@ class StageCoordinator:
         started_clock = time.monotonic()
         started = _timestamp()
         endpoint_provenance: Mapping[str, object] = {}
-        endpoint_lease: EndpointLease | None = None
-        internal_endpoint_fanout = (
-            configuration.type is ExecutorType.ENDPOINT
-            and packet.stage is StageKind.VALIDATE_JUDGE
-            and configuration.total_concurrency > 1
-        )
         claim = None
         try:
-            with self._endpoint_lease(
-                configuration,
-                acquire=not internal_endpoint_fanout,
-            ) as endpoint_lease:
-                if endpoint_lease is not None:
-                    session.bind_endpoint(packet.packet_id, endpoint_lease)
-                    endpoint_provenance = endpoint_lease.provenance()
-                endpoint_details: dict[str, object] = {}
-                if endpoint_lease is not None:
-                    endpoint_details = {
-                        "endpoint_id": endpoint_lease.endpoint.id,
-                        "pool_capacity": configuration.total_concurrency,
-                    }
-                elif internal_endpoint_fanout:
-                    endpoint_details = {
-                        "pool_capacity": configuration.total_concurrency,
-                        "request_count": (
-                            len(self.workspace.judge_validation.fixtures)
-                            * self._judge_repetitions(packet.run_id)
-                        ),
-                    }
-                self._emit_packet(
-                    "packet_started",
-                    packet,
-                    position=position,
-                    total=total,
-                    details=endpoint_details,
-                )
-                claim = self.ledger.claim(
-                    packet.packet_id,
-                    executor_id=configuration.id,
-                    worker_id=f"coordinator-{uuid4()}",
-                    lease_seconds=packet.budget.wall_seconds,
-                )
-                started = _timestamp()
-                output = self._automatic_output(packet, lock, session, configuration)
+            endpoint_details: dict[str, object] = {}
+            if configuration.type is ExecutorType.ENDPOINT:
+                endpoint_details = {"pool_capacity": configuration.total_concurrency}
+                if packet.stage is StageKind.VALIDATE_JUDGE:
+                    endpoint_details["request_count"] = (
+                        len(self.workspace.judge_validation.fixtures)
+                        * self._judge_repetitions(packet.run_id)
+                    )
+            self._emit_packet(
+                "packet_started",
+                packet,
+                position=position,
+                total=total,
+                details=endpoint_details,
+            )
+            claim = self.ledger.claim(
+                packet.packet_id,
+                executor_id=configuration.id,
+                worker_id=f"coordinator-{uuid4()}",
+                lease_seconds=packet.budget.wall_seconds,
+            )
+            started = _timestamp()
+            output = self._automatic_output(packet, lock, session, configuration)
             assert claim is not None
+            endpoint_provenance = session.endpoint_provenance(packet.packet_id)
             artifact = self.ledger.put_json("result", output.value)
             provenance = {
                 **dict(output.provenance),
@@ -1578,6 +1801,7 @@ class StageCoordinator:
         except AutomaticExecutionFailed as error:
             if claim is None:
                 raise
+            endpoint_provenance = session.endpoint_provenance(packet.packet_id)
             failed = StageResult.create(
                 packet=packet,
                 status="failed",
@@ -1606,10 +1830,10 @@ class StageCoordinator:
                 duration_seconds=time.monotonic() - started_clock,
                 details={
                     "error": failed.error.message if failed.error else error.kind,
-                    **(
-                        {"endpoint_id": endpoint_lease.endpoint.id}
-                        if endpoint_lease is not None
-                        else {}
+                    "error_kind": failed.error.kind if failed.error else error.kind,
+                    **self._endpoint_event_details(
+                        endpoint_provenance,
+                        configuration,
                     ),
                 },
             )
@@ -1617,6 +1841,7 @@ class StageCoordinator:
         except Exception as error:
             if claim is None:
                 raise
+            endpoint_provenance = session.endpoint_provenance(packet.packet_id)
             failed = StageResult.create(
                 packet=packet,
                 status="failed",
@@ -1631,7 +1856,11 @@ class StageCoordinator:
                 completed_at=_timestamp(),
                 observed_model=packet.model.id,
                 error=StageError(
-                    type(error).__name__.lower(),
+                    (
+                        "context_window_exceeded"
+                        if isinstance(error, ContextWindowExceededError)
+                        else type(error).__name__.lower()
+                    ),
                     self._redacted_error(error, session.environment),
                 ),
             )
@@ -1644,10 +1873,14 @@ class StageCoordinator:
                 duration_seconds=time.monotonic() - started_clock,
                 details={
                     "error": failed.error.message if failed.error else str(error),
-                    **(
-                        {"endpoint_id": endpoint_lease.endpoint.id}
-                        if endpoint_lease is not None
-                        else {}
+                    "error_kind": (
+                        failed.error.kind
+                        if failed.error is not None
+                        else type(error).__name__.lower()
+                    ),
+                    **self._endpoint_event_details(
+                        endpoint_provenance,
+                        configuration,
                     ),
                 },
             )
@@ -1666,27 +1899,10 @@ class StageCoordinator:
             )
             return None
         persisted = self.ledger.persist(packet.packet_id)
-        completion_endpoint_details: dict[str, object] = {}
-        if endpoint_lease is not None:
-            completion_endpoint_details = {
-                "endpoint_id": endpoint_lease.endpoint.id,
-                "pool_capacity": configuration.total_concurrency,
-            }
-        elif internal_endpoint_fanout:
-            raw_pool = output.provenance.get("endpoint_pool")
-            raw_routes = raw_pool.get("routes") if isinstance(raw_pool, Mapping) else ()
-            completion_endpoint_details = {
-                "pool_capacity": configuration.total_concurrency,
-                "endpoint_ids": [
-                    route["endpoint_id"]
-                    for route in raw_routes
-                    if isinstance(route, Mapping)
-                    and isinstance(route.get("endpoint_id"), str)
-                ]
-                if isinstance(raw_routes, Sequence)
-                and not isinstance(raw_routes, (str, bytes, bytearray))
-                else [],
-            }
+        completion_endpoint_details = self._endpoint_event_details(
+            endpoint_provenance,
+            configuration,
+        )
         self._emit_packet(
             "packet_completed",
             packet,
@@ -1967,6 +2183,61 @@ class StageCoordinator:
             }
         return {}
 
+    @staticmethod
+    def _endpoint_event_details(
+        provenance: Mapping[str, object],
+        configuration: ExecutorConfiguration,
+    ) -> Mapping[str, object]:
+        if configuration.type is not ExecutorType.ENDPOINT:
+            return {}
+        raw_pool = provenance.get("endpoint_pool")
+        if not isinstance(raw_pool, Mapping):
+            return {"pool_capacity": configuration.total_concurrency}
+        endpoint_id = raw_pool.get("endpoint_id")
+        if isinstance(endpoint_id, str):
+            preflight = raw_pool.get("last_preflight")
+            return {
+                "endpoint_id": endpoint_id,
+                "pool_capacity": configuration.total_concurrency,
+                "preflight_status": (
+                    preflight.get("status")
+                    if isinstance(preflight, Mapping)
+                    else None
+                ),
+                **(
+                    {
+                        key: preflight.get(key)
+                        for key in (
+                            "reason",
+                            "context_window",
+                            "input_tokens",
+                            "maximum_output_tokens",
+                            "required_tokens",
+                        )
+                    }
+                    if isinstance(preflight, Mapping)
+                    else {}
+                ),
+            }
+        routes = raw_pool.get("routes")
+        endpoint_ids = (
+            [
+                route["endpoint_id"]
+                for route in routes
+                if isinstance(route, Mapping)
+                and isinstance(route.get("endpoint_id"), str)
+            ]
+            if isinstance(routes, Sequence)
+            and not isinstance(routes, (str, bytes, bytearray))
+            else []
+        )
+        return {
+            "pool_capacity": configuration.total_concurrency,
+            "endpoint_ids": endpoint_ids,
+            "preflight_rejections": raw_pool.get("preflight_rejections", 0),
+            "preflight_skips": raw_pool.get("preflight_skips", 0),
+        }
+
     def _automatic_output(
         self,
         packet: StagePacket,
@@ -2099,7 +2370,6 @@ class StageCoordinator:
                     )
                 )
 
-        pool = self.endpoint_pools[configuration.id]
         progress_lock = Lock()
         completed = 0
 
@@ -2112,65 +2382,74 @@ class StageCoordinator:
             observer: ModelCallObserver | None = None
             vote: JudgeVote | None = None
             error: Exception | None = None
-            with pool.lease() as lease:
-                try:
-                    judge, observer = self._judge(
-                        lock,
-                        session,
-                        packet,
-                        repetitions=1,
-                        endpoint_lease=lease,
-                    )
-                    vote = judge.evaluate_vote(
-                        case,
-                        candidate,
-                        skill_context=context,
-                    )
-                except Exception as caught:
-                    error = caught
-                duration = time.monotonic() - started
-                usage = _usage(observer.records) if observer is not None else _usage(())
-                with progress_lock:
-                    completed += 1
-                    completion_position = completed
-                fixture_id = fixture.id
-                self._emit_packet(
-                    (
-                        "judge_validation_vote_completed"
-                        if error is None
-                        else "judge_validation_vote_failed"
-                    ),
+            try:
+                judge, observer = self._judge(
+                    lock,
+                    session,
                     packet,
-                    position=completion_position,
-                    total=len(jobs),
-                    duration_seconds=duration,
-                    details={
-                        "fixture_id": fixture_id,
-                        "vote": repetition,
-                        "endpoint_id": lease.endpoint.id,
-                        "request_position": job_position,
-                        **(
-                            {
-                                "error": self._redacted_error(
-                                    error,
-                                    session.environment,
-                                )
-                            }
-                            if error is not None
-                            else {}
-                        ),
-                    },
+                    repetitions=1,
                 )
-                return _JudgeValidationVoteExecution(
-                    job_position,
-                    fixture_id,
-                    repetition,
-                    vote,
-                    lease,
-                    usage,
-                    duration,
-                    error,
+                vote = judge.evaluate_vote(
+                    case,
+                    candidate,
+                    skill_context=context,
                 )
+            except Exception as caught:
+                error = caught
+            duration = time.monotonic() - started
+            usage = _usage(observer.records) if observer is not None else _usage(())
+            endpoint_id = None
+            preflight_status = None
+            if observer is not None and observer.endpoint_routes:
+                last_route = observer.endpoint_routes[-1]
+                value = last_route.get("endpoint_id")
+                endpoint_id = value if isinstance(value, str) else None
+                preflight = last_route.get("preflight")
+                if isinstance(preflight, Mapping):
+                    value = preflight.get("status")
+                    preflight_status = value if isinstance(value, str) else None
+            with progress_lock:
+                completed += 1
+                completion_position = completed
+            fixture_id = fixture.id
+            self._emit_packet(
+                (
+                    "judge_validation_vote_completed"
+                    if error is None
+                    else "judge_validation_vote_failed"
+                ),
+                packet,
+                position=completion_position,
+                total=len(jobs),
+                duration_seconds=duration,
+                details={
+                    "fixture_id": fixture_id,
+                    "vote": repetition,
+                    "endpoint_id": endpoint_id,
+                    "preflight_status": preflight_status,
+                    "request_position": job_position,
+                    **(
+                        {
+                            "error": self._redacted_error(
+                                error,
+                                session.environment,
+                            )
+                        }
+                        if error is not None
+                        else {}
+                    ),
+                },
+            )
+            return _JudgeValidationVoteExecution(
+                job_position,
+                fixture_id,
+                repetition,
+                vote,
+                endpoint_id,
+                usage,
+                duration,
+                error,
+            )
 
         maximum_workers = min(len(jobs), configuration.total_concurrency)
         with ThreadPoolExecutor(
@@ -2205,10 +2484,7 @@ class StageCoordinator:
                 sorted(completed_executions, key=lambda item: item.position)
             )
 
-        provenance = self._judge_validation_endpoint_provenance(
-            configuration,
-            executions,
-        )
+        provenance = session.endpoint_provenance(packet.packet_id)
         failed = next(
             (item for item in sorted(executions, key=lambda item: item.position) if item.error),
             None,
@@ -2260,69 +2536,6 @@ class StageCoordinator:
             lock.models["judge"].model,
             provenance=provenance,
         )
-
-    @staticmethod
-    def _judge_validation_endpoint_provenance(
-        configuration: ExecutorConfiguration,
-        executions: Sequence[_JudgeValidationVoteExecution],
-    ) -> Mapping[str, object]:
-        routes: dict[str, dict[str, object]] = {}
-        for execution in executions:
-            lease = execution.endpoint_lease
-            endpoint = routes.setdefault(
-                lease.endpoint.id,
-                {
-                    "endpoint_id": lease.endpoint.id,
-                    "endpoint_configuration_hash": lease.endpoint.configuration_hash,
-                    "max_concurrent_requests": lease.endpoint.max_concurrent_requests,
-                    "requests": 0,
-                    "completed_requests": 0,
-                    "failed_requests": 0,
-                    "model_calls": 0,
-                    "completed_calls": 0,
-                    "failed_calls": 0,
-                    "tokens": 0,
-                    "configured_cost": 0.0,
-                    "latency_seconds": 0.0,
-                    "queue_wait_seconds": 0.0,
-                    "peak_observed_endpoint_concurrency": 0,
-                    "peak_observed_pool_concurrency": 0,
-                },
-            )
-            endpoint["requests"] = int(endpoint["requests"]) + 1
-            outcome = (
-                "completed_requests" if execution.error is None else "failed_requests"
-            )
-            endpoint[outcome] = int(endpoint[outcome]) + 1
-            for key in ("model_calls", "completed_calls", "failed_calls", "tokens"):
-                value = execution.usage.get(key, 0)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    endpoint[key] = int(endpoint[key]) + value
-            for key in ("configured_cost", "latency_seconds"):
-                value = execution.usage.get(key, 0.0)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    endpoint[key] = float(endpoint[key]) + float(value)
-            endpoint["queue_wait_seconds"] = float(endpoint["queue_wait_seconds"]) + float(
-                lease.queue_wait_seconds
-            )
-            endpoint["peak_observed_endpoint_concurrency"] = max(
-                int(endpoint["peak_observed_endpoint_concurrency"]),
-                lease.endpoint_active_at_start,
-            )
-            endpoint["peak_observed_pool_concurrency"] = max(
-                int(endpoint["peak_observed_pool_concurrency"]),
-                lease.pool_active_at_start,
-            )
-        return {
-            "endpoint_pool": {
-                "pool_hash": configuration.pool_hash,
-                "total_concurrency": configuration.total_concurrency,
-                "requests": len(executions),
-                "completed_requests": sum(item.error is None for item in executions),
-                "failed_requests": sum(item.error is not None for item in executions),
-                "routes": [routes[key] for key in sorted(routes)],
-            }
-        }
 
     def _execute_solve(
         self,
@@ -2543,6 +2756,10 @@ class StageCoordinator:
                     "endpoint_configuration_hash": endpoint.configuration_hash,
                     "configured_capacity": endpoint.max_concurrent_requests,
                     "packets": 0,
+                    "requests": 0,
+                    "preflight_checks": 0,
+                    "preflight_rejections": 0,
+                    "preflight_skips": 0,
                     "model_calls": 0,
                     "completed_calls": 0,
                     "failed_calls": 0,
@@ -2600,6 +2817,10 @@ class StageCoordinator:
                                     "max_concurrent_requests"
                                 ),
                                 "packets": 0,
+                                "requests": 0,
+                                "preflight_checks": 0,
+                                "preflight_rejections": 0,
+                                "preflight_skips": 0,
                                 "model_calls": 0,
                                 "completed_calls": 0,
                                 "failed_calls": 0,
@@ -2609,7 +2830,23 @@ class StageCoordinator:
                                 "peak_observed_pool_concurrency": 0,
                             },
                         )
-                        endpoint["packets"] = int(endpoint["packets"]) + 1
+                        requests = route.get("requests", 0)
+                        if isinstance(requests, int) and not isinstance(requests, bool):
+                            endpoint["requests"] = int(endpoint["requests"]) + requests
+                            if requests > 0:
+                                endpoint["packets"] = int(endpoint["packets"]) + 1
+                        for preflight_key in (
+                            "preflight_checks",
+                            "preflight_rejections",
+                            "preflight_skips",
+                        ):
+                            raw_count = route.get(preflight_key, 0)
+                            if isinstance(raw_count, int) and not isinstance(
+                                raw_count, bool
+                            ):
+                                endpoint[preflight_key] = (
+                                    int(endpoint[preflight_key]) + raw_count
+                                )
                         for usage_key in (
                             "model_calls",
                             "completed_calls",
@@ -2748,13 +2985,8 @@ class StageCoordinator:
         packet: StagePacket,
         *,
         repetitions: int | None = None,
-        endpoint_lease: EndpointLease | None = None,
     ) -> tuple[LlmJudge, ModelCallObserver]:
-        lm, observer = session.lm(
-            "judge",
-            packet,
-            endpoint_lease=endpoint_lease,
-        )
+        lm, observer = session.lm("judge", packet)
         program = create_judge_program()
 
         def observed(**inputs: object) -> Mapping[str, object]:
@@ -3648,23 +3880,6 @@ class StageCoordinator:
             raise IntegrityError("packet executor configuration has changed")
         return executor
 
-    @contextmanager
-    def _endpoint_lease(
-        self,
-        executor: ExecutorConfiguration,
-        *,
-        acquire: bool = True,
-    ):  # type: ignore[no-untyped-def]
-        if executor.type is not ExecutorType.ENDPOINT or not acquire:
-            yield None
-            return
-        try:
-            pool = self.endpoint_pools[executor.id]
-        except KeyError as error:
-            raise IntegrityError("endpoint executor pool is unavailable") from error
-        with pool.lease() as lease:
-            yield lease
-
     def _budget_ledger(self, stage: StageKind, *, concurrency: int = 1) -> BudgetLedger:
         budget: RoleBudget = self.workspace.repository.workspace.stages[stage.value].budget
         return BudgetLedger(
@@ -3850,9 +4065,17 @@ def _dspy_execution_failure(role: str, result: ProgramResult) -> AutomaticExecut
     kind = result.error_kind or "unknown_error"
     message = result.error_message
     detail = f": {message}" if isinstance(message, str) and message else ""
+    if kind == "context_window_exceeded":
+        summary = f"{role} context preflight rejected request{detail}"
+    elif kind == "typed_output_parse_error":
+        summary = f"{role} DSPy could not parse the completed model response{detail}"
+    elif kind == "runtimeerror" and not result.calls and isinstance(message, str):
+        summary = message
+    else:
+        summary = f"{role} DSPy call failed ({kind}){detail}"
     return AutomaticExecutionFailed(
         kind,
-        f"{role} DSPy call failed ({kind}){detail}",
+        summary,
         usage=_usage(result.calls),
     )
 

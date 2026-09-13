@@ -66,24 +66,25 @@ executors:
     endpoints:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-server-10-11436
         base_url: http://192.168.1.10:11436/v1
-        max_concurrent_requests: 8
+        max_concurrent_requests: 4
 ```
 
-This pool has a maximum of sixteen concurrent requests. Each endpoint has its own
+This pool has a maximum of eight concurrent requests. Each endpoint has its own
 permit queue, and filesystem slot locks under
 `operations/locks/executors/` prevent separate local coordinator processes
 from exceeding the same configured capacity. Stage barriers still apply:
 judge validation precedes solving, and judging waits for solver outputs.
 Within judge validation, every `(fixture, repetition)` vote acquires its own
 permit. Five fixtures with three repetitions therefore create 15 independent
-requests, all of which fit in this 16-slot pool. Vote results are reordered by
-fixture manifest order and repetition before deterministic aggregation.
+ready requests; at most eight execute concurrently in this pool. Vote results
+are reordered by fixture manifest order and repetition before deterministic
+aggregation.
 
 All endpoints in one pool must serve the same output-affecting deployment for a
 given model profile. The configured `deployment_revision` is the operator's
@@ -95,6 +96,55 @@ serving behavior requires a new deployment revision.
 Execution results record endpoint id, endpoint/pool hashes, capacity, queue
 wait, observed concurrency, call counts, failures, and latency. Completed run
 reports include a human-readable per-endpoint table.
+
+## Optional exact token preflight
+
+No tokenizer adapter or manually configured context size is required. Immediately
+before each DSPy model call, the coordinator checks whether that concrete
+endpoint exposes the llama.cpp-compatible runtime extensions needed for an
+exact count:
+
+```text
+GET  /props
+POST /apply-template
+POST /tokenize
+```
+
+When available, the coordinator renders the final DSPy messages with the
+server's active chat template, counts those tokens with the server tokenizer,
+adds the model profile's `max_tokens` output reservation, and compares the
+total with the advertised `n_ctx`. This measures the complete request—including
+DSPy instructions, skill context, case content, and judge evidence—not only the
+small authored prompt.
+
+If one replica is known to be too small, its permit is released and the call is
+routed to another replica in the same executor pool. If every replica is known
+to be too small, the stage fails before generation with
+`context_window_exceeded`. The framework never truncates experiment inputs.
+
+If `/props`, `/apply-template`, or `/tokenize` is missing, unavailable,
+unauthorized, or incompatible, preflight is recorded as `skipped` and the
+generation request proceeds normally. The provider remains authoritative and
+any later context rejection is preserved as the model-call failure. Workspace
+`validate` and `inspect` remain network-free; capability detection happens only
+during execution.
+
+To calculate the same native fit and the batch's usable parallel capacity
+without making a generation call or creating a run:
+
+```bash
+uv run ms-agent-eval preflight baseline --workspace workspace.yaml
+```
+
+The terminal view separates exact-fit capacity from dispatchable capacity. The
+latter includes replicas where optional native tokenization is unavailable,
+matching runtime fallback policy. Use `--json` for every rendered request and
+endpoint outcome.
+
+Stage provenance and reports distinguish exact checks, skips, preflight
+rejections, reroutes, and actual generation calls. See
+[ADR-005](../architecture/005-optional-token-preflight.md) for the admission and
+caching contract.
 
 ## Authentication
 

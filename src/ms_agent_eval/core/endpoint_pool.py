@@ -62,13 +62,24 @@ class EndpointPool:
         return self.executor.total_concurrency
 
     @contextmanager
-    def lease(self) -> Iterator[EndpointLease]:
+    def lease(
+        self,
+        *,
+        excluded_endpoint_ids: frozenset[str] = frozenset(),
+    ) -> Iterator[EndpointLease]:
+        configured_ids = {endpoint.id for endpoint in self.executor.endpoints}
+        if configured_ids <= excluded_endpoint_ids:
+            raise ValueError("endpoint lease excludes every configured endpoint")
         started = time.monotonic()
         endpoint: EndpointConfiguration | None = None
         slot = -1
         handle = None
         while handle is None:
             candidate, candidate_slot = self._tokens.get()
+            if candidate.id in excluded_endpoint_ids:
+                self._tokens.put((candidate, candidate_slot))
+                time.sleep(0.001)
+                continue
             path = self.lock_root / candidate.id / f"{candidate_slot}.lock"
             candidate_handle = path.open("a+b")
             try:

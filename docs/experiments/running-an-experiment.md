@@ -5,12 +5,20 @@ Run static checks before spending model capacity:
 ```bash
 uv run ms-agent-eval validate --workspace workspace.yaml
 uv run ms-agent-eval inspect --workspace workspace.yaml
+uv run ms-agent-eval preflight baseline --workspace workspace.yaml
 ```
 
 `inspect` reports resolved commits and snapshots, selected instructions,
 coverage gaps, case projection hashes, split integrity, model deployment
 identities, reuse policies, judge-validation configuration, budgets, and experiment
 revision hashes.
+
+`preflight` is networked but generation-free: it renders the actual DSPy
+messages, asks each configured endpoint for its optional native context and
+tokenizer result, and reports how many configured slots can accept the batch.
+It creates no run, manifests, blobs, or summaries. Use `--json` for the full
+per-request/per-endpoint matrix, or repeat `--case` to diagnose selected cases.
+Exact judge requests remain deferred until solver outputs exist.
 
 ## Choose a run
 

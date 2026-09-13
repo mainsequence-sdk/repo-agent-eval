@@ -20,6 +20,18 @@ def _redacted_message(error: Exception, secret_values: Sequence[str]) -> str:
 def _failure_kind(error: Exception) -> str:
     text = f"{type(error).__name__} {error}".lower()
     status_code = getattr(error, "status_code", None)
+    if any(
+        token in text
+        for token in (
+            "contextwindowexceeded",
+            "context window",
+            "context_length_exceeded",
+            "maximum context length",
+            "context size",
+            "too many tokens",
+        )
+    ):
+        return "context_window_exceeded"
     if status_code in {401, 403} or "authentication" in text or "unauthorized" in text:
         return "authentication_error"
     if status_code == 429 or "rate limit" in text:
@@ -68,6 +80,12 @@ class ModelCallObserver:
         self.stage = stage
         self.records: list[ModelCallRecord] = []
         self.trace_artifacts: list[ArtifactReference] = []
+        self.endpoint_routes: list[Mapping[str, object]] = []
+
+    def record_endpoint_route(self, route: Mapping[str, object]) -> None:
+        """Attach transport/preflight provenance to this observed call stream."""
+
+        self.endpoint_routes.append(dict(route))
 
     def completed(
         self,

@@ -103,6 +103,17 @@ def test_independent_pool_instances_share_filesystem_slots(tmp_path) -> None:  #
     assert acquired.is_set()
 
 
+def test_pool_never_leases_an_excluded_endpoint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pool = EndpointPool(_executor(first=3, second=2), tmp_path / "locks")
+
+    selected = []
+    for _ in range(6):
+        with pool.lease(excluded_endpoint_ids=frozenset({"lan-10"})) as lease:
+            selected.append(lease.endpoint.id)
+
+    assert selected == ["lan-17"] * 6
+
+
 def test_coordinator_executes_only_a_bounded_ready_window() -> None:
     configured = _executor(first=3, second=2)
     packets = tuple(object() for _ in range(11))

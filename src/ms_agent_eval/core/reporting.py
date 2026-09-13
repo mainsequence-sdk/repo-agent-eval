@@ -758,6 +758,11 @@ class RunReportBuilder:
                     "configured_capacity": configured.max_concurrent_requests,
                     "packets_succeeded": 0,
                     "packets_failed": 0,
+                    "preflight_rejected_packets": 0,
+                    "requests": 0,
+                    "preflight_checks": 0,
+                    "preflight_rejections": 0,
+                    "preflight_skips": 0,
                     "model_calls": 0,
                     "completed_calls": 0,
                     "failed_calls": 0,
@@ -780,12 +785,34 @@ class RunReportBuilder:
                 endpoint = endpoints.get(key)
                 if endpoint is None:
                     continue
-                outcome = (
-                    "packets_failed"
-                    if status.result.error is not None
-                    else "packets_succeeded"
-                )
-                endpoint[outcome] = int(endpoint[outcome]) + 1
+                requests = route.get("requests", 0)
+                if isinstance(requests, int) and not isinstance(requests, bool):
+                    endpoint["requests"] = int(endpoint["requests"]) + requests
+                    if requests > 0:
+                        outcome = (
+                            "packets_failed"
+                            if status.result.error is not None
+                            else "packets_succeeded"
+                        )
+                        endpoint[outcome] = int(endpoint[outcome]) + 1
+                for preflight_key in (
+                    "preflight_checks",
+                    "preflight_rejections",
+                    "preflight_skips",
+                ):
+                    value = route.get(preflight_key, 0)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        endpoint[preflight_key] = int(endpoint[preflight_key]) + value
+                route_rejections = route.get("preflight_rejections", 0)
+                if (
+                    isinstance(route_rejections, int)
+                    and route_rejections > 0
+                    and isinstance(requests, int)
+                    and requests == 0
+                ):
+                    endpoint["preflight_rejected_packets"] = (
+                        int(endpoint["preflight_rejected_packets"]) + 1
+                    )
                 for usage_key in ("model_calls", "completed_calls", "failed_calls"):
                     value = route.get(usage_key, 0)
                     if isinstance(value, int) and not isinstance(value, bool):
@@ -1095,15 +1122,17 @@ def render_report_markdown(report: RunReport) -> bytes:
                 "",
                 f"- Configured pool capacity: `{endpoint_execution.get('configured_capacity', 0)}`",
                 "",
-                "| Executor / endpoint | URL | Capacity | Calls | Succeeded packets | Failed packets | Peak endpoint | Peak pool | Queue wait (s) | Model latency (s) |",
-                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Executor / endpoint | URL | Capacity | Calls | Preflight checks | Rejected | Skipped | Succeeded packets | Failed packets | Peak endpoint | Peak pool | Queue wait (s) | Model latency (s) |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for endpoint in endpoint_rows:
             lines.append(
                 f"| `{endpoint['executor_id']}/{endpoint['endpoint_id']}` | "
                 f"`{endpoint['base_url']}` | {endpoint['configured_capacity']} | "
-                f"{endpoint['model_calls']} | {endpoint['packets_succeeded']} | "
+                f"{endpoint['model_calls']} | {endpoint['preflight_checks']} | "
+                f"{endpoint['preflight_rejections']} | {endpoint['preflight_skips']} | "
+                f"{endpoint['packets_succeeded']} | "
                 f"{endpoint['packets_failed']} | "
                 f"{endpoint['peak_observed_endpoint_concurrency']} | "
                 f"{endpoint['peak_observed_pool_concurrency']} | "

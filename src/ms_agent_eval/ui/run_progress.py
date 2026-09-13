@@ -86,10 +86,13 @@ class TerminalRunReporter:
             self._last_stage = stage
         verb = _STAGE_LABELS.get(stage, (stage, stage))[1]
         subject = _subject(event)
-        self._status = self.console.status(
-            f"[cyan]{verb}[/] {subject}{_start_detail(event)}{_model_suffix(event)}",
-            spinner="dots",
+        description = (
+            f"[cyan]{verb}[/] {subject}{_start_detail(event)}{_model_suffix(event)}"
         )
+        if not self.console.is_terminal:
+            self.console.print(description)
+            return
+        self._status = self.console.status(description, spinner="dots")
         self._status.start()
 
     def _packet_completed(self, event: ProgressEvent) -> None:
@@ -113,6 +116,18 @@ class TerminalRunReporter:
 
     def _packet_failed(self, event: ProgressEvent) -> None:
         self._stop_status()
+        if event.details.get("error_kind") == "context_window_exceeded":
+            required = event.details.get("required_tokens")
+            available = event.details.get("context_window")
+            counts = (
+                f" ({required} required > {available} available)"
+                if isinstance(required, int) and isinstance(available, int)
+                else ""
+            )
+            self.console.print(
+                f"[red]✗[/] {_subject(event)} context preflight rejected request{counts}"
+            )
+            return
         message = event.details.get("error")
         suffix = f": {message}" if isinstance(message, str) and message else ""
         self.console.print(f"[red]✗[/] {_subject(event)} failed{suffix}")
@@ -137,6 +152,8 @@ class TerminalRunReporter:
             description += f" · vote {vote}"
         if isinstance(endpoint, str):
             description += f" · {endpoint}"
+        if event.details.get("preflight_status") == "skipped":
+            description += " · preflight skipped"
         if failed:
             error = event.details.get("error")
             if isinstance(error, str) and error:
@@ -283,6 +300,12 @@ def _completion_detail(event: ProgressEvent) -> str:
     endpoint_ids = event.details.get("endpoint_ids")
     if isinstance(endpoint_ids, list) and endpoint_ids:
         detail += f" [dim]· endpoints {', '.join(map(str, endpoint_ids))}[/]"
+    preflight = event.details.get("preflight_status")
+    if preflight == "skipped":
+        detail += " [dim]· preflight skipped[/]"
+    rejected = event.details.get("preflight_rejections")
+    if isinstance(rejected, int) and rejected:
+        detail += f" [dim]· {rejected} preflight reroutes[/]"
     return detail
 
 

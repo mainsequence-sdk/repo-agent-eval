@@ -109,6 +109,9 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
 - [ADR-004](004-pooled-endpoint-concurrency.md) defines capacity-aware pools of
   equivalent OpenAI-compatible endpoints, bounded local concurrency, routing,
   failure handling, and attempt-level endpoint provenance.
+- [ADR-005](005-optional-token-preflight.md) defines optional endpoint-native
+  chat-template rendering and token preflight, context-aware pooled admission,
+  and graceful execution when tokenizer extensions are unavailable.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

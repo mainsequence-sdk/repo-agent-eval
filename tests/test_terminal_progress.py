@@ -4,9 +4,9 @@ from io import StringIO
 
 from rich.console import Console
 
-from ms_agent_eval.core.cli import _human_progress, _parser
+from ms_agent_eval.core.cli import _human_preflight, _human_progress, _parser
 from ms_agent_eval.core.progress import ProgressEvent
-from ms_agent_eval.ui import TerminalRunReporter
+from ms_agent_eval.ui import TerminalPreflightReporter, TerminalRunReporter
 
 
 def test_terminal_reporter_names_cases_scores_and_final_summary() -> None:
@@ -95,6 +95,62 @@ def test_json_flag_disables_live_progress_in_a_tty(monkeypatch) -> None:  # type
 
     assert _human_progress(human) is True
     assert _human_progress(machine) is False
+
+
+def test_terminal_preflight_reporter_shows_fit_and_capacity() -> None:
+    output = StringIO()
+    reporter = TerminalPreflightReporter(
+        Console(file=output, force_terminal=False, color_system=None, width=120)
+    )
+    reporter.render(
+        {
+            "status": "fits",
+            "experiment": "baseline",
+            "experiment_revision_id": "sha256:1234567890abcdef",
+            "selected_case_count": 10,
+            "stages": [
+                {
+                    "stage": "solve",
+                    "status": "fits",
+                    "logical_request_count": 10,
+                    "configured_capacity": 8,
+                    "guaranteed_parallel_capacity": 6,
+                    "dispatchable_parallel_capacity": 8,
+                    "minimum_dispatch_waves": 2,
+                    "endpoints": [
+                        {
+                            "id": "local-a",
+                            "capacity": 4,
+                            "context_window": 32768,
+                            "fits": 10,
+                            "exceeds": 0,
+                            "skipped": 0,
+                            "maximum_required_tokens": 12000,
+                        }
+                    ],
+                }
+            ],
+            "summary": {"blocked_requests": 0, "unknown_only_requests": 0},
+        }
+    )
+
+    rendered = output.getvalue()
+    assert "Preflight baseline · 10 cases · 0 generation calls" in rendered
+    assert "Stage fit and usable concurrency" in rendered
+    assert "solve" in rendered
+    assert "local-a" in rendered
+    assert "32768" in rendered
+    assert "exact-fit route" in rendered
+
+
+def test_preflight_json_flag_disables_human_output_in_a_tty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    human = _parser().parse_args(["preflight", "baseline"])
+    machine = _parser().parse_args(["preflight", "baseline", "--json"])
+
+    assert _human_preflight(human) is True
+    assert _human_preflight(machine) is False
 
 
 def test_terminal_reporter_shows_automatic_execution_error() -> None:

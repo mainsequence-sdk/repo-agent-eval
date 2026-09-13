@@ -198,13 +198,13 @@ executors:
     endpoints:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
-        max_concurrent_requests: 4
+        max_concurrent_requests: 2
       - id: llama-server-10-11436
         base_url: http://192.168.1.10:11436/v1
-        max_concurrent_requests: 8
+        max_concurrent_requests: 4
 
   local-codex:
     type: harness

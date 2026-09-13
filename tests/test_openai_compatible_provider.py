@@ -140,6 +140,26 @@ def test_provider_classifies_wrapped_connection_failures(tmp_path: Path) -> None
     assert record.error_kind == "connection_error"
 
 
+def test_provider_classifies_context_failure_when_native_preflight_was_skipped(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    observer = ModelCallObserver(store, role="solver")
+
+    record = observer.failed(
+        provider_id="openai_compatible",
+        model="solver-model",
+        parameters={},
+        messages=(),
+        request={},
+        error=RuntimeError("maximum context length exceeded"),
+        latency_seconds=0.1,
+        configured_cost=0.0,
+    )
+
+    assert record.error_kind == "context_window_exceeded"
+
+
 def test_provider_allows_configured_reasoning_effort_for_custom_models(
     tmp_path: Path,
 ) -> None:

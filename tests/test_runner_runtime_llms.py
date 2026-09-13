@@ -22,6 +22,7 @@ from ms_agent_eval.core.progress import ProgressEvent
 from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.runner import ExperimentRunner
 from ms_agent_eval.core.stages import StageKind, StageState
+from ms_agent_eval.core.token_preflight import TokenPreflightResult
 from ms_agent_eval.core.workspace import ResolvedRoleModel, WorkspaceRepository
 from ms_agent_eval.programs.dspy.budget import BudgetLedger
 
@@ -387,6 +388,138 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
     assert solve_endpoints == {"primary", "secondary"}
     assert run.result is not None
     assert run.result["endpoint_execution"]["configured_capacity"] == 3
+
+
+def test_context_preflight_reroutes_without_calling_a_known_small_endpoint(
+    tmp_path: Path,
+) -> None:
+    compiled = _pooled_compiled(tmp_path)
+    preflight_calls: Counter[str] = Counter()
+    model_endpoints: Counter[str] = Counter()
+
+    class SelectivePreflight:
+        def evaluate(self, endpoint, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            preflight_calls[endpoint.id] += 1
+            fits = endpoint.id == "secondary"
+            return TokenPreflightResult(
+                status="fits" if fits else "exceeds",
+                reason="test_exact_tokenization",
+                context_window=16 if fits else 8,
+                input_tokens=7,
+                maximum_output_tokens=2,
+                required_tokens=9,
+                tokenizer_fingerprint="sha256:test-tokenizer",
+                chat_template_fingerprint="sha256:test-template",
+                capability_source="props",
+                capability_checked_at="2026-09-13T00:00:00+00:00",
+                rendered_message_hash="sha256:test-request",
+            )
+
+    class DynamicObservedLM(FixedObservedLM):
+        def forward(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = json.dumps(
+                kwargs.get("messages") or kwargs.get("prompt") or args,
+                ensure_ascii=False,
+            )
+            if self.model == "solver":
+                response = solver_response()
+            else:
+                score = 1.0
+                for marker, value in {
+                    "strong candidate": 1.0,
+                    "partial candidate": 0.5,
+                    "incorrect candidate": 0.0,
+                    "contradictory candidate": 0.0,
+                    "adversarial candidate": 0.0,
+                }.items():
+                    if marker in rendered:
+                        score = value
+                        break
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(*args, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> DynamicObservedLM:
+        del budget
+        assert api_key == "test-secret"
+        assert model.base_url == "http://localhost:8001/v1"
+        model_endpoints[model.base_url] += 1
+        return DynamicObservedLM(observer, [], model=model.role)
+
+    run = ExperimentRunner(
+        compiled,
+        lm_factory=factory,
+        token_preflight=SelectivePreflight(),  # type: ignore[arg-type]
+    ).run("baseline", environment=_environment())
+
+    assert run.status == "completed"
+    assert preflight_calls["primary"] > 0
+    assert preflight_calls["secondary"] > 0
+    assert model_endpoints == Counter({"http://localhost:8001/v1": sum(model_endpoints.values())})
+    assert run.result is not None
+    endpoints = {
+        item["endpoint_id"]: item
+        for item in run.result["endpoint_execution"]["endpoints"]
+    }
+    assert endpoints["primary"]["model_calls"] == 0
+    assert endpoints["primary"]["preflight_rejections"] > 0
+    assert endpoints["secondary"]["model_calls"] > 0
+
+
+def test_context_preflight_failure_makes_no_model_request(tmp_path: Path) -> None:
+    compiled = _compiled(tmp_path)
+    model_calls = 0
+
+    class RejectingPreflight:
+        def evaluate(self, endpoint, **kwargs):  # type: ignore[no-untyped-def]
+            del endpoint, kwargs
+            return TokenPreflightResult(
+                status="exceeds",
+                reason="test_exact_tokenization",
+                context_window=8,
+                input_tokens=7,
+                maximum_output_tokens=2,
+                required_tokens=9,
+                tokenizer_fingerprint="sha256:test-tokenizer",
+                chat_template_fingerprint="sha256:test-template",
+                capability_source="props",
+                capability_checked_at="2026-09-13T00:00:00+00:00",
+                rendered_message_hash="sha256:test-request",
+            )
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        nonlocal model_calls
+        del model, observer, budget, api_key
+        model_calls += 1
+        raise AssertionError("known-oversized requests must not reach the model")
+
+    run = ExperimentRunner(
+        compiled,
+        lm_factory=factory,
+        token_preflight=RejectingPreflight(),  # type: ignore[arg-type]
+    ).run("baseline", environment=_environment())
+
+    assert run.status == "execution_failed"
+    assert run.result is not None
+    assert run.result["error_kind"] == "context_window_exceeded"
+    assert model_calls == 0
+    validation = next(
+        item
+        for item in run.packets
+        if item["stage"] == "validate_judge"
+    )
+    assert validation["state"] == "failed"
 
 
 def test_second_run_reuses_validated_stage_graph_without_model_calls(
