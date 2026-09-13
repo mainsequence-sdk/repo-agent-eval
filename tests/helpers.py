@@ -26,7 +26,7 @@ Write schema-v5 packages and design rubrics for semantic evaluation by the LLM j
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 8,
+        "schema_version": 9,
         "workspace": {"id": "synthetic-evaluation"},
         "executors": {
             "remote-models": {
@@ -42,41 +42,60 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
             "local-process": {"type": "process", "adapter": "local"},
         },
         "models": {
-            "author": {"name": "author", "parameters": {"temperature": 0.0}},
-            "solver": {"name": "solver", "parameters": {"temperature": 0.0}},
-            "judge": {"name": "judge", "parameters": {"temperature": 0.0}},
+            "author": {
+                "name": "author",
+                "deployment_revision": "author-test-v1",
+                "parameters": {"temperature": 0.0},
+            },
+            "solver": {
+                "name": "solver",
+                "deployment_revision": "solver-test-v1",
+                "parameters": {"temperature": 0.0},
+            },
+            "judge": {
+                "name": "judge",
+                "deployment_revision": "judge-test-v1",
+                "parameters": {"temperature": 0.0},
+            },
         },
         "stages": {
             "author": {
                 "executor": "authoring-harness",
                 "model": "author",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
             },
             "calibrate_judge": {
                 "executor": "remote-models",
                 "model": "judge",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
             },
             "solve": {
                 "executor": "remote-models",
                 "model": "solver",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
             },
             "judge": {
                 "executor": "remote-models",
                 "model": "judge",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 30, "tokens": 10000, "wall_seconds": 300},
             },
             "optimize": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
             "final_evaluate": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
             "aggregate": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
         },
@@ -148,7 +167,7 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "based_on": "baseline",
                 "dataset": {
                     "train": "train",
-                    "development": "development",
+                    "validation": "validation",
                     "final_evaluation": "test",
                 },
                 "optimizer": {
@@ -319,7 +338,7 @@ def seed_cases_and_calibration(
         ),
         create_case(
             repository.cases_root,
-            case_id="case-development",
+            case_id="case-validation",
             skill="beta",
             group="group-17",
             source_path="skills/beta/SKILL.md",
@@ -342,7 +361,7 @@ def seed_cases_and_calibration(
                 "schema_version": 2,
                 "groups": {
                     "group-0": "train",
-                    "group-17": "development",
+                    "group-17": "validation",
                     "group-1": "test",
                 },
             },

@@ -81,7 +81,7 @@ capability in `cases/coverage.yaml` has three primary examples. Schema-v5 cases
 separate the public `solver/` surface from private `judge/` evidence and record
 the authoring-policy, capability-catalog, source-set, and package hashes.
 
-Reviewed train/development cases may later feed DSPy demonstrations,
+Reviewed train/validation cases may later feed DSPy demonstrations,
 distillation, or fine-tuning exports. Those exports stay outside Git and must
 retain source-set and leakage provenance. Test and challenge prompts, answers,
 responses, and judge feedback are never training material.
@@ -93,12 +93,21 @@ The same manifest defines:
 - `baseline`, which evaluates the typed DSPy solver against every promoted
   case;
 - `optimize-few-shot`, which compiles `LabeledFewShot` using train cases,
-  measures development cases, publishes state-only JSON, and only then scores
+  measures validation cases, publishes state-only JSON, and only then scores
   the untouched test split.
 
 Executor definitions, model names, and stage assignments are stored directly in
 `workspace.yaml`. Solver and judge are separate roles and may intentionally use
 the same provider/model pair.
+
+Every model also declares a `deployment_revision`, and every stage declares an
+explicit reuse policy. This workspace uses `exact`: an unchanged validated
+calibration, solver response, judgment, optimizer output, or aggregate is
+attached to the new run instead of executed again. Update the Qwen deployment
+revision whenever its weights, quantization, tokenizer, chat template, or
+server behavior changes. The terminal marks these attachments with `↺`; the
+run report separates executed and reused work. See
+[incremental execution](../../docs/execution/incremental-execution.md).
 
 ## Bootstrap and run
 
@@ -112,7 +121,7 @@ applicable executor and keep only the credential value in `.env`.
 The author stage is intentionally `artifact_exchange`: the active Codex session
 authors and reviews files in Git. To automate it or any other model-driven stage
 with subscription-backed Codex, configure the isolated `codex_cli` executor in
-the [harness guide](../../docs/codex-cli-harness.md); it never uses API-billed
+the [harness guide](../../docs/execution/codex-cli.md); it never uses API-billed
 inference.
 Review `case-authoring.md` before authoring cases; changing it invalidates the
 authoring provenance of affected cases. Then:
@@ -140,7 +149,7 @@ Codex authoring requests with materially different coverage goals until
 `validate` reports no per-skill coverage gaps. The same Codex authoring campaign
 must create or update the controlled `strong`, `partial`, `incorrect`,
 `contradictory`, and `adversarial` candidates under `judge-calibration/`, each
-referencing a promoted train/development case. Do not leave calibration as a
+referencing a promoted train/validation case. Do not leave calibration as a
 manual follow-up. Review the complete authoring deliverable, then validate until
 `ready_for_scored_run` is `true`:
 
@@ -164,6 +173,6 @@ cases and four remaining leakage groups per skill, plus capability-depth gaps,
 as explicit blockers. `run` remains strict and cannot start the solver until
 source, authoring provenance, coverage, splits, configured runtime stages,
 and judge calibration are complete. `run --pilot` is the explicit exception for
-diagnostics: it runs only train/development cases, never optimization or held-out
+diagnostics: it runs only train/validation cases, never optimization or held-out
 splits, uses one diagnostic judge vote per fixture/case, records
 `benchmark_valid: false`, and omits aggregate benchmark metrics.

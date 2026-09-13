@@ -245,7 +245,7 @@ def run_guided_setup(
         else revision_choice
     )
 
-    temporary_root = data_root / "tmp"
+    temporary_root = data_root / "operations" / "tmp"
     with dependencies.inspect(
         repository_url,
         repository_ref,
@@ -418,7 +418,9 @@ def run_guided_setup(
         prompt.write(f"Initial coverage: {coverage_request}")
         prompt.write(f"Workspace: {workspace_file}")
         prompt.write(f"External data: {data_root}")
-        prompt.write(f"External snapshot destination: {data_root / 'snapshots'}")
+        prompt.write(
+            f"External snapshot destination: {data_root / 'operations' / 'snapshots'}"
+        )
         prompt.write("Files to create:")
         for path in planned_paths:
             prompt.write(f"  - {path}")

@@ -194,7 +194,7 @@ def test_mainsequence_calibration_is_complete_ordered_and_not_held_out() -> None
         "adversarial",
     }
     assert all(
-        splits.split_for(cases[fixture.case_id]) in {"train", "development"}
+        splits.split_for(cases[fixture.case_id]) in {"train", "validation"}
         for fixture in corpus.fixtures
     )
     assert fixtures["partial"].maximum_score < fixtures["strong"].minimum_score
@@ -329,10 +329,10 @@ def test_group_splits_are_reproducible_and_policy_checked(tmp_path: Path) -> Non
         case.group,
         seed="fixed-seed",
         train=0.5,
-        development=0.2,
+        validation=0.2,
         test=0.2,
     )
-    wrong = next(item for item in ("train", "development", "test", "challenge") if item != expected)
+    wrong = next(item for item in ("train", "validation", "test", "challenge") if item != expected)
     split_file = repository.cases_root / "splits.yaml"
     split_file.write_text(
         f"schema_version: 2\ngroups:\n  {case.group}: {wrong}\n", encoding="utf-8"
@@ -344,6 +344,6 @@ def test_group_splits_are_reproducible_and_policy_checked(tmp_path: Path) -> Non
             manifest,
             seed="fixed-seed",
             train=0.5,
-            development=0.2,
+            validation=0.2,
             test=0.2,
         )

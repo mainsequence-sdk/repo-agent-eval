@@ -88,7 +88,7 @@ leakage groups for every configured skill before a scored run is ready. These
 are minimum coverage gates, not a claim that 12 examples are sufficient for a
 production fine-tune. Author additional cases when coverage audits or
 training-volume requirements show a real gap. A campaign owner may use reviewed
-train/development outcomes to choose the next high-level capability gap, but
+train/validation outcomes to choose the next high-level capability gap, but
 must never pass solver responses, judge feedback, or optimizer traces into your
 inputs.
 
@@ -426,7 +426,7 @@ when prose or provider names differ. Unrelated operations in one repository do
 not automatically share a group. Never name the group after a split.
 
 Optimization, distillation, and fine-tuning may use reviewed train and
-development cases only. Test/challenge prompts, answers, solver responses,
+validation cases only. Test/challenge prompts, answers, solver responses,
 judge feedback, and results must never influence case generation or become
 training material. Project-derived exports also require applicable licensing;
 provenance alone does not grant redistribution rights.
@@ -456,7 +456,7 @@ schema version 2 and contains at least one fixture for every exact label:
 schema_version: 2
 fixtures:
   - id: strong-example
-    case: existing-train-or-development-case-id
+    case: existing-train-or-validation-case-id
     candidate: strong.md
     label: strong
     score_range: [0.9, 1.0]
@@ -485,7 +485,7 @@ outputs, optimizer traces, run results, or held-out feedback as calibration
 candidates.
 
 Because this workspace includes DSPy optimization, calibration fixtures may
-reference train and development cases only. They must never reference test or
+reference train and validation cases only. They must never reference test or
 challenge cases. If there is no eligible representative case, author and split
 one instead of weakening this rule. Review and update fixtures whenever a
 referenced case, expected response, rubric, or split changes. Calibration inputs
@@ -577,6 +577,6 @@ Create a case package only after every answer is yes:
 - Does the leakage group keep semantic siblings in one split?
 - Does `judge-calibration/manifest.yaml` cover all five exact labels with
   controlled candidate files, defensible ranges, and only eligible existing
-  train/development cases?
+  train/validation cases?
 - Is all held-out feedback, live state, secret material, and unsupported fact
   absent?

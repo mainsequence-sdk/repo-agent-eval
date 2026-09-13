@@ -152,7 +152,7 @@ Calibration outcomes were:
 | plausible lowercase answer | 0.0 |
 | keyword-stuffed answer | 0.0 |
 
-The optimizer-visible loader exposes only train and development records. It has no test attribute
+The optimizer-visible loader exposes only train and validation records. It has no test attribute
 or test-loading method. Group overlap and duplicate IDs are hard errors. The held-out loader is a
 separate API invoked only after both compile calls return.
 
@@ -163,7 +163,7 @@ Compile results:
 - GEPA used a distinct student model and reflection model, made 8 observed student calls and 2
   observed reflection calls, received evaluator feedback through the metric adapter, and produced
   an immutable optimization lock and selected state;
-- the synthetic selected program scored 1.0 on development and 1.0 on held-out test;
+- the synthetic selected program scored 1.0 on validation and 1.0 on held-out test;
 - both few-shot and GEPA programs scored 1.0 on the synthetic held-out set.
 
 Those scores validate lifecycle wiring only. The dummy provider was scripted, the dataset is tiny,
@@ -261,7 +261,7 @@ Before task 002 starts, revise task 000 to make these findings normative:
    package threat/dependency review. Continue rejecting pickle even when the dependency exists.
 7. Make a real configured Ollama raw/DSPy integration run, with usage and model identity evidence,
    a task-002 provider gate rather than claiming it was completed by this network-free spike.
-8. Record development and held-out results separately and never expose the held-out loader to an
+8. Record validation and held-out results separately and never expose the held-out loader to an
    optimizer-facing service or process.
 
 ## Decision and handoff

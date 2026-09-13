@@ -23,6 +23,7 @@ def _packet(ledger: StageLedger) -> StagePacket:
     return StagePacket.create(
         run_id="run-1",
         experiment_id="baseline",
+        experiment_revision_id=f"sha256:{'3' * 64}",
         stage=StageKind.SOLVE,
         attempt=1,
         dependencies=(),
@@ -113,8 +114,60 @@ def test_malformed_result_is_rejected_and_retry_is_append_only(tmp_path: Path) -
     retry = ledger.retry(packet.packet_id)
     assert retry.attempt == 2
     assert retry.packet_id != packet.packet_id
+    assert retry.attempt_id != packet.attempt_id
+    assert retry.work_id == packet.work_id
     assert ledger.status(packet.packet_id).state is StageState.REJECTED
     assert ledger.status(retry.packet_id).state is StageState.PREPARED
+
+
+def test_work_identity_is_reusable_across_runs_but_attempt_identity_is_not(
+    tmp_path: Path,
+) -> None:
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    first = ledger.prepare(_packet(ledger))
+    claim = ledger.claim(first.packet_id, executor_id="remote", worker_id="worker")
+    result = _result(ledger, first)
+    ledger.submit(result, lease_id=claim.lease_id)
+    ledger.validate(first.packet_id, lambda _packet, _result: None)
+    ledger.persist(first.packet_id)
+
+    second = StagePacket.create(
+        run_id="run-2",
+        experiment_id=first.experiment_id,
+        experiment_revision_id=first.experiment_revision_id,
+        stage=first.stage,
+        attempt=1,
+        dependencies=(),
+        inputs=first.inputs,
+        instructions=first.instructions,
+        output_schema=first.output_schema,
+        executor=first.executor,
+        model=first.model,
+        budget=first.budget,
+    )
+    ledger.prepare(second)
+
+    assert second.work_id == first.work_id
+    assert second.attempt_id != first.attempt_id
+    assert ledger.reusable_result(second) == result
+
+    refreshed = StagePacket.create(
+        run_id="run-3",
+        experiment_id=first.experiment_id,
+        experiment_revision_id=first.experiment_revision_id,
+        stage=first.stage,
+        attempt=1,
+        reuse_policy="refresh",
+        dependencies=(),
+        inputs=first.inputs,
+        instructions=first.instructions,
+        output_schema=first.output_schema,
+        executor=first.executor,
+        model=first.model,
+        budget=first.budget,
+    )
+    assert refreshed.work_id == first.work_id
+    assert ledger.reusable_result(refreshed) is None
 
 
 def test_failed_result_records_normalized_error(tmp_path: Path) -> None:

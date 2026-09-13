@@ -592,6 +592,45 @@ class CaseDefinition:
     def expected_artifacts(self) -> Mapping[str, str]:
         return _text_artifacts(self.expected_artifacts_directory)
 
+    @property
+    def solver_view_hash(self) -> str:
+        """Hash only information the solver is permitted to observe."""
+
+        return content_hash(
+            {
+                "prompt": self.prompt,
+                "attachments": dict(self.solver_attachments()),
+            }
+        )
+
+    @property
+    def judge_view_hash(self) -> str:
+        """Hash the locked judging evidence independently of solver inputs."""
+
+        return content_hash(
+            {
+                "prompt": self.prompt,
+                "rubric": self.rubric,
+                "expected_response": self.expected_response,
+                "expected_artifacts": dict(self.expected_artifacts()),
+            }
+        )
+
+    @property
+    def metadata_hash(self) -> str:
+        """Hash reporting and classification metadata that must not trigger LLM calls."""
+
+        return content_hash(
+            {
+                "id": self.id,
+                "title": self.title,
+                "skill": self.skill,
+                "group": self.group,
+                "coverage": self.coverage,
+                "source_paths": self.source_paths,
+            }
+        )
+
 
 def _owned_relative_file(
     directory: Path,
@@ -753,10 +792,10 @@ class SplitManifest:
             )
             for group, split in sorted(raw.items())
         )
-        allowed = {"train", "development", "test", "challenge"}
+        allowed = {"train", "validation", "test", "challenge"}
         if any(item.split not in allowed for item in assignments):
             raise ConfigurationError(
-                "split names must be train/development/test/challenge", path=path
+                "split names must be train/validation/test/challenge", path=path
             )
         owners = {item.group: item.split for item in assignments}
         groups = {case.group for case in case_bank.cases}
@@ -777,16 +816,16 @@ def deterministic_group_split(
     *,
     seed: str,
     train: float,
-    development: float,
+    validation: float,
     test: float,
 ) -> str:
     digest = hashlib.sha256(f"{seed}:{group}".encode()).digest()
     point = int.from_bytes(digest[:8], "big") / 2**64
     if point < train:
         return "train"
-    if point < train + development:
-        return "development"
-    if point < train + development + test:
+    if point < train + validation:
+        return "validation"
+    if point < train + validation + test:
         return "test"
     return "challenge"
 
@@ -796,7 +835,7 @@ def validate_deterministic_splits(
     *,
     seed: str,
     train: float,
-    development: float,
+    validation: float,
     test: float,
 ) -> None:
     mismatches = {
@@ -806,7 +845,7 @@ def validate_deterministic_splits(
                 item.group,
                 seed=seed,
                 train=train,
-                development=development,
+                validation=validation,
                 test=test,
             ),
         }
@@ -816,7 +855,7 @@ def validate_deterministic_splits(
             item.group,
             seed=seed,
             train=train,
-            development=development,
+            validation=validation,
             test=test,
         )
     }

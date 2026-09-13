@@ -6,10 +6,11 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ms_agent_eval.ui import QuestionaryPromptBackend
+from ms_agent_eval.ui import QuestionaryPromptBackend, TerminalRunReporter
 
 from .errors import AgentEvalError, ConfigurationError
 from .hashing import json_value
+from .progress import ProgressSink
 from .setup import run_guided_setup
 from .workspace import REASONING_EFFORTS, WorkspaceConfiguration, WorkspaceRepository
 from .workspace_templates import build_workspace_template, write_workspace_template
@@ -27,6 +28,14 @@ def _pilot_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _json_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Disable the interactive display and emit one JSON result.",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ms-agent-eval",
@@ -37,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
     setup.add_argument("--workspace", type=Path)
 
-    init = commands.add_parser("init", help="Create a schema-v8 staged DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v9 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -51,9 +60,12 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--api-key-env")
     init.add_argument("--solver-model", required=True)
     init.add_argument("--judge-model", required=True)
+    init.add_argument("--solver-deployment-revision")
+    init.add_argument("--judge-deployment-revision")
     init.add_argument("--solver-reasoning-effort", choices=REASONING_EFFORTS)
     init.add_argument("--judge-reasoning-effort", choices=REASONING_EFFORTS)
     init.add_argument("--author-model", default="gpt-5.6-sol")
+    init.add_argument("--author-deployment-revision")
 
     codex = commands.add_parser(
         "codex", help="Manage subscription-backed Codex harness authentication."
@@ -96,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _pilot_argument(run)
+    _json_argument(run)
     _workspace_argument(run)
 
     stage = commands.add_parser("stage", help="Operate portable stage packets.")
@@ -132,6 +145,7 @@ def _parser() -> argparse.ArgumentParser:
     execute.add_argument("packet_id")
     execute.add_argument("--executor")
     _pilot_argument(execute)
+    _json_argument(execute)
     _workspace_argument(execute)
     submit = stage_commands.add_parser("submit", help="Submit and validate harness output.")
     submit.add_argument("packet_id")
@@ -140,11 +154,30 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--worker", required=True)
     submit.add_argument("--lease", required=True)
     _pilot_argument(submit)
+    _json_argument(submit)
     _workspace_argument(submit)
     retry = stage_commands.add_parser("retry", help="Prepare a new immutable attempt.")
     retry.add_argument("packet_id")
     _pilot_argument(retry)
     _workspace_argument(retry)
+
+    report = commands.add_parser(
+        "report", help="Build deterministic human-readable reports from durable evidence."
+    )
+    report_commands = report.add_subparsers(dest="report_command", required=True)
+    report_build = report_commands.add_parser(
+        "build", help="Build or verify one or every retained run report."
+    )
+    selection = report_build.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--run", help="Run id to render.")
+    selection.add_argument("--all", action="store_true", help="Render every retained run.")
+    report_build.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace a derived report when its bytes differ from current evidence.",
+    )
+    _workspace_argument(report_build)
+
     return parser
 
 
@@ -173,9 +206,12 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         api_key_env=arguments.api_key_env,
         solver_model=arguments.solver_model,
         judge_model=arguments.judge_model,
+        solver_deployment_revision=arguments.solver_deployment_revision,
+        judge_deployment_revision=arguments.judge_deployment_revision,
         solver_reasoning_effort=arguments.solver_reasoning_effort,
         judge_reasoning_effort=arguments.judge_reasoning_effort,
         author_model=arguments.author_model,
+        author_deployment_revision=arguments.author_deployment_revision,
     )
     WorkspaceConfiguration.from_mapping(template.payload)
     paths = write_workspace_template(workspace_file, template)
@@ -187,7 +223,11 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
     }
 
 
-def _run(arguments: argparse.Namespace) -> object:
+def _run(
+    arguments: argparse.Namespace,
+    *,
+    progress_sink: ProgressSink | None = None,
+) -> object:
     if arguments.command == "setup":
         return run_guided_setup(
             QuestionaryPromptBackend(), workspace_file=arguments.workspace
@@ -250,19 +290,37 @@ def _run(arguments: argparse.Namespace) -> object:
             "auth_root": auth.root.as_posix(),
         }
     repository = WorkspaceRepository.from_file(arguments.workspace)
-    from .planning import compile_workspace, inspect_workspace
-
     environment = repository.environment()
-    if arguments.command == "validate":
+    if arguments.command in {"validate", "inspect"}:
+        from .planning import inspect_workspace
+
         return inspect_workspace(repository, environment=environment)
-    if arguments.command == "inspect":
-        return inspect_workspace(repository, environment=environment)
+    if arguments.command == "report":
+        from .coordinator import StageCoordinator
+        from .reporting import list_run_ids
+
+        coordinator = StageCoordinator(repository)
+        run_ids = (
+            list_run_ids(coordinator.ledger) if arguments.all else (arguments.run,)
+        )
+        if not run_ids:
+            raise ConfigurationError("the workspace has no retained runs")
+        publications = [
+            coordinator.build_report(run_id, replace=arguments.replace).as_dict()
+            for run_id in run_ids
+        ]
+        return {
+            "status": "reports_built",
+            "count": len(publications),
+            "reports": publications,
+        }
+    from .planning import compile_workspace
     from .coordinator import StageCoordinator
     from .stages import StageKind
 
     pilot = bool(getattr(arguments, "pilot", False))
     compiled = compile_workspace(repository, allow_incomplete_coverage=pilot)
-    coordinator = StageCoordinator(compiled)
+    coordinator = StageCoordinator(compiled, progress_sink=progress_sink)
     if arguments.command == "run":
         if arguments.target == "resume":
             if not arguments.run_id:
@@ -349,17 +407,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             parser.print_help(sys.stderr)
             return 2
+    reporter = TerminalRunReporter() if _human_progress(arguments) else None
     try:
-        payload = _run(arguments)
+        payload = _run(
+            arguments,
+            progress_sink=None if reporter is None else reporter.handle,
+        )
     except KeyboardInterrupt:
+        if reporter is not None:
+            reporter.close()
         print("cancelled", file=sys.stderr)
         return 130
     except AgentEvalError as error:
+        if reporter is not None:
+            reporter.close()
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except Exception:
+        if reporter is not None:
+            reporter.close()
+        raise
+    if reporter is not None:
+        reporter.close()
+        return 0
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def _human_progress(arguments: argparse.Namespace) -> bool:
+    if getattr(arguments, "json", False) or not sys.stdout.isatty():
+        return False
+    if arguments.command == "run":
+        return True
+    return arguments.command == "stage" and arguments.stage_command in {
+        "execute",
+        "submit",
+    }
 
 
 if __name__ == "__main__":

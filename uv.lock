@@ -844,12 +844,13 @@ wheels = [
 
 [[package]]
 name = "ms-agent-eval"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "dspy" },
     { name = "pyyaml" },
     { name = "questionary" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
@@ -863,6 +864,7 @@ requires-dist = [
     { name = "dspy", specifier = "==3.2.1" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "questionary", specifier = ">=2.1,<3" },
+    { name = "rich", specifier = ">=13,<16" },
 ]
 
 [package.metadata.requires-dev]

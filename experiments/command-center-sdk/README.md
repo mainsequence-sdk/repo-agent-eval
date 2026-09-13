@@ -44,11 +44,18 @@ container, with browser automation added only when visible behavior matters.
 
 ## Part B — evaluation experiments
 
+The schema-v9 workspace requires a deployment revision for every model and an
+explicit reuse policy for every stage. Replace the `*-configured-v1`
+deployment placeholders when real model servers are selected, and bump them
+whenever weights or serving behavior changes. Exact validated stage results
+are then reusable across runs and compatible experiment revisions; see
+[incremental execution](../../docs/execution/incremental-execution.md).
+
 The same manifest defines:
 
 - `baseline`, which asks the DSPy solver to answer each promoted case and has a
   separate DSPy judge stage score the result semantically; and
-- `optimize-few-shot`, which compiles from train cases, evaluates development
+- `optimize-few-shot`, which compiles from train cases, evaluates validation
   cases, publishes state-only DSPy JSON, and only then loads the untouched test
   set.
 

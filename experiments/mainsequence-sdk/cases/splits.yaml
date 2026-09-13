@@ -4,12 +4,12 @@ groups:
   a2a-stable-session-identity: train
   api-contract-and-deployment-evidence: train
   api-platform-injected-human-identity: train
-  audit-git-context-environment-blocker: development
+  audit-git-context-environment-blocker: validation
   audit-target-repository-time-index-defect: challenge
-  exploration-semantic-catalog-discovery: development
+  exploration-semantic-catalog-discovery: validation
   exploration-storage-surface-classification: train
   maintenance-partial-sync-state-recovery: test
-  maintenance-sdk-and-skill-refresh: development
+  maintenance-sdk-and-skill-refresh: validation
   metatable-grain-keys-relationships: train
   metatable-logical-physical-contract-identity: test
   migration-direct-registration-boundary: train

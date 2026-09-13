@@ -208,6 +208,7 @@ class DspyExecutor:
                     "outputs": outputs,
                 }
             )
+            observer.record_trace(trace, calls)
             return ProgramResult(
                 outputs=outputs,
                 primary_response=primary,
@@ -218,6 +219,7 @@ class DspyExecutor:
             )
         except Exception as error:
             kind = _failure_kind(error)
+            calls = tuple(observer.records[start:])
             trace = self._trace(
                 {
                     "role": contract.role,
@@ -230,10 +232,11 @@ class DspyExecutor:
                     "error": str(error),
                 }
             )
+            observer.record_trace(trace, calls)
             return ProgramResult(
                 outputs={},
                 primary_response=None,
-                calls=tuple(observer.records[start:]),
+                calls=calls,
                 trace_artifact=trace,
                 status="failed",
                 error_kind=kind,

@@ -47,7 +47,7 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 8
+    assert repository.workspace.schema_version == 9
     assert repository.workspace.models["solver"].reasoning_effort == "high"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert set(repository.workspace.executors) == {
@@ -104,6 +104,17 @@ def test_no_arguments_in_noninteractive_terminal_prints_help(monkeypatch, capsys
 
 def test_cli_has_no_backend_case_builder_command() -> None:
     assert "cases" not in _parser().format_help()
+
+
+def test_cli_exposes_deterministic_report_backfill() -> None:
+    arguments = _parser().parse_args(
+        ["report", "build", "--run", "run-1", "--workspace", "workspace.yaml"]
+    )
+
+    assert arguments.command == "report"
+    assert arguments.report_command == "build"
+    assert arguments.run == "run-1"
+    assert arguments.all is False
 
 
 def test_validate_serializes_bootstrap_report(tmp_path: Path, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]

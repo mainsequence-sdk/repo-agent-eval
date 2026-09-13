@@ -99,7 +99,7 @@ The coordinator recognizes these stage kinds:
 | `calibrate_judge` | Calibration fixtures, case rubrics, expected evidence | Typed calibration judgments and pass/fail result | May see calibration-only hidden material |
 | `solve` | Global context, one skill context, case prompt | Candidate response and optional artifacts | Never sees rubric, expected response, or judge feedback |
 | `judge` | Prompt, skill context, rubric, expected evidence, candidate response | Criterion scores, hard failures, feedback | Sees hidden judging material for its assigned case only |
-| `optimize` | Train/development cases and permitted results | Published state-only DSPy artifact | Never loads test/challenge inputs or results |
+| `optimize` | Train/validation cases and permitted results | Published state-only DSPy artifact | Never loads test/challenge inputs or results |
 | `final_evaluate` | Published optimizer artifact and untouched test cases | Solver responses and judge evaluations | Test data becomes visible only after publication |
 | `aggregate` | Validated evaluation records | Run summary and report inputs | Deterministic; no model is required |
 
@@ -295,7 +295,7 @@ stage boundaries.
 Optimization retains the existing firewall:
 
 1. train cases are available to compilation;
-2. development results may guide the optimization run;
+2. validation results may guide the optimization run;
 3. a state-only compiled artifact is persisted and published;
 4. only then may `final_evaluate` load untouched test cases; and
 5. test/challenge results never flow back into authoring or optimization.

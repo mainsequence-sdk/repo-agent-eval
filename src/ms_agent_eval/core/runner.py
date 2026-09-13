@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from .coordinator import LmFactory, RunProgress, StageCoordinator, default_lm_factory
 from .planning import CompiledWorkspace
+from .progress import ProgressSink
 
 
 class ExperimentRunner:
@@ -14,8 +15,13 @@ class ExperimentRunner:
         workspace: CompiledWorkspace,
         *,
         lm_factory: LmFactory = default_lm_factory,
+        progress_sink: ProgressSink | None = None,
     ) -> None:
-        self.coordinator = StageCoordinator(workspace, lm_factory=lm_factory)
+        self.coordinator = StageCoordinator(
+            workspace,
+            lm_factory=lm_factory,
+            progress_sink=progress_sink,
+        )
 
     def run(
         self,

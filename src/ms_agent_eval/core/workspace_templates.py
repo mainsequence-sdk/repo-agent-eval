@@ -74,10 +74,12 @@ def _model(
     *,
     name: str,
     temperature: float,
+    deployment_revision: str | None = None,
     reasoning_effort: str | None = None,
 ) -> Mapping[str, object]:
     return {
         "name": name,
+        "deployment_revision": deployment_revision or name,
         **(
             {"reasoning_effort": reasoning_effort}
             if reasoning_effort is not None
@@ -98,9 +100,12 @@ def build_workspace_template(
     api_base_url: str,
     solver_model: str,
     judge_model: str,
+    solver_deployment_revision: str | None = None,
+    judge_deployment_revision: str | None = None,
     solver_reasoning_effort: str | None = None,
     judge_reasoning_effort: str | None = None,
     author_model: str = "gpt-5.6-sol",
+    author_deployment_revision: str | None = None,
     data_root: str | None = None,
     api_key_env: str | None = None,
     runtime_type: str = "response_only",
@@ -121,7 +126,7 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 8,
+        "schema_version": 9,
         "workspace": workspace,
         "executors": {
             "remote-models": {
@@ -137,14 +142,20 @@ def build_workspace_template(
             "local-process": {"type": "process", "adapter": "local"},
         },
         "models": {
-            "author": _model(name=author_model, temperature=0.0),
+            "author": _model(
+                name=author_model,
+                deployment_revision=author_deployment_revision,
+                temperature=0.0,
+            ),
             "solver": _model(
                 name=solver_model,
+                deployment_revision=solver_deployment_revision,
                 temperature=0.2,
                 reasoning_effort=solver_reasoning_effort,
             ),
             "judge": _model(
                 name=judge_model,
+                deployment_revision=judge_deployment_revision,
                 temperature=0.0,
                 reasoning_effort=judge_reasoning_effort,
             ),
@@ -153,21 +164,25 @@ def build_workspace_template(
             "author": {
                 "executor": "authoring-harness",
                 "model": "author",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 64000, "wall_seconds": 1800},
             },
             "calibrate_judge": {
                 "executor": "remote-models",
                 "model": "judge",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 100, "tokens": 250000, "wall_seconds": 1800},
             },
             "solve": {
                 "executor": "remote-models",
                 "model": "solver",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
             },
             "judge": {
                 "executor": "remote-models",
                 "model": "judge",
+                "reuse": {"policy": "exact"},
                 "budget": {
                     "model_calls": judge_repetitions,
                     "tokens": 64000,
@@ -176,14 +191,17 @@ def build_workspace_template(
             },
             "optimize": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 1800},
             },
             "final_evaluate": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
             "aggregate": {
                 "executor": "local-process",
+                "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
             },
         },
@@ -230,7 +248,7 @@ def build_workspace_template(
             "based_on": "baseline",
             "dataset": {
                 "train": "train",
-                "development": "development",
+                "validation": "validation",
                 "final_evaluation": "test",
             },
             "optimizer": {"name": "LabeledFewShot", "parameters": {"k": 2, "seed": 0}},

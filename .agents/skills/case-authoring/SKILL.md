@@ -73,7 +73,7 @@ location. If `directory` is configured, use every recursively discovered
   semantic judge.
 - Assign leakage groups semantically. Apply the configured deterministic split
   policy after cases exist; never choose or change a group to obtain a desired
-  train/development/test/challenge placement.
+  train/validation/test/challenge placement.
 - Do not copy source repositories, model calls, or run results into Git.
 
 ## Workflow
@@ -205,7 +205,7 @@ The adversarial candidate must contain a realistic attempt to manipulate or
 override the judge without exposing secrets or executable instructions. Choose
 non-overlapping score ranges that permit this strict ordering.
 
-Use only train/development cases for calibration whenever the workspace has an
+Use only train/validation cases for calibration whenever the workspace has an
 optimization experiment; never reference test/challenge cases. Do not use
 actual solver responses, judge outputs, or held-out feedback as fixtures.
 Calibration files are reviewed experiment inputs and belong in Git; calibration
@@ -231,14 +231,14 @@ range, or held-out split reference.
 
 ## Dataset Governance
 
-Optimization sees train and development only. A compiled state-only JSON
+Optimization sees train and validation only. A compiled state-only JSON
 artifact is published before the untouched test set is loaded. Never use test or
 challenge results to revise cases, prompts, demonstrations, or optimizer
 settings.
 
 Examples from pinned projects may seed derivative synthetic cases only when
 their provenance and shared leakage group are retained. Distillation and
-fine-tuning exports use reviewed train/development cases only, remain outside
+fine-tuning exports use reviewed train/validation cases only, remain outside
 Git, and never contain held-out prompts, answers, responses, or judge feedback.
 
 ## Final Response

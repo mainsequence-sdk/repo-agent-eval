@@ -100,7 +100,7 @@ Do not meet a numeric target with paraphrases. Cases that share a solution,
 fixture, misconception, defect, or expected artifact must share a leakage group
 and count as one semantic family for split isolation. Prefer several narrow
 campaigns with explicit coverage requests over one vague request for generic
-variety. Only reviewed, promoted train/development cases may become DSPy
+variety. Only reviewed, promoted train/validation cases may become DSPy
 demonstrations, distillation data, or fine-tuning examples.
 
 ## What a strong case measures
@@ -246,14 +246,14 @@ repositories can never be confused.
 
 Record one `leakage_group` as a lowercase identifier. Cases that expose the same
 underlying solution, fixture, scenario, or expected artifact must share a
-leakage group so they cannot be divided across train, development, and test.
+leakage group so they cannot be divided across train, validation, and test.
 Choose a semantic group name that will remain meaningful when more related
-cases are added. Do not choose `train`, `development`, `test`, or `challenge`,
+cases are added. Do not choose `train`, `validation`, `test`, or `challenge`,
 and do not attempt to select a split.
 
 Examples from a pinned project may seed derivative synthetic cases only when
 their exact source provenance and shared leakage group are retained.
-Distillation/fine-tuning exports use reviewed promoted train/development cases
+Distillation/fine-tuning exports use reviewed promoted train/validation cases
 only, remain outside Git, and never contain test/challenge prompts, reference
 answers, solver responses, or judge feedback.
 
@@ -303,7 +303,7 @@ negative failure-mode ranges may overlap because they are categories, not an
 ordinal ranking. A strong fixture must pass; every other label must fail.
 
 When the workspace includes optimization, calibration may reference only
-train/development cases. It must never reference test/challenge cases or use
+train/validation cases. It must never reference test/challenge cases or use
 held-out feedback. If no eligible representative case exists, author one and
 apply the deterministic group split rather than weakening this rule. Review
 fixtures whenever a referenced prompt, expected response, rubric, case id, or

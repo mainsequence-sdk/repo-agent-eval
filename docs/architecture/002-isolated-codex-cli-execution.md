@@ -199,7 +199,7 @@ hidden files is prohibited.
 | `calibrate_judge` | Assigned calibration fixtures, their cases, rubrics, expected evidence, output schema | Real solver responses and unrelated fixtures |
 | `solve` | Case prompt, declared global context, selected skill context, permitted repository snapshot, runtime/test files | Rubric, expected answer, judge prompt, judge feedback, other split data |
 | `judge` | Assigned case prompt, rubric, expected evidence, locked candidate response, permitted supporting snapshot | Other candidates, aggregate scores, previous judge decisions, unrelated cases |
-| `optimize` | Train/development inputs and explicitly admitted prior results | Test and challenge inputs, answers, responses, and feedback |
+| `optimize` | Train/validation inputs and explicitly admitted prior results | Test and challenge inputs, answers, responses, and feedback |
 | `final_evaluate` | Published optimizer artifact plus the assigned untouched case view | Other held-out cases and any post-evaluation feedback |
 
 An artifact referenced by an allowed directory is not automatically safe. The

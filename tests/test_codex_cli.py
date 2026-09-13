@@ -65,6 +65,7 @@ def _solve_packet(ledger: StageLedger, case: dict[str, object]) -> StagePacket:
     return StagePacket.create(
         run_id="run-1",
         experiment_id="baseline",
+        experiment_revision_id=f"sha256:{'3' * 64}",
         stage=StageKind.SOLVE,
         attempt=1,
         dependencies=(),

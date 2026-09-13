@@ -12,7 +12,7 @@ cases, rubrics, and models.
 
 | Technology | How it is used |
 |---|---|
-| Python 3.12+ | Framework implementation and `ms-agent-eval` command-line interface. |
+| Python 3.12+ and Rich | Framework implementation and a live `ms-agent-eval` terminal interface with explicit JSON automation output. |
 | Portable stages | Authoring, calibration, solving, judging, optimization, final evaluation, and aggregation use one immutable packet/result lifecycle. |
 | Codex skills / CLI | The configured author model creates grounded cases; the isolated CLI adapter can execute model-driven stages with subscription authentication in disposable containers. |
 | DSPy 3.2 | The runtime prompt-programming layer. Typed DSPy signatures define the solver and judge; `LabeledFewShot` compiles optimized solver state. |
@@ -42,7 +42,7 @@ flowchart TB
         AuthoringPolicy["case-authoring.md"]
         CapabilityCatalog["cases/coverage.yaml"]
         Cases["Promoted cases + rubrics"]
-        Splits["Grouped train / development / test splits"]
+        Splits["Grouped train / validation / test splits"]
         Workspace --> AuthoringPolicy
         Workspace --> CapabilityCatalog
         Workspace --> Cases
@@ -71,10 +71,11 @@ flowchart TB
     subgraph Optimization["DSPy optimization experiment"]
         Splits --> Train["Train cases"]
         Train --> Compile["LabeledFewShot compile"]
-        Compile --> Development["Development solve + LLM judge"]
-        Splits --> Development
-        Development --> Published["Publish state-only DSPy JSON"]
-        Published --> Test["Load untouched test cases"]
+        Compile --> Published["Publish state-only DSPy JSON"]
+        Published --> Validation["Validation solve + LLM judge"]
+        Splits --> Validation
+        Validation --> Boundary["Record final-evaluation boundary"]
+        Boundary --> Test["Load untouched test cases"]
         Splits --> Test
         Test --> Final["Optimized solver + LLM judge"]
         Final --> OptimizedResults["External held-out results"]
@@ -129,12 +130,14 @@ uv run ms-agent-eval init \
   --cases cases \
   --api-base-url http://127.0.0.1:8000/v1 \
   --solver-model solver-model \
+  --solver-deployment-revision solver-deployment-v1 \
   --solver-reasoning-effort high \
   --judge-model judge-model \
+  --judge-deployment-revision judge-deployment-v1 \
   --judge-reasoning-effort none
 ```
 
-The generated schema-v8 `workspace.yaml` has these top-level concerns:
+The generated schema-v9 `workspace.yaml` has these top-level concerns:
 
 1. `executors` and `models`: reusable transport and model definitions.
 2. `stages`: the executor, model, and budget assigned to each portable stage.
@@ -170,7 +173,7 @@ scored-run readiness. Requested case counts are lower bounds; the authoring
 campaign expands until every capability has its required primary examples.
 Every new workspace also includes `cases/README.md`, which explains this
 contract beside the catalog. See the general
-[capability coverage contract](docs/capability-coverage.md) for the complete
+[capability coverage contract](docs/evaluation/capability-coverage.md) for the complete
 schema, readiness calculation, authoring procedure, and provenance rules.
 
 ## Configure executors, models, and stages
@@ -188,10 +191,12 @@ executors:
 models:
   solver:
     name: qwen3.6:27b-coding
+    deployment_revision: qwen3.6-27b-coding-local-2026-09-13
     reasoning_effort: high
     parameters: {temperature: 0.2}
   judge:
     name: qwen3.6:27b-coding
+    deployment_revision: qwen3.6-27b-coding-local-2026-09-13
     reasoning_effort: none
     parameters: {temperature: 0.0}
 
@@ -199,10 +204,12 @@ stages:
   solve:
     executor: remote-qwen
     model: solver
+    reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
     executor: remote-qwen
     model: judge
+    reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
 ```
 
@@ -212,6 +219,21 @@ in the ignored `.env` file. Runtime state defaults to
 `~/ms_agent_eval/<workspace-id>`; `workspace.data_root` may explicitly select
 another external path.
 
+Every stage is content-addressed. `exact` reuses a previously validated result
+with the same semantic inputs, program, deployment, parameters, execution
+environment, and output contract. `refresh` deliberately executes again.
+`replicate` is available for solver variance studies and requires an explicit
+sample count. A model alias is not a safe cache boundary, so
+`deployment_revision` must change whenever local weights, quantization,
+tokenizer, chat template, or serving behavior changes. See
+[Incremental execution and reuse](docs/execution/incremental-execution.md).
+
+Starting a run also freezes its selected workspace configuration and every
+loaded case, split, calibration, catalog, policy, and source-snapshot identity
+into an immutable revision bundle. `run resume <run-id>` always continues that
+stored revision—even after relevant workspace edits—while `run baseline`
+compiles the edited workspace as a new revision and reuses only compatible work.
+
 ## Full flow
 
 ```bash
@@ -219,7 +241,7 @@ uv run ms-agent-eval validate --workspace workspace.yaml
 # Ask Codex to use the case-authoring skill with this workspace and campaign goal.
 uv run ms-agent-eval inspect --workspace workspace.yaml
 # While coverage is incomplete, exercise calibration, solving, and judging on
-# train/development cases without producing benchmark metrics.
+# train/validation cases without producing benchmark metrics.
 uv run ms-agent-eval run baseline --pilot --workspace workspace.yaml
 # After validation reports ready_for_scored_run: true:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
@@ -257,10 +279,12 @@ case and leakage-group minima. Those minima prevent a one-case-per-skill bank
 from being treated as evaluation- or training-ready; they remain a floor, not a
 guarantee of enough data for a production fine-tune.
 
-Start with [Getting started](docs/getting-started.md), then read the
-[Capability coverage contract](docs/capability-coverage.md),
-[Codex CLI harness](docs/codex-cli-harness.md),
-[Repository structure](docs/structure.md), and [Conventions](docs/conventions.md).
+Start with the [documentation map](docs/index.md) or jump directly to
+[Getting started](docs/experiments/getting-started.md). The task-oriented guides
+separate [experiment setup](docs/experiments/index.md),
+[training and optimization](docs/training/index.md),
+[evaluation](docs/evaluation/index.md), and
+[execution](docs/execution/index.md).
 
 ## Storage layout
 
@@ -279,18 +303,29 @@ repository/
 │       ├── cases/              coverage contract, promoted cases, and splits
 │       └── judge-calibration/  authored and reviewed judge fixtures
 ├── tests/                      generic framework acceptance tests
-└── docs/                       guides and architecture records
+├── docs/                       general guides and architecture records
+└── .implementation_tasks/      local ignored implementation plans
 ```
 
 Mutable and generated data belongs outside Git under the workspace data root:
 
 ```text
 ~/ms_agent_eval/<workspace-id>/
-├── snapshots/                  immutable target and reference snapshots
-├── blobs/sha256/               content-addressed responses, traces, and state
-├── manifests/                  locks, model calls, runs, scores, and reports
-└── tmp/                        atomic staging
+├── operations/                 internal, machine-oriented execution data
+│   ├── snapshots/              immutable target and reference snapshots
+│   ├── blobs/sha256/           content-addressed responses, traces, and state
+│   ├── manifests/              locks, model calls, runs, and scores
+│   └── tmp/                    atomic staging
+└── summary/runs/<run-id>/
+    ├── summary.md              deterministic run overview
+    ├── results.csv             one row per judged case repetition
+    ├── results.json            canonical derived report
+    └── cases/                  readable per-case evidence
 ```
+
+Every terminal experiment creates this report bundle automatically, without an
+LLM summarization call. Existing runs can be rendered again with
+`ms-agent-eval report build --run <run-id> --workspace <workspace.yaml>`.
 
 There is no root-level `cases/`, `sdk/`, or `runs/` directory. Cases belong to
 their experiment workspace; repository snapshots and every generated run

@@ -4,7 +4,8 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from io import BytesIO
@@ -121,12 +122,19 @@ class StageBudget:
 @dataclass(frozen=True)
 class StagePacket:
     schema_version: int
+    work_id: str
+    attempt_id: str
     packet_id: str
     run_id: str
     experiment_id: str
+    experiment_revision_id: str
     stage: StageKind
     attempt: int
+    replicate_slot: int
+    reuse_policy: str
     dependencies: tuple[str, ...]
+    dependency_artifacts: tuple[str, ...]
+    work_spec: Mapping[str, object]
     inputs: tuple[StageArtifact, ...]
     instructions: StageArtifact
     output_schema: str
@@ -140,9 +148,14 @@ class StagePacket:
         *,
         run_id: str,
         experiment_id: str,
+        experiment_revision_id: str,
         stage: StageKind,
         attempt: int,
+        replicate_slot: int = 1,
+        reuse_policy: str = "exact",
         dependencies: Sequence[str],
+        dependency_artifacts: Sequence[str] = (),
+        work_spec: Mapping[str, object] | None = None,
         inputs: Sequence[StageArtifact],
         instructions: StageArtifact,
         output_schema: str,
@@ -152,6 +165,12 @@ class StagePacket:
     ) -> StagePacket:
         if attempt < 1:
             raise ConfigurationError("stage packet attempt must be positive")
+        if replicate_slot < 1:
+            raise ConfigurationError("stage packet replicate_slot must be positive")
+        if reuse_policy not in {"exact", "refresh", "replicate"}:
+            raise ConfigurationError(
+                "stage packet reuse_policy must be exact, refresh, or replicate"
+            )
         normalized_budget = StageBudget(
             budget.model_calls, budget.tokens, float(budget.wall_seconds)
         )
@@ -160,35 +179,65 @@ class StagePacket:
             raise ConfigurationError("stage packet dependencies must be unique")
         for dependency in dependencies_tuple:
             _content_id(dependency, "stage packet dependency")
+        dependency_artifacts_tuple = tuple(dependency_artifacts)
+        for dependency in dependency_artifacts_tuple:
+            _content_id(dependency, "stage packet dependency artifact")
         inputs_tuple = tuple(inputs)
         input_ids = [item.id for item in inputs_tuple]
         if len(input_ids) != len(set(input_ids)):
             raise ConfigurationError("stage packet input ids must be unique")
-        identity = {
+        normalized_work_spec = dict(work_spec or {"inputs": inputs_tuple})
+        revision_id = _content_id(experiment_revision_id, "experiment revision id")
+        work_identity = {
             "schema_version": 1,
-            "run_id": _required_string(run_id, "stage packet run_id"),
-            "experiment_id": _identifier(experiment_id, "stage packet experiment_id"),
             "stage": stage.value,
-            "attempt": attempt,
-            "dependencies": dependencies_tuple,
-            "inputs": inputs_tuple,
+            "semantic_inputs": normalized_work_spec,
+            "dependency_artifacts": dependency_artifacts_tuple,
             "instructions": instructions,
             "output_contract": {"schema_id": _identifier(output_schema, "output schema")},
-            "executor": executor,
+            "executor": {
+                "adapter": executor.adapter,
+                "configuration_hash": executor.configuration_hash,
+            },
             "model": model,
+            "model_visible_limits": {
+                "model_calls": normalized_budget.model_calls,
+                "tokens": normalized_budget.tokens,
+            },
+        }
+        work_id = content_hash(work_identity)
+        attempt_identity = {
+            "schema_version": 2,
+            "work_id": work_id,
+            "run_id": _required_string(run_id, "stage packet run_id"),
+            "experiment_id": _identifier(experiment_id, "stage packet experiment_id"),
+            "experiment_revision_id": revision_id,
+            "attempt": attempt,
+            "replicate_slot": replicate_slot,
+            "reuse_policy": reuse_policy,
+            "dependencies": dependencies_tuple,
+            "envelope_inputs": inputs_tuple,
             "budget": normalized_budget,
         }
+        attempt_id = content_hash(attempt_identity)
         return cls(
-            schema_version=1,
-            packet_id=content_hash(identity),
-            run_id=identity["run_id"],  # type: ignore[arg-type]
-            experiment_id=identity["experiment_id"],  # type: ignore[arg-type]
+            schema_version=2,
+            work_id=work_id,
+            attempt_id=attempt_id,
+            packet_id=attempt_id,
+            run_id=attempt_identity["run_id"],  # type: ignore[arg-type]
+            experiment_id=attempt_identity["experiment_id"],  # type: ignore[arg-type]
+            experiment_revision_id=revision_id,
             stage=stage,
             attempt=attempt,
+            replicate_slot=replicate_slot,
+            reuse_policy=reuse_policy,
             dependencies=dependencies_tuple,
+            dependency_artifacts=dependency_artifacts_tuple,
+            work_spec=MappingProxyType(normalized_work_spec),
             inputs=inputs_tuple,
             instructions=instructions,
-            output_schema=identity["output_contract"]["schema_id"],  # type: ignore[index]
+            output_schema=work_identity["output_contract"]["schema_id"],  # type: ignore[index]
             executor=executor,
             model=model,
             budget=normalized_budget,
@@ -196,11 +245,15 @@ class StagePacket:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> StagePacket:
-        if payload.get("schema_version") != 1:
-            raise ConfigurationError("stage packet schema_version must be 1")
+        if payload.get("schema_version") != 2:
+            raise ConfigurationError("stage packet schema_version must be 2")
         raw_inputs = _sequence(payload.get("inputs"), "stage packet inputs")
         raw_dependencies = _sequence(
             payload.get("dependencies", []), "stage packet dependencies"
+        )
+        raw_dependency_artifacts = _sequence(
+            payload.get("dependency_artifacts", []),
+            "stage packet dependency_artifacts",
         )
         try:
             stage = StageKind(payload.get("stage"))
@@ -212,11 +265,25 @@ class StagePacket:
             experiment_id=_identifier(
                 payload.get("experiment_id"), "stage packet experiment_id"
             ),
+            experiment_revision_id=_content_id(
+                payload.get("experiment_revision_id"), "experiment revision id"
+            ),
             stage=stage,
             attempt=_positive_int(payload.get("attempt"), "stage packet attempt"),
+            replicate_slot=_positive_int(
+                payload.get("replicate_slot"), "stage packet replicate_slot"
+            ),
+            reuse_policy=_required_string(
+                payload.get("reuse_policy"), "stage packet reuse_policy"
+            ),
             dependencies=tuple(
                 _content_id(item, "stage packet dependency") for item in raw_dependencies
             ),
+            dependency_artifacts=tuple(
+                _content_id(item, "stage packet dependency artifact")
+                for item in raw_dependency_artifacts
+            ),
+            work_spec=_mapping(payload.get("work_spec"), "stage packet work_spec"),
             inputs=tuple(
                 StageArtifact.from_mapping(_mapping(item, "stage packet input"))
                 for item in raw_inputs
@@ -235,6 +302,10 @@ class StagePacket:
                 _mapping(payload.get("budget"), "stage packet budget")
             ),
         )
+        if payload.get("work_id") != packet.work_id:
+            raise IntegrityError("stage packet work identity hash is invalid")
+        if payload.get("attempt_id") != packet.attempt_id:
+            raise IntegrityError("stage packet attempt identity hash is invalid")
         if payload.get("packet_id") != packet.packet_id:
             raise IntegrityError("stage packet identity hash is invalid")
         return packet
@@ -245,6 +316,27 @@ class StagePacket:
         payload["stage"] = self.stage.value
         payload["output_contract"] = {"schema_id": payload.pop("output_schema")}
         return payload
+
+    def work_document(self) -> Mapping[str, object]:
+        """Return the canonical, run-independent computation identity."""
+
+        return {
+            "schema_version": 1,
+            "stage": self.stage.value,
+            "semantic_inputs": dict(self.work_spec),
+            "dependency_artifacts": list(self.dependency_artifacts),
+            "instructions": json_value(self.instructions),
+            "output_contract": {"schema_id": self.output_schema},
+            "executor": {
+                "adapter": self.executor.adapter,
+                "configuration_hash": self.executor.configuration_hash,
+            },
+            "model": json_value(self.model),
+            "model_visible_limits": {
+                "model_calls": self.budget.model_calls,
+                "tokens": self.budget.tokens,
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -257,6 +349,8 @@ class StageError:
 class StageResult:
     schema_version: int
     result_id: str
+    work_id: str
+    attempt_id: str
     packet_id: str
     attempt: int
     status: str
@@ -306,7 +400,9 @@ class StageResult:
         }
         timing = {"started_at": started_at, "completed_at": completed_at}
         identity = {
-            "schema_version": 2,
+            "schema_version": 3,
+            "work_id": packet.work_id,
+            "attempt_id": packet.attempt_id,
             "packet_id": packet.packet_id,
             "attempt": packet.attempt,
             "status": status,
@@ -319,8 +415,10 @@ class StageResult:
             "error": error,
         }
         return cls(
-            schema_version=2,
+            schema_version=3,
             result_id=content_hash(identity),
+            work_id=packet.work_id,
+            attempt_id=packet.attempt_id,
             packet_id=packet.packet_id,
             attempt=packet.attempt,
             status=status,
@@ -335,9 +433,13 @@ class StageResult:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> StageResult:
-        if payload.get("schema_version") != 2:
-            raise ConfigurationError("stage result schema_version must be 2")
+        if payload.get("schema_version") != 3:
+            raise ConfigurationError("stage result schema_version must be 3")
+        work_id = _content_id(payload.get("work_id"), "stage result work_id")
+        attempt_id = _content_id(payload.get("attempt_id"), "stage result attempt_id")
         packet_id = _content_id(payload.get("packet_id"), "stage result packet_id")
+        if packet_id != attempt_id:
+            raise IntegrityError("stage result packet_id must equal attempt_id")
         attempt = _positive_int(payload.get("attempt"), "stage result attempt")
         status = _required_string(payload.get("status"), "stage result status")
         executor = _mapping(payload.get("executor"), "stage result executor")
@@ -350,66 +452,46 @@ class StageResult:
                 _identifier(error_payload.get("kind"), "stage result error kind"),
                 _required_string(error_payload.get("message"), "stage result error message"),
             )
-        synthetic = StagePacket.create(
-            run_id="validation-only",
-            experiment_id="validation-only",
-            stage=StageKind.AGGREGATE,
-            attempt=attempt,
-            dependencies=(),
-            inputs=(),
-            instructions=StageArtifact(
-                "instructions", f"sha256:{'0' * 64}", "application/json"
-            ),
-            output_schema="validation-only",
-            executor=StageExecutorIdentity(
-                _identifier(executor.get("id"), "stage result executor id"),
-                _identifier(executor.get("adapter"), "stage result executor adapter"),
-                f"sha256:{'0' * 64}",
-            ),
-            model=StageModelIdentity(
-                None
-                if model.get("id") is None
-                else _required_string(model.get("id"), "stage result model id"),
-                None if model.get("id") is None else f"sha256:{'0' * 64}",
-            ),
-            budget=StageBudget(0, 0, 1),
+        outputs = tuple(
+            StageArtifact.from_mapping(_mapping(item, "stage result output"))
+            for item in _sequence(payload.get("outputs", []), "stage result outputs")
         )
-        synthetic = replace(synthetic, packet_id=packet_id)
-        result = cls.create(
-            packet=synthetic,
+        usage = _mapping(payload.get("usage", {}), "stage result usage")
+        provenance = _mapping(payload.get("provenance", {}), "stage result provenance")
+        timing = _mapping(payload.get("timing"), "stage result timing")
+        identity = {
+            "schema_version": 3,
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "packet_id": packet_id,
+            "attempt": attempt,
+            "status": status,
+            "executor": executor,
+            "model": model,
+            "outputs": outputs,
+            "usage": usage,
+            "provenance": provenance,
+            "timing": timing,
+            "error": error,
+        }
+        if payload.get("result_id") != content_hash(identity):
+            raise IntegrityError("stage result identity hash is invalid")
+        return cls(
+            schema_version=3,
+            result_id=_content_id(payload.get("result_id"), "stage result result_id"),
+            work_id=work_id,
+            attempt_id=attempt_id,
+            packet_id=packet_id,
+            attempt=attempt,
             status=status,
-            executor_version=(
-                None
-                if executor.get("version") is None
-                else _required_string(executor.get("version"), "executor version")
-            ),
-            worker_id=_required_string(executor.get("worker_id"), "executor worker_id"),
-            outputs=tuple(
-                StageArtifact.from_mapping(_mapping(item, "stage result output"))
-                for item in _sequence(payload.get("outputs", []), "stage result outputs")
-            ),
-            usage=_mapping(payload.get("usage", {}), "stage result usage"),
-            provenance=_mapping(
-                payload.get("provenance", {}), "stage result provenance"
-            ),
-            started_at=_required_string(
-                _mapping(payload.get("timing"), "stage result timing").get("started_at"),
-                "stage result started_at",
-            ),
-            completed_at=_required_string(
-                _mapping(payload.get("timing"), "stage result timing").get("completed_at"),
-                "stage result completed_at",
-            ),
-            observed_model=(
-                None
-                if model.get("observed_id") is None
-                else _required_string(model.get("observed_id"), "observed model id")
-            ),
+            executor=MappingProxyType(dict(executor)),
+            model=MappingProxyType(dict(model)),
+            outputs=outputs,
+            usage=MappingProxyType(dict(usage)),
+            provenance=MappingProxyType(dict(provenance)),
+            timing=MappingProxyType(dict(timing)),
             error=error,
         )
-        if payload.get("result_id") != result.result_id:
-            raise IntegrityError("stage result identity hash is invalid")
-        return result
 
     def as_dict(self) -> Mapping[str, object]:
         payload = json_value(self)
@@ -447,10 +529,28 @@ class StageLedger:
     ) -> None:
         self.store = store
         self.clock = clock
-        self._lock_path = store.data_root / "stage-ledger.lock"
+        self._lock_path = store.operations_root / "stage-ledger.lock"
 
     def create_run(self, run_id: str, document: Mapping[str, object]) -> ArtifactReference:
         return self.store.put_manifest(f"runs/{run_id}/run", document)
+
+    @contextmanager
+    def work_lock(self, work_id: str):  # type: ignore[no-untyped-def]
+        """Serialize cache resolution and execution for one work identity."""
+
+        import fcntl
+
+        digest = _content_id(work_id, "work id").removeprefix("sha256:")
+        # Fixed hash buckets bound operational lock-file growth while preserving
+        # cross-process single-flight behavior for identical work IDs.
+        path = self.store.operations_root / "locks" / "work" / f"{digest[:2]}.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def load_run(self, run_id: str) -> Mapping[str, object]:
         path = self.store.manifest_root / "runs" / run_id / "run.json"
@@ -458,8 +558,15 @@ class StageLedger:
 
     def prepare(self, packet: StagePacket) -> StagePacket:
         self._validate_dependencies(packet)
+        work_digest = packet.work_id.removeprefix("sha256:")
+        if content_hash(packet.work_document()) != packet.work_id:
+            raise IntegrityError("stage work document does not match work_id")
         self.store.put_manifest(
-            f"stage-packets/{packet.packet_id.removeprefix('sha256:')}", packet.as_dict()
+            f"graph/work/{work_digest}/work", packet.work_document()
+        )
+        self.store.put_manifest(
+            f"graph/attempts/{packet.attempt_id.removeprefix('sha256:')}",
+            packet.as_dict(),
         )
         current = self.status_or_none(packet.packet_id)
         if current is None:
@@ -470,7 +577,7 @@ class StageLedger:
 
     def load_packet(self, packet_id: str) -> StagePacket:
         digest = _content_id(packet_id, "packet id").removeprefix("sha256:")
-        path = self.store.manifest_root / "stage-packets" / f"{digest}.json"
+        path = self.store.manifest_root / "graph" / "attempts" / f"{digest}.json"
         return StagePacket.from_mapping(self._load_mapping(path, "stage packet"))
 
     def list(self, run_id: str) -> tuple[StageStatus, ...]:
@@ -552,7 +659,8 @@ class StageLedger:
         for output in result.outputs:
             self.store.reference(output.content_id, output.media_type)
         self.store.put_manifest(
-            f"stage-results/{result.result_id.removeprefix('sha256:')}", result.as_dict()
+            f"graph/results/{result.result_id.removeprefix('sha256:')}",
+            result.as_dict(),
         )
         state = StageState.SUBMITTED if result.status == "completed" else StageState.FAILED
         self._append_transition(
@@ -595,6 +703,8 @@ class StageLedger:
     def persist(self, packet_id: str) -> StageResult:
         status = self.status(packet_id)
         if status.state is StageState.PERSISTED and status.result is not None:
+            if self._eligible_for_publication(status.result):
+                self._publish_reusable_result(status.packet, status.result)
             return status.result
         if status.state is not StageState.VALIDATED or status.result is None:
             raise IntegrityError("only validated stage results can be persisted")
@@ -603,7 +713,82 @@ class StageLedger:
             StageState.PERSISTED,
             {"result_id": status.result.result_id},
         )
+        if self._eligible_for_publication(status.result):
+            self._publish_reusable_result(status.packet, status.result)
         return status.result
+
+    def reusable_result(self, packet: StagePacket) -> StageResult | None:
+        """Return a deterministically selected verified result for an exact work ID."""
+
+        if packet.reuse_policy != "exact":
+            return None
+        root = (
+            self.store.manifest_root
+            / "graph"
+            / "work"
+            / packet.work_id.removeprefix("sha256:")
+            / "results"
+        )
+        if not root.is_dir():
+            return None
+        for entry_path in sorted(root.glob("*.json")):
+            try:
+                entry = self._load_mapping(entry_path, "reusable work result")
+                if entry.get("schema_version") != 1:
+                    continue
+                if entry.get("work_id") != packet.work_id:
+                    continue
+                result = self.load_result(
+                    _content_id(entry.get("result_id"), "reusable result id")
+                )
+                if result.work_id != packet.work_id or result.status != "completed":
+                    continue
+                if result.provenance.get("cache_eligible") is False:
+                    continue
+                source = self.status(result.packet_id)
+                if source.state is not StageState.PERSISTED:
+                    continue
+                for output in result.outputs:
+                    self.store.reference(output.content_id, output.media_type)
+                return result
+            except (ConfigurationError, IntegrityError, ResolutionError, OSError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _eligible_for_publication(result: StageResult) -> bool:
+        return (
+            result.status == "completed"
+            and result.provenance.get("cache_hit") is not True
+            and result.provenance.get("cache_eligible") is not False
+        )
+
+    def load_result(self, result_id: str) -> StageResult:
+        digest = _content_id(result_id, "result id").removeprefix("sha256:")
+        path = self.store.manifest_root / "graph" / "results" / f"{digest}.json"
+        return StageResult.from_mapping(self._load_mapping(path, "stage result"))
+
+    def _publish_reusable_result(
+        self,
+        packet: StagePacket,
+        result: StageResult,
+    ) -> None:
+        if result.work_id != packet.work_id or result.attempt_id != packet.attempt_id:
+            raise IntegrityError("result identities do not match reusable work")
+        self.store.put_manifest(
+            "graph/work/"
+            f"{packet.work_id.removeprefix('sha256:')}/results/"
+            f"{result.result_id.removeprefix('sha256:')}",
+            {
+                "schema_version": 1,
+                "work_id": packet.work_id,
+                "result_id": result.result_id,
+                "attempt_id": packet.attempt_id,
+                "source_run_id": packet.run_id,
+                "stage": packet.stage.value,
+                "validated": True,
+            },
+        )
 
     def retry(self, packet_id: str) -> StagePacket:
         original = self.load_packet(packet_id)
@@ -613,9 +798,14 @@ class StageLedger:
         retry = StagePacket.create(
             run_id=original.run_id,
             experiment_id=original.experiment_id,
+            experiment_revision_id=original.experiment_revision_id,
             stage=original.stage,
             attempt=original.attempt + 1,
+            replicate_slot=original.replicate_slot,
+            reuse_policy=original.reuse_policy,
             dependencies=original.dependencies,
+            dependency_artifacts=original.dependency_artifacts,
+            work_spec=original.work_spec,
             inputs=original.inputs,
             instructions=original.instructions,
             output_schema=original.output_schema,
@@ -700,12 +890,7 @@ class StageLedger:
             if raw_result_id is None:
                 continue
             result_id = _content_id(raw_result_id, "transition result_id")
-            path = (
-                self.store.manifest_root
-                / "stage-results"
-                / f"{result_id.removeprefix('sha256:')}.json"
-            )
-            result = StageResult.from_mapping(self._load_mapping(path, "stage result"))
+            result = self.load_result(result_id)
             break
         return StageStatus(packet, state, claim, result, history)
 

@@ -129,10 +129,13 @@ class ExternalSnapshotStore:
         self.data_root = data_root.resolve()
         if workspace_root is not None and _is_within(self.data_root, workspace_root.resolve()):
             raise ConfigurationError("external snapshot data root must be outside the workspace")
-        self.snapshot_root = self.data_root / "snapshots"
-        self.temporary_root = self.data_root / "tmp"
+        self.operations_root = self.data_root / "operations"
+        self.summary_root = self.data_root / "summary"
+        self.snapshot_root = self.operations_root / "snapshots"
+        self.temporary_root = self.operations_root / "tmp"
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
         self.temporary_root.mkdir(parents=True, exist_ok=True)
+        self.summary_root.mkdir(parents=True, exist_ok=True)
 
     def directory(self, lock: SnapshotLock) -> Path:
         return self.snapshot_root / lock.content_hash.removeprefix("sha256:")

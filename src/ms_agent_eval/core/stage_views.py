@@ -205,6 +205,7 @@ class StageViewMaterializer:
             "candidate_response",
             "split",
             "repetition",
+            "solver_work_id",
             "solver_packet_id",
         }
         forbidden = sorted(set(evaluation) - allowed)
@@ -222,6 +223,7 @@ class StageViewMaterializer:
                     "case_hash",
                     "split",
                     "repetition",
+                    "solver_work_id",
                     "solver_packet_id",
                 )
             }

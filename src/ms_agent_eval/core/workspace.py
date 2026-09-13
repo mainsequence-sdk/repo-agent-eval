@@ -26,13 +26,13 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 8
+WORKSPACE_SCHEMA_VERSION = 9
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PINNED_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 _DOCKER_NETWORK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_SPLITS = {"train", "development", "test", "challenge"}
+_SPLITS = {"train", "validation", "test", "challenge"}
 REASONING_EFFORTS = (
     "none",
     "minimal",
@@ -374,10 +374,10 @@ class DspyProgramConfiguration:
     def validate_role(self, role: str, *, field: str) -> None:
         expected = _PROGRAM_FIELDS[role]
         expected_types = _PROGRAM_TYPES[role]
+        # Signature fields are named. YAML/JSON key order is not semantic and
+        # canonical revision serialization deliberately sorts mapping keys.
         if (
-            tuple(self.inputs) != expected["inputs"]
-            or tuple(self.outputs) != expected["outputs"]
-            or dict(self.inputs) != expected_types["inputs"]
+            dict(self.inputs) != expected_types["inputs"]
             or dict(self.outputs) != expected_types["outputs"]
         ):
             raise ConfigurationError(
@@ -393,6 +393,7 @@ class DspyProgramConfiguration:
 @dataclass(frozen=True)
 class ModelConfiguration:
     model: str
+    deployment_revision: str
     reasoning_effort: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
@@ -403,6 +404,7 @@ class ModelConfiguration:
             payload,
             {
                 "name",
+                "deployment_revision",
                 "reasoning_effort",
                 "parameters",
                 "configured_cost_per_call",
@@ -433,6 +435,10 @@ class ModelConfiguration:
             raise ConfigurationError(f"{field}.configured_cost_per_call must be non-negative")
         return cls(
             _string(payload.get("name"), f"{field}.name"),
+            _string(
+                payload.get("deployment_revision"),
+                f"{field}.deployment_revision",
+            ),
             reasoning_effort,
             parameters,
             float(cost),
@@ -656,9 +662,68 @@ class ExecutorConfiguration:
             )
         return value
 
+    @property
+    def execution_hash(self) -> str:
+        """Hash output-affecting execution behavior, excluding labels and secrets."""
+
+        return content_hash(
+            {
+                "type": self.type,
+                "adapter": self.adapter,
+                "base_url": self.base_url,
+                "version": self.version,
+                "options": self.options,
+                "codex_cli": self.codex_cli,
+            }
+        )
+
 
 _MODEL_STAGES = {"author", "calibrate_judge", "solve", "judge"}
 _CANONICAL_STAGES = _MODEL_STAGES | {"optimize", "final_evaluate", "aggregate"}
+
+
+class ReusePolicy(str, Enum):
+    EXACT = "exact"
+    REFRESH = "refresh"
+    REPLICATE = "replicate"
+
+
+@dataclass(frozen=True)
+class StageReuseConfiguration:
+    policy: ReusePolicy
+    samples: int
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str,
+        stage_id: str,
+    ) -> StageReuseConfiguration:
+        _reject_unknown(payload, {"policy", "samples"}, field)
+        try:
+            policy = ReusePolicy(payload.get("policy"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                f"{field}.policy must be exact, refresh, or replicate"
+            ) from error
+        raw_samples = payload.get("samples", 1)
+        samples = _positive_int(raw_samples, f"{field}.samples")
+        if policy is ReusePolicy.REPLICATE:
+            if stage_id != "solve":
+                raise ConfigurationError(
+                    f"{field}.policy replicate is supported only for solve"
+                )
+            if samples < 2:
+                raise ConfigurationError(
+                    f"{field}.samples must be at least 2 for replicate"
+                )
+        elif samples != 1:
+            raise ConfigurationError(
+                f"{field}.samples is valid only when policy is replicate"
+            )
+        return cls(policy, samples)
 
 
 @dataclass(frozen=True)
@@ -666,6 +731,7 @@ class StageConfiguration:
     id: str
     executor: str
     model: str | None
+    reuse: StageReuseConfiguration
     budget: RoleBudget
 
     @classmethod
@@ -677,7 +743,7 @@ class StageConfiguration:
         field = f"stages.{stage_id}"
         if stage_id not in _CANONICAL_STAGES:
             raise ConfigurationError(f"unknown canonical stage: {stage_id}")
-        _reject_unknown(payload, {"executor", "model", "budget"}, field)
+        _reject_unknown(payload, {"executor", "model", "reuse", "budget"}, field)
         raw_model = payload.get("model")
         model = _identifier(raw_model, f"{field}.model") if raw_model is not None else None
         if stage_id in _MODEL_STAGES and model is None:
@@ -688,6 +754,11 @@ class StageConfiguration:
             stage_id,
             _identifier(payload.get("executor"), f"{field}.executor"),
             model,
+            StageReuseConfiguration.from_mapping(
+                _mapping(payload.get("reuse"), f"{field}.reuse"),
+                field=f"{field}.reuse",
+                stage_id=stage_id,
+            ),
             RoleBudget.from_mapping(
                 _mapping(payload.get("budget"), f"{field}.budget"),
                 field=f"{field}.budget",
@@ -827,7 +898,7 @@ class CasesConfiguration:
 class SplitPolicy:
     seed: str
     train: float
-    development: float
+    validation: float
     test: float
     challenge: float
 
@@ -835,7 +906,7 @@ class SplitPolicy:
     def from_mapping(cls, payload: Mapping[str, object]) -> SplitPolicy:
         _reject_unknown(
             payload,
-            {"seed", "train", "development", "test", "challenge"},
+            {"seed", "train", "validation", "test", "challenge"},
             "evaluation.splits.policy",
         )
         seed = _string(payload.get("seed", "ms-agent-eval"), "splits.policy.seed")
@@ -848,7 +919,7 @@ class SplitPolicy:
         if abs(sum(values.values()) - 1.0) > 1e-9:
             raise ConfigurationError("split policy proportions must sum to 1.0")
         return cls(
-            seed, values["train"], values["development"], values["test"], values["challenge"]
+            seed, values["train"], values["validation"], values["test"], values["challenge"]
         )
 
 
@@ -863,7 +934,7 @@ class SplitsConfiguration:
         default_policy = {
             "seed": "ms-agent-eval",
             "train": 0.5,
-            "development": 0.2,
+            "validation": 0.2,
             "test": 0.2,
             "challenge": 0.1,
         }
@@ -1050,10 +1121,10 @@ class ExperimentConfiguration:
             key: _string(value, f"experiment.dataset.{key}")
             for key, value in _mapping(payload.get("dataset"), "experiment.dataset").items()
         }
-        required = {"train", "development", "final_evaluation"}
-        if set(dataset) != required or set(dataset.values()) != {"train", "development", "test"}:
+        required = {"train", "validation", "final_evaluation"}
+        if set(dataset) != required or set(dataset.values()) != {"train", "validation", "test"}:
             raise ConfigurationError(
-                "optimization dataset must map train, development, and final_evaluation to protected splits"
+                "optimization dataset must map train, validation, and final_evaluation to protected splits"
             )
         output = _mapping(payload.get("output"), "experiment.output")
         _reject_unknown(output, {"compiled_program"}, "experiment.output")
@@ -1254,6 +1325,7 @@ class ResolvedRoleModel:
     executor_id: str
     provider: str
     model: str
+    deployment_revision: str
     base_url: str
     api_key_env: str | None
     reasoning_effort: str | None
@@ -1270,18 +1342,27 @@ class ResolvedRoleModel:
         environment: Mapping[str, str] | None = None,
     ) -> ResolvedRoleModel:
         del environment
-        identity = {
-            "role": role,
-            "executor_id": executor.id,
+        semantic_identity = {
             "provider": executor.adapter,
             "model": configuration.model,
+            "deployment_revision": configuration.deployment_revision,
             "base_url": executor.base_url or "",
-            "api_key_env": executor.api_key_env,
             "reasoning_effort": configuration.reasoning_effort,
             "parameters": configuration.parameters,
-            "configured_cost_per_call": configuration.configured_cost_per_call,
         }
-        return cls(**identity, content_hash=content_hash(identity))
+        return cls(
+            role=role,
+            executor_id=executor.id,
+            provider=executor.adapter,
+            model=configuration.model,
+            deployment_revision=configuration.deployment_revision,
+            base_url=executor.base_url or "",
+            api_key_env=executor.api_key_env,
+            reasoning_effort=configuration.reasoning_effort,
+            parameters=configuration.parameters,
+            configured_cost_per_call=configuration.configured_cost_per_call,
+            content_hash=content_hash(semantic_identity),
+        )
 
     def api_key(self, environment: Mapping[str, str]) -> str | None:
         if self.api_key_env is None:

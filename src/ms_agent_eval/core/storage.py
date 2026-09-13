@@ -41,10 +41,17 @@ def _safe_manifest_key(key: str) -> str:
 class FilesystemArtifactStore:
     def __init__(self, data_root: Path, *, workspace_root: Path | None = None) -> None:
         self.data_root = validate_external_data_root(data_root, workspace_root=workspace_root)
-        self.blob_root = self.data_root / "blobs" / "sha256"
-        self.manifest_root = self.data_root / "manifests"
-        self.temporary_root = self.data_root / "tmp"
-        for directory in (self.blob_root, self.manifest_root, self.temporary_root):
+        self.operations_root = self.data_root / "operations"
+        self.summary_root = self.data_root / "summary"
+        self.blob_root = self.operations_root / "blobs" / "sha256"
+        self.manifest_root = self.operations_root / "manifests"
+        self.temporary_root = self.operations_root / "tmp"
+        for directory in (
+            self.blob_root,
+            self.manifest_root,
+            self.temporary_root,
+            self.summary_root,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
     def put_blob(self, content: BinaryIO, media_type: str) -> ArtifactReference:

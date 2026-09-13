@@ -31,6 +31,7 @@ def _model() -> ResolvedRoleModel:
         executor_id="remote-models",
         provider="openai_compatible",
         model="solver-model",
+        deployment_revision="solver-model-test-v1",
         base_url="http://localhost:8000/v1",
         api_key_env="OPENAI_API_KEY",
         reasoning_effort=None,

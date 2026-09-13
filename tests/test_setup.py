@@ -137,7 +137,7 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 8
+    assert repository.workspace.schema_version == 9
     assert repository.workspace.models["solver"].reasoning_effort == "medium"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert repository.capability_catalog_path == workspace.parent / "cases" / "coverage.yaml"

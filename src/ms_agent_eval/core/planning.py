@@ -48,6 +48,9 @@ class CaseLock:
     skill: str
     group: str
     split: str
+    solver_view_hash: str
+    judge_view_hash: str
+    metadata_hash: str
     content_hash: str
 
 
@@ -67,6 +70,7 @@ class ExperimentLock:
     capability_catalog_hash: str
     solver_program_hash: str
     judge_program_hash: str
+    effective_configuration: Mapping[str, object]
     models: Mapping[str, ResolvedRoleModel]
     cases: tuple[CaseLock, ...]
     configuration: ExperimentConfiguration
@@ -113,15 +117,56 @@ class CompiledWorkspace:
                 case.skill,
                 case.group,
                 self.splits.split_for(case),
+                case.solver_view_hash,
+                case.judge_view_hash,
+                case.metadata_hash,
                 case.content_hash,
             )
             for case in self.case_bank.cases
         )
+        referenced_stage_ids = (
+            "author",
+            "calibrate_judge",
+            "solve",
+            "judge",
+            "optimize",
+            "final_evaluate",
+            "aggregate",
+        )
+        referenced_executor_ids = {
+            workspace.stages[stage_id].executor for stage_id in referenced_stage_ids
+        }
+        referenced_model_ids = {
+            stage.model
+            for stage in workspace.stages.values()
+            if stage.model is not None
+        }
+        effective_configuration = {
+            "experiment": experiment,
+            "base_experiment": (
+                workspace.experiments[experiment.based_on]
+                if experiment.based_on is not None
+                else None
+            ),
+            "runtime": workspace.runtime(experiment_id),
+            "judge": workspace.evaluation.judge,
+            "stages": {
+                stage_id: workspace.stages[stage_id]
+                for stage_id in referenced_stage_ids
+            },
+            "executors": {
+                executor_id: workspace.executors[executor_id]
+                for executor_id in sorted(referenced_executor_ids)
+            },
+            "models": {
+                model_id: workspace.models[model_id]
+                for model_id in sorted(referenced_model_ids)
+            },
+        }
         identity = {
-            "schema_version": 4,
+            "schema_version": 5,
             "id": f"{workspace.id}-{experiment.id}",
             "workspace_id": workspace.id,
-            "workspace_hash": workspace.identity_hash,
             "mode": experiment.mode.value,
             "source_snapshot_hash": self.context.snapshot_hash,
             "source_commit": self.snapshot.resolved_commit,
@@ -132,11 +177,16 @@ class CompiledWorkspace:
             "capability_catalog_hash": catalog_hash,
             "solver_program_hash": solver_hash,
             "judge_program_hash": judge_hash,
+            "effective_configuration": effective_configuration,
             "models": models,
             "cases": cases,
             "configuration": experiment,
         }
-        return ExperimentLock(**identity, content_hash=content_hash(identity))
+        return ExperimentLock(
+            **identity,
+            workspace_hash=workspace.identity_hash,
+            content_hash=content_hash(identity),
+        )
 
     def inspect(
         self,
@@ -150,7 +200,7 @@ class CompiledWorkspace:
         }
         counts = Counter(self.splits.split_for(case) for case in self.case_bank.cases)
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "workspace": {
                 "id": workspace.id,
                 "manifest": self.repository.workspace_file.as_posix(),
@@ -208,6 +258,16 @@ class CompiledWorkspace:
                 "rubric_coverage": len(self.case_bank.cases),
                 "expected_response_coverage": len(self.case_bank.cases),
                 "authoring_provenance_coverage": len(self.case_bank.cases),
+                "projections": [
+                    {
+                        "id": case.id,
+                        "solver_view_hash": case.solver_view_hash,
+                        "judge_view_hash": case.judge_view_hash,
+                        "metadata_hash": case.metadata_hash,
+                        "case_hash": case.content_hash,
+                    }
+                    for case in self.case_bank.cases
+                ],
             },
             "case_authoring": {
                 "instructions": self.repository.case_authoring_path.as_posix(),
@@ -230,10 +290,16 @@ class CompiledWorkspace:
                     "mode": lock.mode,
                     "lock_id": lock.id,
                     "lock_hash": lock.content_hash,
+                    "experiment_revision_id": lock.content_hash,
+                    "revision": f"{key}@{lock.content_hash.removeprefix('sha256:')[:12]}",
                     "solver_program_hash": lock.solver_program_hash,
                     "solver_model": json_value(lock.models["solver"]),
                     "runtime": json_value(workspace.runtime(key)),
                     "projected_case_runs": len(lock.cases),
+                    "reuse": {
+                        stage_id: json_value(configuration.reuse)
+                        for stage_id, configuration in workspace.stages.items()
+                    },
                 }
                 for key, lock in locks.items()
             },
@@ -329,7 +395,7 @@ def _validate_splits(repository: WorkspaceRepository, splits: SplitManifest) -> 
         splits,
         seed=policy.seed,
         train=policy.train,
-        development=policy.development,
+        validation=policy.validation,
         test=policy.test,
     )
 
@@ -509,7 +575,7 @@ def inspect_workspace(
     )
     split_counts = Counter(splits.split_for(case) for case in case_bank.cases)
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "status": "ready" if not blockers else "incomplete",
         "ready_for_scored_run": not blockers,
         "blockers": blockers,
@@ -566,6 +632,16 @@ def inspect_workspace(
             "rubric_coverage": len(case_bank.cases),
             "expected_response_coverage": len(case_bank.cases),
             "authoring_provenance_coverage": len(case_bank.cases),
+            "projections": [
+                {
+                    "id": case.id,
+                    "solver_view_hash": case.solver_view_hash,
+                    "judge_view_hash": case.judge_view_hash,
+                    "metadata_hash": case.metadata_hash,
+                    "case_hash": case.content_hash,
+                }
+                for case in case_bank.cases
+            ],
         },
         "case_authoring": {
             "instructions": repository.case_authoring_path.as_posix(),
@@ -592,6 +668,15 @@ def inspect_workspace(
                 "lock_hash": (
                     locks[experiment_id].content_hash if experiment_id in locks else None
                 ),
+                "experiment_revision_id": (
+                    locks[experiment_id].content_hash if experiment_id in locks else None
+                ),
+                "revision": (
+                    f"{experiment_id}@"
+                    f"{locks[experiment_id].content_hash.removeprefix('sha256:')[:12]}"
+                    if experiment_id in locks
+                    else None
+                ),
                 "solver_program_hash": program_hash(create_solver_program()),
                 "solver_model": (
                     json_value(resolved[experiment_id]["solver"])
@@ -608,6 +693,10 @@ def inspect_workspace(
                     if experiment.mode is ExperimentMode.EVALUATE
                     else sum(splits.split_for(case) == "test" for case in case_bank.cases)
                 ),
+                "reuse": {
+                    stage_id: json_value(configuration.reuse)
+                    for stage_id, configuration in workspace.stages.items()
+                },
             }
             for experiment_id, experiment in workspace.experiments.items()
         },
@@ -624,6 +713,7 @@ def _unresolved_model(
         "executor": executor.id,
         "provider": executor.adapter,
         "name": configuration.model,
+        "deployment_revision": configuration.deployment_revision,
         "base_url": executor.base_url,
         "api_key_env": executor.api_key_env,
         "reasoning_effort": configuration.reasoning_effort,
@@ -634,4 +724,8 @@ def _unresolved_model(
 def lock_as_dict(lock: ExperimentLock) -> dict[str, object]:
     value = json_value(lock)
     assert isinstance(value, dict)
+    # The full workspace hash is run provenance, not part of this selected
+    # experiment revision. Keeping it out makes the revision document stable
+    # when an unrelated experiment changes.
+    value.pop("workspace_hash", None)
     return value

@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 
 workspace:
   id: command-center-sdk-evaluation
@@ -19,39 +19,49 @@ executors:
 models:
   author:
     name: author-model
+    deployment_revision: author-model-configured-v1
     parameters: {temperature: 0.0}
   solver:
     name: solver-model
+    deployment_revision: solver-model-configured-v1
     parameters: {temperature: 0.2}
   judge:
     name: judge-model
+    deployment_revision: judge-model-configured-v1
     parameters: {temperature: 0.0}
 
 stages:
   author:
     executor: authoring-harness
     model: author
+    reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
   calibrate_judge:
     executor: remote-models
     model: judge
+    reuse: {policy: exact}
     budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
   solve:
     executor: remote-models
     model: solver
+    reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
     executor: remote-models
     model: judge
+    reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
   optimize:
     executor: local-process
+    reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 1800}
   final_evaluate:
     executor: local-process
+    reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
   aggregate:
     executor: local-process
+    reuse: {policy: exact}
     budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
 
 evaluation:
@@ -91,7 +101,7 @@ evaluation:
     policy:
       seed: command-center-sdk-foundations-v1
       train: 0.5
-      development: 0.2
+      validation: 0.2
       test: 0.2
       challenge: 0.1
   judge:
@@ -135,7 +145,7 @@ experiments:
     based_on: baseline
     dataset:
       train: train
-      development: development
+      validation: validation
       final_evaluation: test
     optimizer:
       name: LabeledFewShot

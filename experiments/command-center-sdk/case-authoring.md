@@ -513,15 +513,15 @@ rewriting prose does not make an independent case.
 
 Return one lowercase semantic `leakage_group`. Cases exposing the same
 underlying solution, tutorial flow, project defect, contract fixture, or
-misconception must share a group so they cannot cross train, development, test,
+misconception must share a group so they cannot cross train, validation, test,
 and challenge boundaries. Do not choose or name a split.
 
-DSPy optimization may load train and development only. The compiled state-only
+DSPy optimization may load train and validation only. The compiled state-only
 program must be published before untouched test cases are loaded. Test and
 challenge results must never influence authoring instructions, case wording,
 reference answers, rubrics, demonstrations, or optimizer settings.
 
-Reviewed train/development examples may later support distillation or
+Reviewed train/validation examples may later support distillation or
 fine-tuning exports, but those exports remain outside Git and retain source-set,
 authoring, case, split, and review provenance. Test and challenge prompts,
 answers, responses, and judge feedback are never training material.
@@ -551,7 +551,7 @@ fixture for every exact label: `strong`, `partial`, `incorrect`,
 schema_version: 2
 fixtures:
   - id: strong-example
-    case: existing-train-or-development-case-id
+    case: existing-train-or-validation-case-id
     candidate: strong.md
     label: strong
     score_range: [0.9, 1.0]
@@ -578,7 +578,7 @@ responses, judge outputs, optimizer traces, results, or held-out feedback as
 fixtures.
 
 Because this workspace includes DSPy optimization, fixtures may reference train
-and development cases only—never test or challenge. If there is no eligible
+and validation cases only—never test or challenge. If there is no eligible
 representative case, author and split one instead of weakening the requirement.
 Review calibration whenever a referenced prompt, expected response, rubric,
 case id, or split changes. Calibration inputs are versioned with the experiment;
@@ -631,7 +631,7 @@ Before returning, verify:
 - Source paths are exact, relevant, immutable, and non-empty.
 - The leakage group keeps related cases together.
 - `judge-calibration/manifest.yaml` and its candidates cover all five labels,
-  reference eligible existing train/development cases, and use defensible score
+  reference eligible existing train/validation cases, and use defensible score
   ranges.
 - No held-out feedback, judge output, optimizer trace, secret, mutable checkout,
   or unsupported external fact appears in the case.

@@ -1,0 +1,45 @@
+# CLI Reference
+
+All commands accept `--workspace` when they operate on a workspace file.
+
+| Command | Purpose |
+| --- | --- |
+| `ms-agent-eval setup` | Interactively create or inspect a workspace. |
+| `ms-agent-eval init` | Create an explicit schema-v9 workspace and supporting files. |
+| `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
+| `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
+| `ms-agent-eval run <experiment>` | Start a named evaluation or optimization. |
+| `ms-agent-eval run resume <run-id>` | Continue an existing immutable run. |
+| `ms-agent-eval stage list` | List packet attempts and states for a run. |
+| `ms-agent-eval stage prepare` | Prepare a stage packet independently. |
+| `ms-agent-eval stage claim` | Lease a packet to an external worker. |
+| `ms-agent-eval stage execute` | Execute a packet using its configured automatic executor. |
+| `ms-agent-eval stage submit` | Validate and submit an external result. |
+| `ms-agent-eval stage retry` | Create a new immutable attempt after failure. |
+| `ms-agent-eval report build --run <run-id>` | Build or verify deterministic Markdown, CSV, JSON, and per-case reports without model calls. |
+| `ms-agent-eval report build --all` | Render every retained run for one workspace. |
+| `ms-agent-eval codex login` | Provision dedicated subscription authentication. |
+| `ms-agent-eval codex status` | Inspect the safe authentication identity. |
+| `ms-agent-eval codex preflight` | Validate image, network, CLI, Python, and authentication without inference. |
+
+Common run options:
+
+- `--pilot` selects a diagnostic train/validation-only execution and is valid
+  only for evaluation experiments.
+- `--through <stage>` pauses after `author`, `calibrate_judge`, `solve`, `judge`,
+  `optimize`, `final_evaluate`, or `aggregate` as applicable.
+
+Use `ms-agent-eval <command> --help` for the exact arguments supported by the
+installed version.
+
+For non-interactive `init`, pass `--solver-deployment-revision`,
+`--judge-deployment-revision`, and optionally
+`--author-deployment-revision` when the immutable revision differs from the
+model name. Generated workspaces always store the field explicitly. It is a
+cache boundary and must be bumped when hidden serving state changes.
+
+`report build` accepts `--replace` when an existing derived bundle differs from
+the current deterministic rendering. Operational manifests and blobs remain
+canonical and are never rewritten by this command. Reporting resolves cases,
+models, and provenance from the run's frozen experiment definition, so later
+workspace edits cannot reinterpret an older run.
