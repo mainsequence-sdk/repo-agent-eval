@@ -430,15 +430,21 @@ Mutable and generated data belongs outside Git under the workspace data root:
 │   ├── recorders/              outbox, external bindings, receipts, and errors
 │   └── tmp/                    atomic staging
 └── summary/runs/<run-id>/
+    ├── index.html              local human entry point
     ├── summary.md              deterministic run overview
     ├── results.csv             one row per judged case repetition
     ├── results.json            canonical derived report
-    └── cases/                  readable per-case evidence
+    ├── cases/                  readable per-case evidence
+    ├── graphs/                 Plotly HTML, SVG, DAG, and chart guide
+    └── tables/                 sortable browser plus CSV/JSON tables
 ```
 
 Every terminal experiment creates this report bundle automatically, without an
 LLM summarization call. Existing runs can be rendered again with
 `ms-agent-eval report build --run <run-id> --workspace <workspace.yaml>`.
+Open `summary/runs/<run-id>/index.html` directly to browse the local report.
+Operational charts are materialized for failed and cancelled runs too; final
+baseline-versus-optimized charts appear only after the paired test aggregate exists.
 
 There is no root-level `cases/`, `sdk/`, or `runs/` directory. Cases belong to
 their experiment workspace; repository snapshots and every generated run

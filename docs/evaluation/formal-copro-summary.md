@@ -68,14 +68,23 @@ Every completed run writes under
 | `results.json` | Canonical report projection including `test_comparison` and token-measurement provenance. |
 | `results.csv` | One row per judged response arm with candidate, strategy, score, token count, and provenance. |
 | `cases/*.md` | Human-readable evidence for each original or optimized case result. |
+| `index.html` | Local entry point linking the interactive charts and sortable tables. |
+| `graphs/index.html` | Plotly metric explorer and described chart catalog. |
+| `graphs/*.{html,svg}` | Interactive Plotly charts and deterministic static fallbacks. |
+| `graphs/execution-dag.{json,svg}` | Complete machine graph and bounded rendered dependency graph. |
+| `tables/index.html` | Searchable, sortable, paginated browser over every available projected table. |
 | `tables/copro-case-comparison.csv` | Paired original/optimized score and delta for every case repetition. |
 | `tables/copro-skill-comparison.csv` | Skill means and deltas, ordered by delta descending. |
 | `tables/copro-token-band-comparison.csv` | Means and deltas by fixed expected-response token band. |
 | `tables/copro-criterion-comparison.csv` | Means and deltas by rubric criterion id. |
 | `tables/expected-response-token-counts.json` | Exact counts, bands, content hashes, and tokenizer provenance. |
 
-The local report is authoritative. MLflow is a retryable projection of these
-and the underlying stage evidence.
+The local report is authoritative. Open `index.html` from the filesystem; the
+HTML and SVG files are not hidden inside the content-addressed blob store.
+MLflow is a retryable projection of the same views and the underlying stage
+evidence. Failed and cancelled runs still receive the operational chart and
+table shell, while COPRO comparison entries explain that no paired test
+aggregate is available.
 
 ## MLflow assets
 

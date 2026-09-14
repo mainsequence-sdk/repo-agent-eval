@@ -3,8 +3,10 @@ from __future__ import annotations
 import html
 import json
 import math
+import os
 import re
 import statistics
+import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -155,17 +157,19 @@ class RecorderProjector:
         if self.recording.artifact_policy is RecordingArtifactPolicy.FULL:
             for path, (payload, media_type) in sorted(graph_artifacts.items()):
                 artifacts.append(self._artifact(path, payload, media_type))
+            table_index = _table_index_html(tables)
+            recording_index = _recording_index_html(run_descriptor, chart_manifest, tables)
             artifacts.append(
                 self._artifact(
                     "tables/index.html",
-                    _table_index_html(tables),
+                    table_index,
                     "text/html",
                 )
             )
             artifacts.append(
                 self._artifact(
                     "index.html",
-                    _recording_index_html(run_descriptor, chart_manifest, tables),
+                    recording_index,
                     "text/html",
                 )
             )
@@ -173,6 +177,18 @@ class RecorderProjector:
             artifacts.extend(self._report_artifacts(run_id))
             if self.recording.content_policy is RecordingContentPolicy.FULL:
                 artifacts.extend(self._full_evidence_artifacts(statuses, model_calls))
+        else:
+            table_index = _table_index_html(tables)
+            recording_index = _recording_index_html(run_descriptor, chart_manifest, tables)
+
+        self._materialize_local_run_assets(
+            run_id,
+            {
+                **graph_artifacts,
+                "tables/index.html": (table_index, "text/html"),
+                "index.html": (recording_index, "text/html"),
+            },
+        )
 
         artifact_index = self._artifact_index(run_id, statuses, model_calls, artifacts)
         artifacts.append(
@@ -1712,9 +1728,80 @@ class RecorderProjector:
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(root).as_posix()
+            if (
+                relative == "index.html"
+                or relative == "tables/index.html"
+                or relative.startswith("graphs/")
+            ):
+                # These files are recorder-neutral local views of the same chart and
+                # table payloads already published at the MLflow artifact root. Do not
+                # duplicate them under reports/ on the next projection.
+                continue
             media_type = _media_type(path)
             values.append(self._file_artifact(f"reports/{relative}", path, media_type))
         return tuple(values)
+
+    def _materialize_local_run_assets(
+        self,
+        run_id: str,
+        files: Mapping[str, tuple[bytes, str]],
+    ) -> None:
+        """Publish human-facing chart and table views outside operational storage."""
+
+        if Path(run_id).name != run_id or run_id in {".", ".."}:
+            raise IntegrityError(f"run id is not a safe path component: {run_id!r}")
+        runs_root = self.store.summary_root / "runs"
+        runs_root.mkdir(parents=True, exist_ok=True)
+        root = runs_root / run_id
+        if root.is_symlink():
+            raise IntegrityError(f"local report root must not be a symlink: {root}")
+        root.mkdir(parents=True, exist_ok=True)
+
+        graph_root = root / "graphs"
+        if graph_root.is_symlink():
+            raise IntegrityError(f"local graph root must not be a symlink: {graph_root}")
+        graph_root.mkdir(parents=True, exist_ok=True)
+        expected_graphs = {
+            Path(relative).relative_to("graphs").as_posix()
+            for relative in files
+            if relative.startswith("graphs/")
+        }
+        for existing in sorted(graph_root.rglob("*"), reverse=True):
+            if existing.is_symlink():
+                existing.unlink()
+                continue
+            if existing.is_file():
+                relative = existing.relative_to(graph_root).as_posix()
+                if relative not in expected_graphs:
+                    existing.unlink()
+            elif existing.is_dir():
+                try:
+                    existing.rmdir()
+                except OSError:
+                    pass
+
+        for relative, (payload, _media_type_value) in sorted(files.items()):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_symlink():
+                path.unlink()
+            if path.is_file() and path.read_bytes() == payload:
+                continue
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_name, path)
+            except BaseException:
+                try:
+                    os.unlink(temporary_name)
+                except FileNotFoundError:
+                    pass
+                raise
 
     def _full_evidence_artifacts(
         self,

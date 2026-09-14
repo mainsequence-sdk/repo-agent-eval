@@ -711,6 +711,16 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert "tables/index.html" in artifacts
     assert "graphs/latency-and-tokens.svg" not in artifacts
     assert "graphs/endpoint-utilization.svg" not in artifacts
+    local_report = store.summary_root / "runs" / "run-1"
+    assert (local_report / "index.html").is_file()
+    assert (local_report / "graphs" / "index.html").is_file()
+    assert (local_report / "graphs" / "stage-latency-summary.html").is_file()
+    assert (local_report / "graphs" / "stage-latency-summary.svg").is_file()
+    assert (local_report / "tables" / "index.html").is_file()
+    assert (local_report / "graphs" / "manifest.json").is_file()
+    assert not any(path.startswith("reports/graphs/") for path in artifacts)
+    assert "reports/index.html" not in artifacts
+    assert "reports/tables/index.html" not in artifacts
     with store.get_blob(artifacts["graphs/stage-latency-summary.html"].reference) as handle:
         interactive_latency = handle.read().decode("utf-8")
     assert "cdn.plot.ly/plotly-" in interactive_latency
@@ -750,6 +760,15 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert len(json.dumps(plan.traces[0].inputs)) < 8_000
     assert "x" * 100 not in json.dumps(plan.traces[0].inputs)
     assert packet.inputs[0].content_id in json.dumps(plan.traces[0].inputs)
+    stale_chart = local_report / "graphs" / "removed-chart.html"
+    stale_chart.write_text("obsolete", encoding="utf-8")
+    repeated_plan = RecorderProjector(
+        store,
+        recorder=recorder,
+        recording=configuration.recording,
+    ).build("run-1")
+    assert repeated_plan.plan_id == plan.plan_id
+    assert not stale_chart.exists()
     service = RecorderService(
         store,
         configuration.recording,

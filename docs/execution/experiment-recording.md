@@ -152,6 +152,13 @@ human entry point for the run: it links to the interactive Plotly report and
 the sortable table explorer. MLflow's **Model metrics** tab shows scalar metric
 series; it does not embed arbitrary Plotly HTML artifacts.
 
+The same human assets are always materialized locally at
+`<data-root>/summary/runs/<run-id>/index.html`. Its `graphs/` directory contains
+the Plotly HTML, SVG fallbacks, chart manifest, and execution DAG; its
+`tables/index.html` is the sortable table browser. These local views are not
+duplicated under MLflow's `reports/` prefix. Operational views are available
+for failed and cancelled terminal runs even when no aggregate report exists.
+
 All arms for one workspace are recorded in one MLflow Experiment. One MLflow
 parent run represents each canonical local arm execution. Nested MLflow runs
 represent stable stage scopes such as judge validation, solve, judge,

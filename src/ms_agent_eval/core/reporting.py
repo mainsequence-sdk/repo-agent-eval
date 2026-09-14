@@ -1137,18 +1137,29 @@ def publish_run_report(
     runs_root = summary_root / "runs"
     destination = runs_root / report.run_id
     runs_root.mkdir(parents=True, exist_ok=True)
+    preserved: dict[str, bytes] = {}
     if destination.exists():
         existing = _directory_bytes(destination)
-        if existing == files:
+        preserved = {
+            relative: payload
+            for relative, payload in existing.items()
+            if _is_local_visualization_asset(relative)
+        }
+        existing_report = {
+            relative: payload
+            for relative, payload in existing.items()
+            if not _is_local_visualization_asset(relative)
+        }
+        if existing_report == files:
             return _published(report, destination, files, changed=False)
-        if not replace:
+        if existing_report and not replace:
             raise IntegrityError(
                 f"report output already exists with different bytes: {destination}; "
                 "use --replace to rebuild it"
             )
     temporary = Path(tempfile.mkdtemp(prefix=f".{report.run_id}.", dir=runs_root))
     try:
-        for relative, payload in files.items():
+        for relative, payload in {**preserved, **files}.items():
             path = temporary / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("wb") as handle:
@@ -1172,6 +1183,14 @@ def publish_run_report(
             shutil.rmtree(temporary)
         raise
     return _published(report, destination, files, changed=True)
+
+
+def _is_local_visualization_asset(relative: str) -> bool:
+    return (
+        relative == "index.html"
+        or relative == "tables/index.html"
+        or relative.startswith("graphs/")
+    )
 
 
 def build_and_publish_run_report(
