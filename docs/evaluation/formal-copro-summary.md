@@ -102,6 +102,7 @@ series, and export the current view.
 | --- | --- |
 | `graphs/copro-overall-paired-score.{html,svg}` | Did the optimized program improve the overall untouched-test mean? |
 | `graphs/copro-skill-lift.{html,svg}` | Which skills improved or regressed most? Rows are sorted visually by signed delta, with the strongest gains at the top. |
+| `graphs/copro-case-paired-score.{html,svg}` | What were the original and optimized scores for every paired test case and solver repetition? Rows are ordered by delta. |
 | `graphs/copro-case-delta-distribution.{html,svg}` | How broadly are gains and regressions distributed across cases? |
 | `graphs/copro-delta-by-expected-tokens.{html,svg}` | Is lift related to exact expected-answer length? |
 | `graphs/copro-score-by-token-band.{html,svg}` | How do original and optimized means compare in fixed response-length bands? |

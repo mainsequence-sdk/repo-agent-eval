@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from io import BytesIO
 from uuid import uuid4
 
@@ -9,7 +10,7 @@ from .models import ArtifactReference, ModelCallRecord
 from .storage import ArtifactStore
 
 
-def _redacted_message(error: Exception, secret_values: Sequence[str]) -> str:
+def _redacted_message(error: BaseException, secret_values: Sequence[str]) -> str:
     message = str(error)
     for secret in secret_values:
         if secret:
@@ -41,6 +42,58 @@ def failure_kind(error: Exception) -> str:
     if isinstance(status_code, int) and status_code >= 500:
         return "provider_server_error"
     return type(error).__name__.lower()
+
+
+def failure_details(
+    error: Exception,
+    *,
+    secret_values: Sequence[str] = (),
+    parameters: Mapping[str, object] | None = None,
+) -> Mapping[str, object]:
+    """Return a redacted, structured diagnostic without serializing exceptions."""
+
+    chain: list[Mapping[str, object]] = []
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited and len(chain) < 8:
+        visited.add(id(current))
+        item: dict[str, object] = {
+            "exception_type": type(current).__name__,
+            "message": _redacted_message(current, secret_values),
+        }
+        for attribute in ("status_code", "code", "errno"):
+            value = getattr(current, attribute, None)
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                rendered = str(value)
+                for secret in secret_values:
+                    if secret:
+                        rendered = rendered.replace(secret, "[REDACTED]")
+                item[attribute] = rendered if isinstance(value, str) else value
+        chain.append(item)
+        current = current.__cause__ or current.__context__
+
+    category = failure_kind(error)
+    outer = chain[0]
+    root = chain[-1]
+    endpoint = None
+    if parameters is not None and isinstance(parameters.get("api_base"), str):
+        endpoint = str(parameters["api_base"])
+    return {
+        "category": category,
+        "exception_type": outer["exception_type"],
+        "message": outer["message"],
+        "root_exception_type": root["exception_type"],
+        "root_message": root["message"],
+        "status_code": next(
+            (item["status_code"] for item in chain if "status_code" in item), None
+        ),
+        "error_code": next((item["code"] for item in chain if "code" in item), None),
+        "errno": next((item["errno"] for item in reversed(chain) if "errno" in item), None),
+        "retryable": category
+        in {"connection_error", "provider_server_error", "rate_limit_error"},
+        "endpoint_base_url": endpoint,
+        "exception_chain": chain,
+    }
 
 
 class ModelCallObserver:
@@ -112,6 +165,8 @@ class ModelCallObserver:
             usage=dict(usage),
             status="completed",
             error_kind=None,
+            error=None,
+            recorded_at=datetime.now(UTC).isoformat(),
             latency_seconds=latency_seconds,
             configured_cost=configured_cost,
         )
@@ -133,6 +188,11 @@ class ModelCallObserver:
         configured_cost: float,
     ) -> ModelCallRecord:
         error_kind = failure_kind(error)
+        diagnostic = failure_details(
+            error,
+            secret_values=secret_values,
+            parameters=parameters,
+        )
         record = ModelCallRecord(
             call_id=str(uuid4()),
             role=self.role,  # type: ignore[arg-type]
@@ -141,12 +201,12 @@ class ModelCallObserver:
             parameters=dict(parameters),
             rendered_messages=tuple(messages),
             request_artifact=self._json_artifact(request),
-            response_artifact=self._json_artifact(
-                {"error_kind": error_kind, "message": _redacted_message(error, secret_values)}
-            ),
+            response_artifact=self._json_artifact(diagnostic),
             usage={},
             status="failed",
             error_kind=error_kind,
+            error=diagnostic,
+            recorded_at=datetime.now(UTC).isoformat(),
             latency_seconds=latency_seconds,
             configured_cost=configured_cost,
         )
@@ -188,7 +248,7 @@ class ModelCallObserver:
         self.store.put_manifest(
             f"runs/{self.run_id}/model-calls/{record.call_id}",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": self.run_id,
                 "packet_id": self.packet_id,
                 "work_id": self.work_id,
@@ -205,6 +265,8 @@ class ModelCallObserver:
                 "usage": dict(record.usage),
                 "status": record.status,
                 "error_kind": record.error_kind,
+                "error": None if record.error is None else dict(record.error),
+                "recorded_at": record.recorded_at,
                 "latency_seconds": record.latency_seconds,
                 "configured_cost": record.configured_cost,
             },

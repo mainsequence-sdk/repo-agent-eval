@@ -1272,6 +1272,8 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         "graphs/copro-overall-paired-score.html",
         "graphs/copro-skill-lift.svg",
         "graphs/copro-skill-lift.html",
+        "graphs/copro-case-paired-score.svg",
+        "graphs/copro-case-paired-score.html",
         "graphs/copro-case-delta-distribution.svg",
         "graphs/copro-case-delta-distribution.html",
         "graphs/copro-delta-by-expected-tokens.svg",

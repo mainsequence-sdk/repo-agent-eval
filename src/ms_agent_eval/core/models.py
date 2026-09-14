@@ -304,6 +304,8 @@ class ModelCallRecord:
     usage: Mapping[str, object]
     status: Literal["completed", "failed"]
     error_kind: str | None
+    error: Mapping[str, object] | None
+    recorded_at: str
     latency_seconds: float
     configured_cost: float
 

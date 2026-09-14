@@ -774,6 +774,8 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
         chart_index = handle.read().decode("utf-8")
     assert "Plotly.react('scatter'" in chart_index
     assert "stage-latency-summary.html" in chart_index
+    assert '<iframe src="stage-latency-summary.html"' in chart_index
+    assert "Waiting for the paired untouched-test evaluation" in chart_index
     with store.get_blob(artifacts["tables/index.html"].reference) as handle:
         table_index = handle.read().decode("utf-8")
     assert "Experiment tables" in table_index
@@ -849,3 +851,30 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
         max_results=1000,
     )
     assert all(item.info.status == "RUNNING" for item in scoped_runs)
+
+    lifecycle.append("run-1", RunLifecycleState.CANCELLED, reason="keyboard_interrupt")
+    cancelled = service.sync_run("run-1", raise_on_error=True)
+
+    cancelled_root = client.get_run(str(cancelled["external_run_id"]))
+    assert cancelled_root.info.status == "KILLED"
+    assert cancelled_root.info.lifecycle_stage == "deleted"
+    assert not client.search_runs(
+        [str(cancelled["external_experiment_id"])],
+        filter_string="tags.`agent_eval.local_run_id` = 'run-1'",
+        max_results=1000,
+    )
+
+    lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_resumed")
+    restored = service.sync_run("run-1", raise_on_error=True)
+
+    assert restored["external_run_id"] == status["external_run_id"]
+    restored_root = client.get_run(str(restored["external_run_id"]))
+    assert restored_root.info.status == "RUNNING"
+    assert restored_root.info.lifecycle_stage == "active"
+    restored_runs = client.search_runs(
+        [str(restored["external_experiment_id"])],
+        filter_string="tags.`agent_eval.local_run_id` = 'run-1'",
+        max_results=1000,
+    )
+    assert len(restored_runs) == len(scoped_runs)
+    assert all(item.info.status == "RUNNING" for item in restored_runs)

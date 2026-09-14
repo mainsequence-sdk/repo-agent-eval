@@ -214,11 +214,13 @@ The derived comparison run also has its own root `index.html` and
 `tables/index.html`, so cross-model charts and tables use the same human entry
 points as an individual experiment arm.
 
-Open `graphs/index.html` in the MLflow artifact tree for the Plotly chart guide
-and model-call explorer. It filters by stage, endpoint, status, and cache state,
-plots latency against tokens, and supports hover, zoom, selection, legend
-filtering, and SVG export without embedding prompts or responses. Every
-analytical chart is also recorded twice under the same basename:
+Open `graphs/index.html` in the MLflow artifact tree for the complete chart
+dashboard and model-call explorer. It renders every available analytical chart
+inline, presents unavailable charts as explicit missing-evidence panels, filters
+calls by stage, endpoint, status, and cache state, and plots latency against
+tokens. The individual charts support hover, zoom, selection, legend filtering,
+and SVG export without embedding prompts or responses. Every analytical chart
+is also recorded twice under the same basename:
 
 - `.html` is the canonical interactive Plotly view rendered by MLflow's HTML
   artifact preview; and
@@ -228,7 +230,7 @@ analytical chart is also recorded twice under the same basename:
 The chart manifest treats the `.html` path as the canonical human artifact and
 the `.svg` path as `static_artifact`. A failed or unfinished optimization run
 cannot contain final original-versus-optimized charts because no paired
-untouched-test aggregate exists yet. Those six entries remain visible in
+untouched-test aggregate exists yet. Those entries remain visible in
 `graphs/manifest.json` with
 `optimization_incomplete_before_test_comparison`; they are generated
 automatically once the run reaches successful aggregation.

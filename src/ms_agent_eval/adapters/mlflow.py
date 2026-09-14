@@ -84,13 +84,13 @@ class MlflowRecorder:
             }
             if not write_test:
                 return result
-            if not experiments:
-                raise RecordingError("MLflow has no active experiment for the write probe")
+            probe_experiment = self.client.get_experiment_by_name("Default")
+            if probe_experiment is None:
+                raise RecordingError("MLflow Default experiment is unavailable for the write probe")
             # A write probe must not leave a permanent experiment container behind.
-            # MLflow always provides at least its Default experiment; use whichever
-            # active experiment the read probe already resolved, then delete the
-            # temporary run in the finally block below.
-            experiment_id = str(experiments[0].experiment_id)
+            # Use MLflow's built-in Default container and delete the temporary run
+            # in the finally block below, keeping evaluation experiments clean.
+            experiment_id = str(probe_experiment.experiment_id)
             run = self.client.create_run(
                 experiment_id,
                 tags={
@@ -325,7 +325,20 @@ class MlflowRecorder:
                 status=mlflow_status,
                 end_time=end_time_ms,
             )
-            return {"status": mlflow_status, "end_time_ms": end_time_ms}
+            lifecycle_stage = "active"
+            if status is RunLifecycleState.CANCELLED:
+                # A cancelled attempt remains canonical in the local ledger, but
+                # should not clutter the active MLflow experiment. Soft-delete
+                # the complete run tree; a later resume restores these exact IDs.
+                for scope_id in sorted(binding.scopes, reverse=True):
+                    self.client.delete_run(binding.scopes[scope_id])
+                self.client.delete_run(binding.external_run_id)
+                lifecycle_stage = "deleted"
+            return {
+                "status": mlflow_status,
+                "end_time_ms": end_time_ms,
+                "lifecycle_stage": lifecycle_stage,
+            }
 
     def _ensure_scopes(
         self,
@@ -376,6 +389,8 @@ class MlflowRecorder:
     def _prepare_root_run(self, run: Any, descriptor: RunDescriptor) -> None:
         """Keep one bound MLflow run usable and identifiable across resumes."""
 
+        if run.info.lifecycle_stage == "deleted":
+            self.client.restore_run(str(run.info.run_id))
         status = "RUNNING" if _is_nonterminal_run(descriptor.status) else None
         self.client.update_run(
             str(run.info.run_id),
@@ -390,6 +405,8 @@ class MlflowRecorder:
         *,
         reopen: bool,
     ) -> None:
+        if run.info.lifecycle_stage == "deleted":
+            self.client.restore_run(str(run.info.run_id))
         status = "RUNNING" if reopen and run.info.status != "RUNNING" else None
         self.client.update_run(
             str(run.info.run_id),
@@ -409,9 +426,12 @@ class MlflowRecorder:
             "tags.`agent_eval.recorder_config_hash` = "
             f"'{_filter_value(self.configuration.configuration_hash)}'",
         ]
+        from mlflow.entities import ViewType
+
         runs = self.client.search_runs(
             [experiment_id],
             filter_string=" and ".join(clauses),
+            run_view_type=ViewType.ALL,
             max_results=1000,
         )
         runs = [run for run in runs if run.data.tags.get("agent_eval.scope_id") == scope_id]

@@ -110,7 +110,7 @@ class RecorderProjector:
             report,
             start_time_ms,
         )
-        available_tables = self._tables(statuses, model_calls, report)
+        available_tables = self._tables(statuses, model_calls, report, scope_by_packet)
         tables = (
             available_tables
             if status
@@ -854,9 +854,19 @@ class RecorderProjector:
         statuses: Sequence[StageStatus],
         model_calls: Sequence[Mapping[str, object]],
         report: Mapping[str, object] | None,
+        scope_by_packet: Mapping[str, str],
     ) -> tuple[TableArtifact, ...]:
         stage_rows = tuple(self._stage_row(item) for item in statuses)
         call_rows = tuple(self._model_call_row(item) for item in model_calls)
+        stage_failure_rows = self._stage_failure_rows(
+            statuses, model_calls, scope_by_packet
+        )
+        call_failure_rows = self._model_call_failure_rows(
+            statuses, model_calls, scope_by_packet
+        )
+        failure_summary_rows = _failure_summary_rows(
+            stage_failure_rows, call_failure_rows
+        )
         cases = tuple(self._case_row(item) for item in _report_cases(report))
         criteria = tuple(self._criterion_rows(_report_cases(report)))
         endpoint_rows = self._endpoint_rows(statuses)
@@ -869,6 +879,9 @@ class RecorderProjector:
         comparison_criteria = _comparison_rows(comparison, "criteria")
         token_counts = _expected_response_token_rows(report)
         values = {
+            "failure-summary": failure_summary_rows,
+            "stage-failures": stage_failure_rows,
+            "model-call-failures": call_failure_rows,
             "stage-attempts": stage_rows,
             "model-calls": call_rows,
             "case-results": cases,
@@ -939,6 +952,8 @@ class RecorderProjector:
 
     def _model_call_row(self, item: Mapping[str, object]) -> Mapping[str, object]:
         usage = _mapping(item.get("usage", {}), "model call usage")
+        error = self._model_call_error(item)
+        parameters = _mapping(item.get("parameters", {}), "model call parameters")
         return {
             "call_id": item.get("call_id"),
             "packet_id": item.get("packet_id"),
@@ -950,6 +965,16 @@ class RecorderProjector:
             "model": item.get("model"),
             "status": item.get("status"),
             "error_kind": item.get("error_kind"),
+            "error_message": error.get("message"),
+            "root_exception_type": error.get("root_exception_type"),
+            "root_error_message": error.get("root_message"),
+            "http_status": error.get("status_code"),
+            "error_code": error.get("error_code"),
+            "errno": error.get("errno"),
+            "retryable": error.get("retryable"),
+            "endpoint_base_url": error.get("endpoint_base_url")
+            or parameters.get("api_base"),
+            "recorded_at": item.get("recorded_at"),
             "input_tokens": _usage_token(item, "prompt_tokens", "input_tokens"),
             "output_tokens": _usage_token(item, "completion_tokens", "output_tokens"),
             "total_tokens": _usage_token(item, "total_tokens"),
@@ -959,6 +984,231 @@ class RecorderProjector:
             "response_content_id": _nested_value(item, "response_artifact", "content_id"),
             "usage": dict(usage),
         }
+
+    def _model_call_error(self, item: Mapping[str, object]) -> Mapping[str, object]:
+        raw = item.get("error")
+        if isinstance(raw, Mapping):
+            return raw
+        if item.get("status") != "failed":
+            return {}
+        try:
+            reference = self._stored_reference(item.get("response_artifact"))
+            with self.store.get_blob(reference) as handle:
+                payload = json.load(handle)
+        except (IntegrityError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, Mapping):
+            return {}
+        nested = payload.get("error")
+        return nested if isinstance(nested, Mapping) else payload
+
+    def _stage_failure_rows(
+        self,
+        statuses: Sequence[StageStatus],
+        model_calls: Sequence[Mapping[str, object]],
+        scope_by_packet: Mapping[str, str],
+    ) -> tuple[Mapping[str, object], ...]:
+        calls_by_packet: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+        for call in model_calls:
+            packet_id = call.get("packet_id")
+            if isinstance(packet_id, str):
+                calls_by_packet[packet_id].append(call)
+        attempts_by_work: dict[str, list[StageStatus]] = defaultdict(list)
+        for status in statuses:
+            attempts_by_work[status.packet.work_id].append(status)
+
+        rows: list[Mapping[str, object]] = []
+        for status in statuses:
+            if status.state not in {StageState.FAILED, StageState.REJECTED}:
+                continue
+            result = status.result
+            stage_error = None if result is None else result.error
+            failed_calls = [
+                call
+                for call in calls_by_packet.get(status.packet.packet_id, ())
+                if call.get("status") == "failed"
+            ]
+            call_errors = [self._model_call_error(call) for call in failed_calls]
+            call_errors = [value for value in call_errors if value]
+            root = call_errors[-1] if call_errors else {}
+            parameters = [
+                _mapping(call.get("parameters", {}), "model call parameters")
+                for call in failed_calls
+            ]
+            base_urls = tuple(
+                sorted(
+                    {
+                        str(value)
+                        for value in (
+                            *(item.get("api_base") for item in parameters),
+                            *(item.get("endpoint_base_url") for item in call_errors),
+                        )
+                        if isinstance(value, str) and value
+                    }
+                )
+            )
+            later = [
+                item
+                for item in attempts_by_work[status.packet.work_id]
+                if item.packet.attempt > status.packet.attempt
+            ]
+            if any(item.state is StageState.PERSISTED for item in later):
+                retry_outcome = "recovered"
+            elif any(item.state in {StageState.PREPARED, StageState.CLAIMED} for item in later):
+                retry_outcome = "pending"
+            elif later:
+                retry_outcome = "failed"
+            else:
+                retry_outcome = "not_retried"
+            context = self._failure_context(status)
+            base = self._stage_row(status)
+            rows.append(
+                {
+                    "stage": status.packet.stage.value,
+                    "scope": scope_by_packet.get(status.packet.packet_id),
+                    **context,
+                    "state": status.state.value,
+                    "error_kind": None if stage_error is None else stage_error.kind,
+                    "stage_error_message": (
+                        None if stage_error is None else stage_error.message
+                    ),
+                    "root_exception_type": root.get("root_exception_type")
+                    or root.get("exception_type"),
+                    "root_error_message": root.get("root_message") or root.get("message"),
+                    "http_status": root.get("status_code"),
+                    "error_code": root.get("error_code"),
+                    "errno": root.get("errno"),
+                    "retryable": root.get("retryable")
+                    if isinstance(root.get("retryable"), bool)
+                    else _retryable_failure(None if stage_error is None else stage_error.kind),
+                    "retry_outcome": retry_outcome,
+                    "endpoint_ids": base.get("endpoint_ids"),
+                    "endpoint_base_urls": base_urls,
+                    "failed_model_calls": len(failed_calls),
+                    "model_call_ids": tuple(
+                        str(call.get("call_id")) for call in failed_calls
+                    ),
+                    "attempt": status.packet.attempt,
+                    "worker_id": None if result is None else result.executor.get("worker_id"),
+                    "started_at": base.get("started_at"),
+                    "failed_at": base.get("completed_at"),
+                    "duration_seconds": base.get("duration_seconds"),
+                    "packet_id": status.packet.packet_id,
+                    "work_id": status.packet.work_id,
+                    "result_id": base.get("result_id"),
+                }
+            )
+        return tuple(
+            sorted(
+                rows,
+                key=lambda item: (
+                    str(item.get("stage")),
+                    str(item.get("scope")),
+                    str(item.get("failed_at")),
+                ),
+            )
+        )
+
+    def _model_call_failure_rows(
+        self,
+        statuses: Sequence[StageStatus],
+        model_calls: Sequence[Mapping[str, object]],
+        scope_by_packet: Mapping[str, str],
+    ) -> tuple[Mapping[str, object], ...]:
+        status_by_packet = {item.packet.packet_id: item for item in statuses}
+        persisted_work = {
+            item.packet.work_id for item in statuses if item.state is StageState.PERSISTED
+        }
+        rows: list[Mapping[str, object]] = []
+        for call in model_calls:
+            if call.get("status") != "failed":
+                continue
+            packet_id = call.get("packet_id")
+            status = status_by_packet.get(str(packet_id))
+            error = self._model_call_error(call)
+            parameters = _mapping(call.get("parameters", {}), "model call parameters")
+            context = self._failure_context(status) if status is not None else {}
+            endpoint_ids = (
+                self._stage_row(status).get("endpoint_ids") if status is not None else ()
+            )
+            work_id = call.get("work_id")
+            recovered = isinstance(work_id, str) and work_id in persisted_work
+            rows.append(
+                {
+                    "stage": call.get("stage"),
+                    "scope": scope_by_packet.get(str(packet_id)),
+                    **context,
+                    "role": call.get("role"),
+                    "provider": call.get("provider_id"),
+                    "model": call.get("model"),
+                    "endpoint_ids": endpoint_ids,
+                    "endpoint_base_url": error.get("endpoint_base_url")
+                    or parameters.get("api_base"),
+                    "error_kind": call.get("error_kind") or error.get("category"),
+                    "exception_type": error.get("exception_type"),
+                    "error_message": error.get("message"),
+                    "root_exception_type": error.get("root_exception_type"),
+                    "root_error_message": error.get("root_message"),
+                    "http_status": error.get("status_code"),
+                    "error_code": error.get("error_code"),
+                    "errno": error.get("errno"),
+                    "retryable": error.get("retryable"),
+                    "recovered_by_retry": recovered,
+                    "recorded_at": call.get("recorded_at"),
+                    "latency_seconds": call.get("latency_seconds"),
+                    "call_id": call.get("call_id"),
+                    "packet_id": packet_id,
+                    "work_id": work_id,
+                    "attempt_id": call.get("attempt_id"),
+                }
+            )
+        return tuple(
+            sorted(
+                rows,
+                key=lambda item: (
+                    str(item.get("stage")),
+                    str(item.get("endpoint_base_url")),
+                    str(item.get("recorded_at")),
+                    str(item.get("call_id")),
+                ),
+            )
+        )
+
+    def _failure_context(self, status: StageStatus) -> Mapping[str, object]:
+        packet = status.packet
+        values: list[Mapping[str, object]] = [packet.work_spec]
+        for artifact in packet.inputs:
+            if artifact.media_type != "application/json":
+                continue
+            try:
+                reference = self.store.reference(artifact.content_id, artifact.media_type)
+                with self.store.get_blob(reference) as handle:
+                    value = json.load(handle)
+            except (IntegrityError, OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(value, Mapping):
+                values.append(value)
+        context: dict[str, object] = {}
+        for value in values:
+            for field in (
+                "case_id",
+                "skill",
+                "split",
+                "repetition",
+                "evaluation_phase",
+                "fold",
+                "candidate_id",
+                "round",
+                "scope",
+                "strategy",
+            ):
+                if context.get(field) is None and value.get(field) is not None:
+                    context[field] = value[field]
+            target = value.get("target")
+            if isinstance(target, Mapping):
+                context.setdefault("target_kind", target.get("kind"))
+                context.setdefault("target_id", target.get("id"))
+        return context
 
     def _case_row(self, item: Mapping[str, object]) -> Mapping[str, object]:
         base: dict[str, object] = {
@@ -1582,6 +1832,29 @@ class RecorderProjector:
                 )
             case_rows = _comparison_rows(comparison, "cases")
             if case_rows:
+                ordered_cases = sorted(
+                    case_rows,
+                    key=lambda item: (
+                        -_number_or(item.get("delta"), 0.0),
+                        str(item.get("case_id")),
+                        _int_or(item.get("repetition"), 0),
+                    ),
+                )
+                artifacts["graphs/copro-case-paired-score.svg"] = (
+                    _dumbbell_svg(
+                        "COPRO paired score by test case · ordered by optimization delta",
+                        tuple(
+                            (
+                                f"{item.get('case_id')} · repetition {item.get('repetition')}",
+                                _number_or(item.get("baseline_score"), 0.0),
+                                _number_or(item.get("optimized_score"), 0.0),
+                            )
+                            for item in ordered_cases
+                        ),
+                        description=_chart_description("copro-case-paired-score.svg"),
+                    ),
+                    "image/svg+xml",
+                )
                 artifacts["graphs/copro-case-delta-distribution.svg"] = (
                     _delta_histogram_svg(
                         case_rows,
@@ -1590,6 +1863,12 @@ class RecorderProjector:
                     "image/svg+xml",
                 )
             else:
+                omissions.append(
+                    {
+                        "artifact": "copro-case-paired-score.svg",
+                        "reason": "no_case_comparison",
+                    }
+                )
                 omissions.append(
                     {
                         "artifact": "copro-case-delta-distribution.svg",
@@ -1674,6 +1953,7 @@ class RecorderProjector:
             for artifact in (
                 "copro-overall-paired-score.svg",
                 "copro-skill-lift.svg",
+                "copro-case-paired-score.svg",
                 "copro-case-delta-distribution.svg",
                 "copro-delta-by-expected-tokens.svg",
                 "copro-score-by-token-band.svg",
@@ -1941,6 +2221,139 @@ class RecorderProjector:
             _string(item.get("content_id"), "artifact reference content_id"),
             _string(item.get("media_type"), "artifact reference media_type"),
         )
+
+
+def _retryable_failure(kind: str | None) -> bool:
+    return kind in {"connection_error", "provider_server_error", "rate_limit_error"}
+
+
+def _failure_summary_rows(
+    stage_failures: Sequence[Mapping[str, object]],
+    call_failures: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+
+    def group(row: Mapping[str, object]) -> dict[str, object]:
+        raw_urls = row.get("endpoint_base_urls")
+        urls = (
+            [str(value) for value in raw_urls if isinstance(value, str)]
+            if isinstance(raw_urls, Sequence) and not isinstance(raw_urls, (str, bytes))
+            else []
+        )
+        endpoint = str(row.get("endpoint_base_url") or (urls[0] if urls else "local"))
+        key = (
+            str(row.get("stage") or "unknown"),
+            str(row.get("error_kind") or "unknown_error"),
+            endpoint,
+        )
+        return grouped.setdefault(
+            key,
+            {
+                "stage": key[0],
+                "error_kind": key[1],
+                "endpoint": key[2],
+                "failed_stage_attempts": 0,
+                "failed_model_calls": 0,
+                "recovered_model_calls": 0,
+                "retryable": _retryable_failure(key[1]),
+                "scopes": set(),
+                "case_ids": set(),
+                "stage_messages": set(),
+                "root_messages": set(),
+                "first_seen": None,
+                "last_seen": None,
+            },
+        )
+
+    def observe(common: dict[str, object], row: Mapping[str, object], timestamp: object) -> None:
+        for field, target in (("scope", "scopes"), ("case_id", "case_ids")):
+            value = row.get(field)
+            collection = common[target]
+            if isinstance(collection, set) and isinstance(value, str) and value:
+                collection.add(value)
+        if isinstance(timestamp, str) and timestamp:
+            first = common.get("first_seen")
+            last = common.get("last_seen")
+            common["first_seen"] = timestamp if not isinstance(first, str) else min(first, timestamp)
+            common["last_seen"] = timestamp if not isinstance(last, str) else max(last, timestamp)
+
+    for row in stage_failures:
+        common = group(row)
+        common["failed_stage_attempts"] = int(common["failed_stage_attempts"]) + 1
+        common["retryable"] = bool(common["retryable"] or row.get("retryable") is True)
+        message = row.get("stage_error_message")
+        if isinstance(message, str) and message:
+            cast_messages = common["stage_messages"]
+            assert isinstance(cast_messages, set)
+            cast_messages.add(message)
+        root_message = row.get("root_error_message")
+        if isinstance(root_message, str) and root_message:
+            cast_roots = common["root_messages"]
+            assert isinstance(cast_roots, set)
+            cast_roots.add(root_message)
+        observe(common, row, row.get("failed_at"))
+
+    for row in call_failures:
+        common = group(row)
+        common["failed_model_calls"] = int(common["failed_model_calls"]) + 1
+        if row.get("recovered_by_retry") is True:
+            common["recovered_model_calls"] = int(common["recovered_model_calls"]) + 1
+        common["retryable"] = bool(common["retryable"] or row.get("retryable") is True)
+        root_message = row.get("root_error_message") or row.get("error_message")
+        if isinstance(root_message, str) and root_message:
+            cast_roots = common["root_messages"]
+            assert isinstance(cast_roots, set)
+            cast_roots.add(root_message)
+        observe(common, row, row.get("recorded_at"))
+
+    rows: list[Mapping[str, object]] = []
+    for common in grouped.values():
+        failed_calls = int(common["failed_model_calls"])
+        recovered_calls = int(common["recovered_model_calls"])
+        stage_count = int(common["failed_stage_attempts"])
+        recovery = (
+            "unrecovered"
+            if stage_count
+            else "recovered"
+            if failed_calls and recovered_calls == failed_calls
+            else "partially_recovered"
+            if recovered_calls
+            else "unknown"
+        )
+        rows.append(
+            {
+                **{
+                    key: value
+                    for key, value in common.items()
+                    if key
+                    not in {
+                        "scopes",
+                        "case_ids",
+                        "stage_messages",
+                        "root_messages",
+                    }
+                },
+                "unrecovered_model_calls": failed_calls - recovered_calls,
+                "recovery_status": recovery,
+                "scope_count": len(common["scopes"]),
+                "scopes": tuple(sorted(common["scopes"])),
+                "affected_case_count": len(common["case_ids"]),
+                "case_ids": tuple(sorted(common["case_ids"])),
+                "stage_error_examples": tuple(sorted(common["stage_messages"]))[:3],
+                "root_error_examples": tuple(sorted(common["root_messages"]))[:3],
+            }
+        )
+    return tuple(
+        sorted(
+            rows,
+            key=lambda item: (
+                -_int_or(item.get("failed_stage_attempts"), 0),
+                -_int_or(item.get("failed_model_calls"), 0),
+                str(item.get("stage")),
+                str(item.get("endpoint")),
+            ),
+        )
+    )
 
 
 def _effective_lifecycle_state(
@@ -2331,8 +2744,10 @@ _CHART_DEFINITIONS: Mapping[str, Mapping[str, object]] = {
         "title": "Execution dependency overview",
         "question": "How did work move through the experiment's execution scopes?",
         "description": (
-            "A collapsed rendering of the canonical execution DAG. Each box is an execution "
-            "scope, arrows are recorded dependency or retry edges, and counts summarize attempts."
+            "A scope-collapsed view of the canonical execution DAG. Green means every attempt "
+            "persisted, orange means unfinished work remains, and red means at least one attempt "
+            "failed or was rejected. Solid gray arrows are dependencies; dashed purple arrows "
+            "are retries."
         ),
         "source": "execution-dag.json",
         "unit": "stage attempts",
@@ -2420,6 +2835,16 @@ _CHART_DEFINITIONS: Mapping[str, Mapping[str, object]] = {
         "question": "Which skills improved or regressed after prompt optimization?",
         "description": "Paired original and optimized skill means ordered by signed score delta.",
         "source": "copro-skill-comparison",
+        "unit": "judge score from 0 to 1",
+    },
+    "copro-case-paired-score.svg": {
+        "title": "COPRO baseline versus optimized by test case",
+        "question": "Which untouched test cases improved or regressed after optimization?",
+        "description": (
+            "Original and optimized judge score for every paired test case and solver "
+            "repetition, ordered by signed optimization delta with the strongest gains first."
+        ),
+        "source": "copro-case-comparison",
         "unit": "judge score from 0 to 1",
     },
     "copro-case-delta-distribution.svg": {
@@ -2799,6 +3224,28 @@ def _interactive_plotly_charts(
             )
         case_rows = _comparison_rows(comparison, "cases")
         if case_rows:
+            ordered_cases = sorted(
+                case_rows,
+                key=lambda item: (
+                    _number_or(item.get("delta"), 0.0),
+                    str(item.get("case_id")),
+                    _int_or(item.get("repetition"), 0),
+                ),
+            )
+            add(
+                "copro-case-paired-score.svg",
+                _paired_plotly_figure(
+                    tuple(
+                        (
+                            f"{item.get('case_id')} · repetition {item.get('repetition')}",
+                            _number_or(item.get("baseline_score"), 0.0),
+                            _number_or(item.get("optimized_score"), 0.0),
+                        )
+                        for item in ordered_cases
+                    )
+                ),
+                height=max(620, 30 * len(ordered_cases) + 200),
+            )
             delta_values = [_number_or(item.get("delta"), 0.0) for item in case_rows]
             histogram = go.Figure(
                 go.Histogram(
@@ -3197,6 +3644,7 @@ def _plotly_html(static_name: str, figure: go.Figure, *, height: int) -> bytes:
         "optimization-validation.svg",
         "copro-overall-paired-score.svg",
         "copro-skill-lift.svg",
+        "copro-case-paired-score.svg",
         "copro-score-by-token-band.svg",
         "copro-criterion-lift.svg",
         "model-baseline-score.svg",
@@ -3374,9 +3822,9 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
         values.sort(key=lambda item: str(item.get("scope")))
     column_width = 210
     node_width = 174
-    node_height = 58
+    node_height = 72
     left = 42
-    top = 126
+    top = 182
     gap_y = 26
     width = max(960, left * 2 + column_width * max(1, len(stages)))
     height = max(
@@ -3388,15 +3836,34 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
     body = [
         _svg_header(width, height, title, description),
         *_svg_heading(title, description),
-        '<defs><marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        '<defs><marker id="dag-dependency-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
         'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/></marker></defs>',
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/></marker>'
+        '<marker id="dag-retry-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/></marker></defs>',
+        '<g aria-label="Legend">',
+        '<circle cx="48" cy="85" r="6" fill="#15803d"/>'
+        '<text x="60" y="89" font-size="11">Green — all attempts persisted</text>',
+        '<circle cx="286" cy="85" r="6" fill="#d97706"/>'
+        '<text x="298" y="89" font-size="11">Orange — unfinished attempts remain</text>',
+        '<circle cx="558" cy="85" r="6" fill="#dc2626"/>'
+        '<text x="570" y="89" font-size="11">Red — contains failed or rejected attempts</text>',
+        '<path d="M 48 112 L 84 112" stroke="#64748b" stroke-width="1.8" '
+        'marker-end="url(#dag-dependency-arrow)"/>'
+        '<text x="94" y="116" font-size="11">Solid gray arrow — dependency</text>',
+        '<path d="M 286 112 L 322 112" stroke="#7c3aed" stroke-width="1.8" '
+        'stroke-dasharray="7 5" marker-end="url(#dag-retry-arrow)"/>'
+        '<text x="332" y="116" font-size="11">Dashed purple arrow — retry</text>',
+        '<text x="558" y="116" font-size="11" fill="#475569">'
+        'Attempts = recorded executions; reused = cache hits</text>',
+        '</g>',
     ]
     positions: dict[str, tuple[float, float]] = {}
     for column, stage in enumerate(stages):
         x = left + column * column_width
         body.append(
-            f'<text x="{x + node_width / 2:.1f}" y="104" text-anchor="middle" '
+            f'<text x="{x + node_width / 2:.1f}" y="160" text-anchor="middle" '
             f'font-size="12" font-weight="bold">{html.escape(stage.replace("_", " ").title())}</text>'
         )
         for row, item in enumerate(by_stage[stage]):
@@ -3410,11 +3877,17 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
         x0, y0 = source[0] + node_width, source[1] + node_height / 2
         x1, y1 = target[0], target[1] + node_height / 2
         bend = max(36.0, abs(x1 - x0) * 0.45)
+        edge_type = str(edge.get("type"))
+        retry = edge_type == "retry"
+        edge_color = "#7c3aed" if retry else "#64748b"
+        edge_dash = ' stroke-dasharray="7 5"' if retry else ""
+        marker = "dag-retry-arrow" if retry else "dag-dependency-arrow"
         body.append(
             f'<path class="dag-edge" data-edge-type="{html.escape(str(edge.get("type")))}" '
             f'd="M {x0:.1f} {y0:.1f} C {x0 + bend:.1f} {y0:.1f}, '
             f'{x1 - bend:.1f} {y1:.1f}, {x1:.1f} {y1:.1f}" fill="none" '
-            'stroke="#64748b" stroke-width="1.6" opacity="0.65" marker-end="url(#dag-arrow)">'
+            f'stroke="{edge_color}" stroke-width="1.8" opacity="0.72"{edge_dash} '
+            f'marker-end="url(#{marker})">'
             f"<title>{int(_number_or(edge.get('count'), 0))} "
             f"{html.escape(str(edge.get('type')))} edges</title></path>"
         )
@@ -3424,14 +3897,30 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
             states = item.get("states", {})
             states = states if isinstance(states, Mapping) else {}
             failed = _int_or(states.get("failed"), 0) + _int_or(states.get("rejected"), 0)
-            pending = _int_or(states.get("prepared"), 0) + _int_or(states.get("claimed"), 0)
-            color = "#dc2626" if failed else "#d97706" if pending else "#15803d"
+            persisted = _int_or(states.get("persisted"), 0)
+            attempts = _int_or(item.get("attempts"), 0)
+            unfinished = max(0, attempts - persisted - failed)
+            color = "#dc2626" if failed else "#d97706" if unfinished else "#15803d"
             scope = str(item.get("scope", stage))
             label = scope.replace("optimize/", "").replace("/", " › ")
             summary = (
-                f"{_int_or(item.get('attempts'), 0)} attempts · "
+                f"{attempts} attempts · "
                 f"{_int_or(item.get('reused'), 0)} reused"
             )
+            state_order = (
+                "failed",
+                "rejected",
+                "prepared",
+                "claimed",
+                "submitted",
+                "validated",
+                "persisted",
+            )
+            state_summary = " · ".join(
+                f"{_int_or(states.get(state), 0)} {state}"
+                for state in state_order
+                if _int_or(states.get(state), 0)
+            ) or "no recorded state"
             body.extend(
                 (
                     f'<g class="dag-node" data-stage="{html.escape(stage)}">'
@@ -3443,12 +3932,14 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
                     f'<text x="{x + 24}" y="{y + 21}" font-size="11" font-weight="bold">'
                     f"{html.escape(label[:24])}</text>",
                     f'<text x="{x + 12}" y="{y + 43}" font-size="10" fill="#475569">'
+                    f"{html.escape(state_summary[:31])}</text>",
+                    f'<text x="{x + 12}" y="{y + 60}" font-size="9" fill="#64748b">'
                     f"{html.escape(summary)}</text></g>",
                 )
             )
     if not edges:
         body.append(
-            '<text x="42" y="112" font-size="11" fill="#64748b">'
+            '<text x="42" y="154" font-size="11" fill="#64748b">'
             "No cross-scope dependency or retry edges have been recorded yet.</text>"
         )
     body.append("</svg>")
@@ -4442,7 +4933,14 @@ def _chart_index_html(
         separators=(",", ":"),
     ).replace("</", "<\\/")
     charts = manifest.get("charts", [])
-    chart_items = []
+    generated_panels: list[str] = []
+    omitted_panels: list[str] = []
+    comparison_notice = (
+        '<section class="comparison-status pending"><h2>Baseline versus optimized</h2>'
+        "<strong>Waiting for the paired untouched-test evaluation.</strong>"
+        "<p>The optimizer has not produced a final aggregate yet. No benchmark score is "
+        "invented from training or development cases.</p></section>"
+    )
     if isinstance(charts, Sequence) and not isinstance(charts, (str, bytes)):
         for item in charts:
             if not isinstance(item, Mapping):
@@ -4454,25 +4952,54 @@ def _chart_index_html(
             )
             name = Path(preferred_artifact).name
             status = str(item.get("status", "omitted"))
-            link = (
-                f'<a href="{html.escape(name)}">{html.escape(str(item.get("title", name)))}</a>'
-                if status == "generated"
-                else html.escape(str(item.get("title", name)))
-            )
-            reason = (
-                ""
-                if status == "generated"
-                else f" · omitted: {html.escape(str(item.get('omission_reason', 'not applicable')))}"
-            )
-            chart_items.append(
-                "<li>"
-                f"<strong>{link}</strong>"
-                f"<span>{html.escape(str(item.get('question', '')))}</span>"
-                f"<small>{html.escape(str(item.get('description', '')))} "
-                f"Source: {html.escape(str(item.get('source', '')))}; "
-                f"unit: {html.escape(str(item.get('unit', '')))}{reason}</small>"
-                "</li>"
-            )
+            title = html.escape(str(item.get("title", name)))
+            question = html.escape(str(item.get("question", "")))
+            description = html.escape(str(item.get("description", "")))
+            source = html.escape(str(item.get("source", "")))
+            unit = html.escape(str(item.get("unit", "")))
+            static_artifact = Path(str(item.get("static_artifact", ""))).name
+            if status == "generated":
+                if name.endswith(".html"):
+                    media = (
+                        f'<iframe src="{html.escape(name)}" loading="lazy" '
+                        f'title="{title}"></iframe>'
+                    )
+                else:
+                    media = (
+                        f'<a href="{html.escape(name)}"><img src="{html.escape(name)}" '
+                        f'alt="{title}" loading="lazy"></a>'
+                    )
+                static_link = (
+                    f' · <a href="{html.escape(static_artifact)}">static SVG</a>'
+                    if static_artifact and static_artifact != name
+                    else ""
+                )
+                generated_panels.append(
+                    '<section class="chart-panel">'
+                    f"<h3>{title}</h3><p><strong>{question}</strong></p>"
+                    f"<p>{description}</p>{media}"
+                    f'<p class="provenance">Source: {source} · unit: {unit}'
+                    f' · <a href="{html.escape(name)}">open separately</a>{static_link}</p>'
+                    "</section>"
+                )
+                if static_artifact == "copro-case-paired-score.svg":
+                    comparison_notice = (
+                        '<section class="comparison-status ready"><h2>Baseline versus optimized</h2>'
+                        '<strong>The paired untouched-test comparison is ready.</strong>'
+                        f'<p><a href="{html.escape(name)}">Open the per-case comparison</a>.</p>'
+                        "</section>"
+                    )
+            else:
+                reason = html.escape(
+                    str(item.get("omission_reason", "not applicable")).replace("_", " ")
+                )
+                omitted_panels.append(
+                    '<section class="omitted-panel">'
+                    f"<h3>{title}</h3><p>{question}</p>"
+                    f'<p><strong>Unavailable:</strong> {reason}.</p>'
+                    f'<p class="provenance">Expected source: {source} · unit: {unit}</p>'
+                    "</section>"
+                )
     template = """<!doctype html>
 <html lang="en">
 <head>
@@ -4496,16 +5023,31 @@ select { min-width: 160px; padding: 7px; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th, td { border-bottom: 1px solid #cbd5e1; padding: 7px; text-align: right; }
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
-.chart-list { padding: 0; list-style: none; }
-.chart-list li { border-bottom: 1px solid #cbd5e1; display: grid; gap: 3px; padding: 12px 0; }
-.chart-list span, .chart-list small { display: block; }
+.comparison-status { border: 2px solid; border-radius: 10px; margin: 24px 0; padding: 18px; }
+.comparison-status h2 { margin-top: 0; }
+.comparison-status.pending { background: #fff7ed; border-color: #f97316; color: #7c2d12; }
+.comparison-status.ready { background: #f0fdf4; border-color: #16a34a; color: #14532d; }
+.chart-grid { display: grid; gap: 22px; }
+.chart-panel { border: 1px solid #cbd5e1; border-radius: 10px; padding: 16px; }
+.chart-panel h3, .omitted-panel h3 { margin: 0 0 6px; }
+.chart-panel iframe { background: white; border: 0; height: 590px; width: 100%; }
+.chart-panel img { background: white; display: block; max-height: 760px; max-width: 100%; object-fit: contain; }
+.provenance { font-size: 12px; }
+.omitted-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.omitted-panel { border: 1px dashed #94a3b8; border-radius: 8px; padding: 14px; }
 .muted { color: #64748b; font-size: 12px; }
-@media (max-width: 680px) { .metrics { grid-template-columns: repeat(2, 1fr); } body { padding: 16px; } }
+@media (max-width: 680px) {
+  .metrics, .omitted-grid { grid-template-columns: 1fr; }
+  body { padding: 16px; }
+  .chart-panel iframe { height: 520px; }
+}
 @media (prefers-color-scheme: dark) {
   body { background: #0f172a; color: #e2e8f0; }
   p, small, label, .muted, .metric span { color: #94a3b8; }
-  .metric, #scatter, th, td, .chart-list li { border-color: #334155; }
+  .metric, #scatter, th, td, .chart-panel, .omitted-panel { border-color: #334155; }
   #scatter { background: #111827; }
+  .comparison-status.pending { background: #431407; color: #fed7aa; }
+  .comparison-status.ready { background: #052e16; color: #bbf7d0; }
 }
 </style>
 </head>
@@ -4514,11 +5056,13 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
 <p>Filter, hover, zoom, pan, select, and export the Plotly views below. Static SVG exports and raw
 observations remain available for reports, automation, and exact inspection.</p>
 
-<h2>Execution structure</h2>
-<p><a href="execution-dag.svg">Open the collapsed execution dependency graph</a> or inspect
-<a href="execution-dag.json">the complete work, attempt, result, dependency, retry and reuse graph</a>.</p>
+__COMPARISON_NOTICE__
 
-<h2>Latency and tokens</h2>
+<h2>Available experiment charts</h2>
+<p>Every generated chart is rendered below. Use “open separately” for a full-window interactive view.</p>
+<div class="chart-grid">__GENERATED_CHARTS__</div>
+
+<h2>Call-level latency and token explorer</h2>
 <div class="controls">
   <label>Stage<select id="stage"><option value="">All stages</option></select></label>
   <label>Endpoint<select id="endpoint"><option value="">All endpoints</option></select></label>
@@ -4540,8 +5084,9 @@ observations remain available for reports, automation, and exact inspection.</p>
 <tbody id="call-rows"></tbody>
 </table>
 
-<h2>Chart guide</h2>
-<ul class="chart-list">__CHART_ITEMS__</ul>
+<h2>Charts waiting for evidence</h2>
+<p>These are explicit missing-data states, not zero scores.</p>
+<div class="omitted-grid">__OMITTED_CHARTS__</div>
 
 <script src="https://cdn.plot.ly/plotly-__PLOTLY_VERSION__.min.js" charset="utf-8"></script>
 <script id="data" type="application/json">__PAYLOAD__</script>
@@ -4627,7 +5172,9 @@ update();
 </html>
 """
     return (
-        template.replace("__CHART_ITEMS__", "\n".join(chart_items))
+        template.replace("__COMPARISON_NOTICE__", comparison_notice)
+        .replace("__GENERATED_CHARTS__", "\n".join(generated_panels))
+        .replace("__OMITTED_CHARTS__", "\n".join(omitted_panels))
         .replace("__PAYLOAD__", payload)
         .replace("__PLOTLY_VERSION__", get_plotlyjs_version())
         .encode("utf-8")
