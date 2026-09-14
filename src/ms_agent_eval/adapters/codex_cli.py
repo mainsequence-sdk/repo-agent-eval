@@ -17,6 +17,7 @@ from ms_agent_eval.core.codex_auth import CodexSubscriptionAuthStore
 from ms_agent_eval.core.errors import ConfigurationError, IntegrityError, PreflightError
 from ms_agent_eval.core.evaluation import LlmJudge, judge_validation_result_from_scores
 from ms_agent_eval.core.hashing import content_hash, json_value
+from ms_agent_eval.core.optimization import normalize_copro_proposals
 from ms_agent_eval.core.planning import CompiledWorkspace, ExperimentLock
 from ms_agent_eval.core.stage_executors import AutomaticExecutionFailed, ExecutorOutput
 from ms_agent_eval.core.stage_views import StageViewMaterializer
@@ -97,53 +98,65 @@ class SubprocessDockerRunner:
             raise PreflightError("Docker network inspect returned no network identity")
         if network_document.get("Internal") is not True:
             raise PreflightError("Codex control-plane Docker network must be internal")
-        runtime_version = self._checked(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            timeout_seconds=timeout_seconds,
-            maximum_output_bytes=maximum_output_bytes,
-        ).decode("utf-8", errors="strict").strip()
+        runtime_version = (
+            self._checked(
+                ["docker", "version", "--format", "{{.Server.Version}}"],
+                timeout_seconds=timeout_seconds,
+                maximum_output_bytes=maximum_output_bytes,
+            )
+            .decode("utf-8", errors="strict")
+            .strip()
+        )
         if not runtime_version:
             raise PreflightError("Docker returned an empty server version")
-        version = self._checked(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--read-only",
-                "--cap-drop=ALL",
-                "--security-opt",
-                "no-new-privileges:true",
-                "--entrypoint",
-                "codex",
-                image,
-                "--version",
-            ],
-            timeout_seconds=timeout_seconds,
-            maximum_output_bytes=maximum_output_bytes,
-        ).decode("utf-8", errors="strict").strip()
+        version = (
+            self._checked(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--entrypoint",
+                    "codex",
+                    image,
+                    "--version",
+                ],
+                timeout_seconds=timeout_seconds,
+                maximum_output_bytes=maximum_output_bytes,
+            )
+            .decode("utf-8", errors="strict")
+            .strip()
+        )
         if not version:
             raise PreflightError("Codex container returned an empty CLI version")
-        python_version = self._checked(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--read-only",
-                "--cap-drop=ALL",
-                "--security-opt",
-                "no-new-privileges:true",
-                "--entrypoint",
-                "python3",
-                image,
-                "--version",
-            ],
-            timeout_seconds=timeout_seconds,
-            maximum_output_bytes=maximum_output_bytes,
-        ).decode("utf-8", errors="strict").strip()
+        python_version = (
+            self._checked(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--entrypoint",
+                    "python3",
+                    image,
+                    "--version",
+                ],
+                timeout_seconds=timeout_seconds,
+                maximum_output_bytes=maximum_output_bytes,
+            )
+            .decode("utf-8", errors="strict")
+            .strip()
+        )
         match = re.fullmatch(r"Python (\d+)\.(\d+)(?:\.\d+)?", python_version)
         if match is None or tuple(map(int, match.groups())) < (3, 12):
             raise PreflightError("Codex runner image must provide Python 3.12+")
@@ -293,6 +306,7 @@ class CodexCliExecutor:
         if packet.stage not in {
             StageKind.AUTHOR,
             StageKind.VALIDATE_JUDGE,
+            StageKind.OPTIMIZE,
             StageKind.SOLVE,
             StageKind.JUDGE,
         }:
@@ -336,6 +350,31 @@ class CodexCliExecutor:
 
         if packet.stage is StageKind.AUTHOR:
             value = invoke()
+        elif packet.stage is StageKind.OPTIMIZE:
+            raw = invoke()
+            context = _input_mapping(packet, ledger, "optimizer_context")
+            raw_candidates = raw.get("candidates")
+            if not isinstance(raw_candidates, Sequence) or isinstance(
+                raw_candidates, (str, bytes)
+            ):
+                raise IntegrityError("Codex optimizer result requires candidates")
+            candidates, proposal_accounting = normalize_copro_proposals(
+                raw_candidates,
+                requested_count=int(context["candidate_count"]),
+                target_kind=str(context["target_kind"]),
+                current_text=str(context["current_text"]),
+                current_output_prefix=str(context["current_output_prefix"]),
+            )
+            value = {
+                "strategy": "copro",
+                "operation": "propose",
+                "target_kind": context["target_kind"],
+                "target_id": context["target_id"],
+                "round": context["round"],
+                "candidates": candidates,
+                "proposal_accounting": proposal_accounting,
+                "proposal_hash": content_hash(candidates),
+            }
         elif packet.stage is StageKind.SOLVE:
             raw = invoke()
             case = _input_mapping(packet, ledger, "case")
@@ -349,16 +388,14 @@ class CodexCliExecutor:
                 "fold": case["fold"],
                 "candidate_id": case["candidate_id"],
                 "candidate_k": case["candidate_k"],
+                "strategy": case["strategy"],
                 "call_ids": [],
             }
         elif packet.stage is StageKind.JUDGE:
             evaluation = _input_mapping(packet, ledger, "evaluation")
             repetitions = _judge_repetitions(packet, ledger, self.workspace)
             case = self._case(str(evaluation.get("case_id")))
-            raw_votes = [
-                invoke()
-                for _ in range(repetitions)
-            ]
+            raw_votes = [invoke() for _ in range(repetitions)]
             iterator = iter(raw_votes)
             record = LlmJudge(
                 lambda **_inputs: next(iterator),
@@ -382,16 +419,14 @@ class CodexCliExecutor:
                 "fold": evaluation["fold"],
                 "candidate_id": evaluation["candidate_id"],
                 "candidate_k": evaluation["candidate_k"],
+                "strategy": evaluation["strategy"],
             }
         else:
             repetitions = _judge_repetitions(packet, ledger, self.workspace)
             fixture_scores: dict[str, float] = {}
             for fixture in self.workspace.judge_validation.fixtures:
                 case = self._case(fixture.case_id)
-                raw_votes = [
-                    invoke(fixture.id)
-                    for _ in range(repetitions)
-                ]
+                raw_votes = [invoke(fixture.id) for _ in range(repetitions)]
                 iterator = iter(raw_votes)
                 record = LlmJudge(
                     lambda **_inputs: next(iterator),
@@ -462,9 +497,7 @@ class CodexCliExecutor:
             self.auth_store.install_into(codex_home)
             config = _codex_config(
                 self.codex.permission_profile,
-                reasoning_effort=self._model_configuration(packet).get(
-                    "reasoning_effort"
-                ),
+                reasoning_effort=self._model_configuration(packet).get("reasoning_effort"),
             )
             config_path = codex_home / "config.toml"
             config_path.write_text(config, encoding="utf-8")
@@ -487,9 +520,7 @@ class CodexCliExecutor:
             )
             safe_stdout = self.auth_store.redact(outcome.stdout)
             safe_stderr = self.auth_store.redact(outcome.stderr)
-            stdout_reference = ledger.store.put_blob(
-                BytesIO(safe_stdout), "application/x-ndjson"
-            )
+            stdout_reference = ledger.store.put_blob(BytesIO(safe_stdout), "application/x-ndjson")
             stderr_reference = ledger.store.put_blob(BytesIO(safe_stderr), "text/plain")
             invocation_usage = _usage(safe_stdout)
             provenance = {
@@ -647,10 +678,21 @@ class CodexCliExecutor:
         return case
 
     def _model_configuration(self, packet: StagePacket) -> Mapping[str, object]:
-        stage = self.workspace.repository.workspace.stages[packet.stage.value]
-        if stage.model is None:
-            raise IntegrityError("Codex stage has no configured model")
-        model = self.workspace.repository.workspace.models[stage.model]
+        role = {
+            "validate_judge": "judge",
+            "judge": "judge",
+            "solve": "solver",
+            "optimize": "optimizer",
+            "author": "author",
+        }.get(packet.stage.value)
+        resolved = self.lock.models.get(role or "") if self.lock is not None else None
+        if resolved is not None:
+            model = self.workspace.repository.workspace.models[resolved.profile_id]
+        else:
+            stage = self.workspace.repository.workspace.stages[packet.stage.value]
+            if stage.model is None:
+                raise IntegrityError("Codex stage has no configured model")
+            model = self.workspace.repository.workspace.models[stage.model]
         parameters = dict(model.parameters)
         if parameters:
             raise ConfigurationError(
@@ -672,28 +714,22 @@ def _docker_environment() -> Mapping[str, str]:
 
 
 def _codex_config(profile: str, *, reasoning_effort: object | None = None) -> str:
-    model = (
-        ""
-        if reasoning_effort is None
-        else f'model_reasoning_effort = "{reasoning_effort}"\n'
-    )
+    model = "" if reasoning_effort is None else f'model_reasoning_effort = "{reasoning_effort}"\n'
     return (
         'cli_auth_credentials_store = "file"\n'
-        f'default_permissions = "{profile}"\n'
-        + model
-        + "\n"
+        f'default_permissions = "{profile}"\n' + model + "\n"
         'approval_policy = "never"\n'
         'web_search = "disabled"\n'
-        'allow_login_shell = false\n\n'
+        "allow_login_shell = false\n\n"
         "project_doc_fallback_filenames = []\n\n"
-        f'[permissions.{profile}.filesystem]\n'
+        f"[permissions.{profile}.filesystem]\n"
         '":root" = "deny"\n'
         '":minimal" = "read"\n'
         '":tmpdir" = "deny"\n'
         '":slash_tmp" = "deny"\n\n'
         f'[permissions.{profile}.filesystem.":workspace_roots"]\n'
         '"." = "read"\n\n'
-        f'[permissions.{profile}.network]\n'
+        f"[permissions.{profile}.network]\n"
         "enabled = false\n\n"
         "[shell_environment_policy]\n"
         'inherit = "none"\n'

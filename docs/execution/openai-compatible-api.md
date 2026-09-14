@@ -1,7 +1,7 @@
 # OpenAI-Compatible API
 
-Any model-driven stage can use the provider-neutral HTTP executor. API address,
-model identity, and stage assignment are separate values in `workspace.yaml`:
+Any model-driven stage can use the provider-neutral HTTP executor. Transport,
+semantic deployment, role profile, and experiment assignment are separate:
 
 ```yaml
 executors:
@@ -12,17 +12,23 @@ executors:
       - id: primary
         base_url: http://127.0.0.1:8000/v1
         max_concurrent_requests: 4
+        routes:
+          - {deployment: solver-local, model: solver-model}
+deployments:
+  solver-local:
+    executor: inference-pool
+    model: solver-model
+    revision: solver-deployment-v1
 models:
   solver:
-    name: solver-model
-    deployment_revision: solver-deployment-v1
+    deployment: solver-local
     reasoning_effort: high
     parameters: {temperature: 0.2}
-stages:
-  solve:
-    executor: inference-pool
-    model: solver
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+experiments:
+  baseline:
+    mode: evaluate
+    roles: {solver: solver, judge: judge}
+    # solver/runtime/repetitions omitted
 ```
 
 API addresses, capacities, and model names are versioned experiment
@@ -34,11 +40,11 @@ Reasoning effort is also versioned explicitly with the model:
 ```yaml
 models:
   solver:
-    name: qwen3.6:27b-coding
+    deployment: qwen-local
     reasoning_effort: high
     parameters: {temperature: 0.2, max_tokens: 4096}
   judge:
-    name: qwen3.6:27b-coding
+    deployment: qwen-local
     reasoning_effort: none
     parameters: {temperature: 0.0, max_tokens: 2048}
 ```
@@ -67,35 +73,52 @@ executors:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
         max_concurrent_requests: 2
+        routes:
+          - {deployment: qwen-local, model: qwen3.6:27b-coding}
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
         max_concurrent_requests: 2
-      - id: llama-server-10-11436
-        base_url: http://192.168.1.10:11436/v1
+        routes:
+          - {deployment: glm-local, model: glm-coding}
+      - id: llama-server-10-11434
+        base_url: http://192.168.1.10:11434/v1
         max_concurrent_requests: 4
+        routes:
+          - {deployment: qwen-local, model: qwen3.6:27b-coding}
 ```
 
-This pool has a maximum of eight concurrent requests. Each endpoint has its own
+This executor has eight physical slots, but capacity is selected by deployment:
+Qwen has six eligible slots and GLM has two. Each endpoint has its own
 permit queue, and filesystem slot locks under
 `operations/locks/executors/` prevent separate local coordinator processes
 from exceeding the same configured capacity. Stage barriers still apply:
 judge validation precedes solving, and judging waits for solver outputs.
 Within judge validation, every `(fixture, repetition)` vote acquires its own
 permit. Five fixtures with three repetitions therefore create 15 independent
-ready requests; at most eight execute concurrently in this pool. Vote results
+ready requests; a Qwen judge executes at most six concurrently in this pool. Vote results
 are reordered by fixture manifest order and repetition before deterministic
 aggregation.
 
-All endpoints in one pool must serve the same output-affecting deployment for a
-given model profile. The configured `deployment_revision` is the operator's
-equivalence attestation. Capacity and replica topology are attempt provenance,
-not semantic work identity, so changing only those values does not invalidate a
-reusable answer. Changing weights, quantization, tokenizer, chat template, or
-serving behavior requires a new deployment revision.
+An endpoint is eligible only when its `routes` includes the profile's deployment.
+One endpoint may list multiple routes, but all share the endpoint's single
+physical capacity. The configured `deployments.<id>.revision` is the operator's
+equivalence attestation. Capacity and replica topology are attempt provenance;
+weights, quantization, tokenizer, chat template, or serving changes require a
+new deployment revision.
 
 Execution results record endpoint id, endpoint/pool hashes, capacity, queue
 wait, observed concurrency, call counts, failures, and latency. Completed run
 reports include a human-readable per-endpoint table.
+
+Connection, provider-server, and rate-limit failures are retried within the
+same logical DSPy call on another endpoint eligible for that deployment. Each
+eligible endpoint is attempted at most once, unhealthy endpoints enter a short
+cooldown, and provenance records every failed and successful route. Invalid
+output, authentication, application, and budget failures are not rerouted. If
+the eligible pool is exhausted, the packet fails durably; an explicit
+`run resume` creates a new immutable attempt for that transient failure.
+Stage `budget.model_calls` limits completed model outputs; physical request
+attempts and failures are tracked separately in endpoint provenance.
 
 ## Optional exact token preflight
 
@@ -163,6 +186,8 @@ executors:
         base_url: https://provider.example/v1
         max_concurrent_requests: 6
         api_key_env: OPENAI_API_KEY
+        routes:
+          - {deployment: hosted-solver, model: provider-model-id}
 ```
 
 Put the value in the ignored `.env` beside `workspace.yaml`:

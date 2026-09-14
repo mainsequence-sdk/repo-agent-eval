@@ -32,6 +32,13 @@ The old packet, result, error, and transitions remain evidence; they are never
 overwritten. Retrying with changed source, cases, models, or configuration
 requires a new experiment lock and run rather than mutation of the old one.
 
+For endpoint-backed automatic stages, `run resume` creates that new immutable
+attempt automatically when the latest failure is classified as a connection,
+provider-server, or rate-limit error. Persisted siblings are reused. Other
+failure kinds remain terminal until the operator uses an appropriate explicit
+recovery action; resume does not repeatedly replay invalid output or
+authentication failures.
+
 The schema-v4 run manifest records both its full originating workspace hash and
 selected `experiment_revision_id`, plus direct references to its immutable
 experiment lock, bundle, and definition. An unrelated workspace edit does not
@@ -55,6 +62,16 @@ files, capability catalog, split file, target snapshot, every authoring-source
 snapshot, and the reconstructed experiment lock. Missing or corrupt immutable
 inputs fail closed. The current workspace is never used as an approximate
 substitute for an old run.
+
+The public workspace loader accepts only the current schema. Frozen run
+definitions are different: they are immutable framework artifacts and must
+remain resumable after a schema release. Resume therefore uses explicit,
+versioned internal readers for supported historical workspace and experiment-lock
+identities. The reader upgrades only the in-memory runtime routing required by
+the current coordinator while preserving the recorded revision, model hashes,
+executor hash, cases, and configuration. It never rewrites the frozen artifact
+and does not make a legacy `workspace.yaml` valid as user input. Unsupported or
+semantically inconsistent historical definitions still fail closed.
 
 Failures and stderr are bounded and secrets are redacted before persistence.
 For automatic Codex stages, the disposable attempt directory is removed after

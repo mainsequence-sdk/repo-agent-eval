@@ -6,13 +6,16 @@
 
 ```text
 core/
-  workspace.py             schema-v11 target, executor, model, reuse, and stage manifest
+  workspace.py             schema-v14 deployments, arms, recorder, reuse, and stage manifest
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring
   evaluation.py            cases, rubrics, judge validation, LLM-judge aggregation
   planning.py              generated indexes and experiment locks
   stages.py                immutable packets/results and append-only lifecycle
+  lifecycle.py             canonical run-level lifecycle events
+  recorder.py              recorder-neutral plans, outbox, bindings, and receipts
+  recording_projection.py deterministic evidence-to-recorder projection
   endpoint_pool.py         threaded replica permits and cross-process slot locks
   coordinator.py           resumable staged evaluate/optimize orchestration
   stage_executors.py       transport-neutral harness rendering contract
@@ -23,6 +26,7 @@ core/
 programs/dspy/              typed solver and judge programs
 providers/openai_compatible/ observed DSPy LM binding
 adapters/codex_cli.py       isolated, subscription-backed Codex CLI harness
+adapters/mlflow.py          optional MLflow 3.16 recorder adapter
 ```
 
 There is no engine selector, raw program package, target-specific library code,
@@ -101,6 +105,7 @@ The default is `~/ms_agent_eval/<workspace-id>`:
 operations/                internal, machine-oriented execution data
   blobs/sha256/            immutable requests, responses, traces, and state
   manifests/               locks, judge validation, evaluations, and run results
+  recorders/               delivery events, bindings, receipts, and errors
   snapshots/               immutable target and reference repository content
   tmp/                     atomic staging
 summary/runs/<run-id>/     derived Markdown, CSV, JSON, and per-case reports

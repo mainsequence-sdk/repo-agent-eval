@@ -57,13 +57,8 @@ def test_private_github_resolution_uses_credential_helper_without_command_secret
     assert any(command[:3] == ["git", "credential", "fill"] for command in commands)
     assert all("secret-token" not in " ".join(command) for command in commands)
     authenticated = [
-        environment
-        for environment in environments
-        if environment.get("GIT_CONFIG_COUNT") == "1"
+        environment for environment in environments if environment.get("GIT_CONFIG_COUNT") == "1"
     ]
     assert len(authenticated) == 1
-    assert (
-        authenticated[0]["GIT_CONFIG_KEY_0"]
-        == "http.https://github.com/.extraHeader"
-    )
+    assert authenticated[0]["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraHeader"
     assert authenticated[0]["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")

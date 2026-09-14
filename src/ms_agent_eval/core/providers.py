@@ -17,7 +17,7 @@ def _redacted_message(error: Exception, secret_values: Sequence[str]) -> str:
     return message
 
 
-def _failure_kind(error: Exception) -> str:
+def failure_kind(error: Exception) -> str:
     text = f"{type(error).__name__} {error}".lower()
     status_code = getattr(error, "status_code", None)
     if any(
@@ -58,7 +58,7 @@ class ModelCallObserver:
         experiment_revision_id: str | None = None,
         stage: str | None = None,
     ) -> None:
-        if role not in {"author", "solver", "judge"}:
+        if role not in {"author", "optimizer", "solver", "judge"}:
             raise ValueError(f"invalid LLM role: {role}")
         context = (
             run_id,
@@ -132,7 +132,7 @@ class ModelCallObserver:
         latency_seconds: float,
         configured_cost: float,
     ) -> ModelCallRecord:
-        error_kind = _failure_kind(error)
+        error_kind = failure_kind(error)
         record = ModelCallRecord(
             call_id=str(uuid4()),
             role=self.role,  # type: ignore[arg-type]

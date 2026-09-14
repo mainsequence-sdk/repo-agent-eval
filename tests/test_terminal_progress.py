@@ -208,7 +208,7 @@ def test_terminal_reporter_shows_parallel_judge_validation_votes() -> None:
             details={
                 "fixture_id": "metatable-graph-strong",
                 "vote": 2,
-                "endpoint_id": "llama-server-10-11436",
+                "endpoint_id": "llama-server-10-11434",
             },
         )
     )
@@ -216,7 +216,4 @@ def test_terminal_reporter_shows_parallel_judge_validation_votes() -> None:
 
     rendered = output.getvalue()
     assert "5 fixtures · 15 votes · 16 slots" in rendered
-    assert (
-        "[1/15] metatable-graph-strong · vote 2 · llama-server-10-11436"
-        in rendered
-    )
+    assert "[1/15] metatable-graph-strong · vote 2 · llama-server-10-11434" in rendered

@@ -14,14 +14,11 @@ class TerminalPreflightReporter:
 
     def render(self, report: Mapping[str, object]) -> None:
         status = str(report.get("status", "unknown"))
-        color = {"fits": "green", "blocked": "red", "unknown": "yellow"}.get(
-            status, "yellow"
-        )
+        color = {"fits": "green", "blocked": "red", "unknown": "yellow"}.get(status, "yellow")
         experiment = str(report.get("experiment", "experiment"))
         selected = report.get("selected_case_count", 0)
         self.console.print(
-            f"Preflight [bold]{experiment}[/] · {selected} cases · "
-            "[bold]0 generation calls[/]"
+            f"Preflight [bold]{experiment}[/] · {selected} cases · [bold]0 generation calls[/]"
         )
         revision = report.get("experiment_revision_id")
         if isinstance(revision, str):
@@ -67,14 +64,14 @@ class TerminalPreflightReporter:
                 if not isinstance(raw_stage, Mapping):
                     continue
                 endpoints = raw_stage.get("endpoints")
-                if not isinstance(endpoints, Sequence) or isinstance(
-                    endpoints, (str, bytes)
-                ) or not endpoints:
+                if (
+                    not isinstance(endpoints, Sequence)
+                    or isinstance(endpoints, (str, bytes))
+                    or not endpoints
+                ):
                     detail = raw_stage.get("detail")
                     if isinstance(detail, str):
-                        self.console.print(
-                            f"[dim]{raw_stage.get('stage', 'stage')}: {detail}[/]"
-                        )
+                        self.console.print(f"[dim]{raw_stage.get('stage', 'stage')}: {detail}[/]")
                     continue
                 table = Table(title=f"{raw_stage.get('stage')} endpoints")
                 table.add_column("Endpoint")
@@ -118,8 +115,7 @@ class TerminalPreflightReporter:
                 )
             else:
                 self.console.print(
-                    f"[{color}]All statically available requests have an exact-fit route."
-                    f"[/{color}]"
+                    f"[{color}]All statically available requests have an exact-fit route.[/{color}]"
                 )
 
 

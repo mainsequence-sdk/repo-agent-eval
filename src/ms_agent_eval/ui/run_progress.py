@@ -12,6 +12,7 @@ from ms_agent_eval.core.progress import ProgressEvent
 _STAGE_LABELS = {
     "author": ("Authoring cases", "Authoring"),
     "validate_judge": ("Validating judge ranking", "Validating"),
+    "optimize": ("Proposing COPRO candidates", "Proposing"),
     "solve": ("Solving cases", "Solving"),
     "judge": ("Judging responses", "Judging"),
     "fit": ("Fitting DSPy programs", "Fitting"),
@@ -22,6 +23,7 @@ _STAGE_LABELS = {
 _STAGE_SUBJECTS = {
     "author": "case campaign",
     "validate_judge": "judge validation",
+    "optimize": "optimizer candidate set",
     "fit": "DSPy program",
     "select": "cross-validation candidate",
     "aggregate": "results",
@@ -45,6 +47,8 @@ class TerminalRunReporter:
             self._packet_completed(event)
         elif event.kind == "packet_reused":
             self._packet_reused(event)
+        elif event.kind == "packet_retrying":
+            self._packet_retrying(event)
         elif event.kind == "packet_failed":
             self._packet_failed(event)
         elif event.kind == "packet_waiting":
@@ -58,6 +62,10 @@ class TerminalRunReporter:
             self._cleanup(event)
         elif event.kind == "run_status":
             self._run_status(event)
+        elif event.kind == "recording_status":
+            self._recording_status(event)
+        elif event.kind == "recording_sync_started":
+            self._recording_sync_started(event)
 
     def close(self) -> None:
         self._stop_status()
@@ -76,6 +84,17 @@ class TerminalRunReporter:
             self.console.print(
                 f"[dim]Revision {event.experiment_id}@{revision.removeprefix('sha256:')[:12]}[/]"
             )
+        optimization = event.details.get("optimization")
+        if isinstance(optimization, Mapping):
+            strategy = optimization.get("strategy")
+            self.console.print(f"[dim]Optimization strategy: {strategy}[/]")
+            if strategy == "copro":
+                targets = optimization.get("skills", "configured skills")
+                self.console.print(
+                    "[dim]COPRO search: "
+                    f"breadth {optimization.get('breadth')} × depth {optimization.get('depth')} "
+                    f"· prompt {optimization.get('optimize_prompt')} · skills {targets}[/]"
+                )
 
     def _packet_started(self, event: ProgressEvent) -> None:
         self._stop_status()
@@ -86,9 +105,7 @@ class TerminalRunReporter:
             self._last_stage = stage
         verb = _STAGE_LABELS.get(stage, (stage, stage))[1]
         subject = _subject(event)
-        description = (
-            f"[cyan]{verb}[/] {subject}{_start_detail(event)}{_model_suffix(event)}"
-        )
+        description = f"[cyan]{verb}[/] {subject}{_start_detail(event)}{_model_suffix(event)}"
         if not self.console.is_terminal:
             self.console.print(description)
             return
@@ -113,6 +130,12 @@ class TerminalRunReporter:
         self.console.print(
             f"[blue]↺[/] Reused {_subject(event)}{_completion_detail(event)}{suffix}"
         )
+
+    def _packet_retrying(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        attempt = event.details.get("attempt")
+        suffix = f" · attempt {attempt}" if isinstance(attempt, int) else ""
+        self.console.print(f"[yellow]↻[/] Retrying {_subject(event)}{suffix}")
 
     def _packet_failed(self, event: ProgressEvent) -> None:
         self._stop_status()
@@ -192,6 +215,32 @@ class TerminalRunReporter:
         message = error.get("error") if isinstance(error, Mapping) else None
         suffix = f": {message}" if isinstance(message, str) and message else ""
         self.console.print(f"[{color}]{label}{stage}{suffix}[/{color}]")
+
+    def _recording_status(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        status = str(event.details.get("status", "unknown"))
+        recorder = str(event.details.get("recorder", "recorder"))
+        external = event.details.get("external_run_id")
+        if status == "synced":
+            suffix = f" · run {external}" if isinstance(external, str) else ""
+            self.console.print(f"[green]Recorded in {recorder}{suffix}[/green]")
+            return
+        error = event.details.get("last_error")
+        message = error.get("message") if isinstance(error, Mapping) else None
+        suffix = f": {message}" if isinstance(message, str) and message else ""
+        self.console.print(
+            f"[yellow]Recording {status} in {recorder}{suffix}; retry with recorder sync[/yellow]"
+        )
+
+    def _recording_sync_started(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        recorder = str(event.details.get("recorder", "recorder"))
+        description = f"[cyan]Recording experiment evidence in {recorder}…[/cyan]"
+        if not self.console.is_terminal:
+            self.console.print(description)
+            return
+        self._status = self.console.status(description, spinner="dots")
+        self._status.start()
 
     def _summary(self, event: ProgressEvent, result: Mapping[str, object]) -> None:
         table = Table(title="Experiment complete", show_header=False, box=None)
@@ -313,6 +362,7 @@ def _past_tense(stage: str | None) -> str:
     return {
         "author": "Authored",
         "validate_judge": "Validated",
+        "optimize": "Proposed",
         "solve": "Solved",
         "judge": "Judged",
         "fit": "Fitted",

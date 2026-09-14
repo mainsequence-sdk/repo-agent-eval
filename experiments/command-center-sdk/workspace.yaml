@@ -1,8 +1,24 @@
-schema_version: 11
+schema_version: 14
 
 workspace:
   id: command-center-sdk-evaluation
   # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
+
+recording:
+  enabled: true
+  recorder: local-mlflow
+  mode: live_and_finalize
+  failure_policy: continue
+  artifact_policy: full
+  content_policy: full
+
+recorders:
+  local-mlflow:
+    type: mlflow
+    tracking_uri: http://127.0.0.1:5000
+    experiment_name: ms-agent-eval/{workspace_id}
+    authentication:
+      type: none
 
 executors:
   local-inference:
@@ -12,6 +28,11 @@ executors:
       - id: primary
         base_url: http://localhost:11434/v1
         max_concurrent_requests: 1
+        routes:
+          - deployment: solver-local
+            model: solver-model
+          - deployment: judge-local
+            model: judge-model
   authoring-harness:
     type: harness
     adapter: artifact_exchange
@@ -19,19 +40,33 @@ executors:
     type: process
     adapter: local
 
+deployments:
+  author-harness:
+    executor: authoring-harness
+    model: author-model
+    revision: author-model-configured-v1
+  solver-local:
+    executor: local-inference
+    model: solver-model
+    revision: solver-model-configured-v1
+  judge-local:
+    executor: local-inference
+    model: judge-model
+    revision: judge-model-configured-v1
+
 models:
   author:
-    name: author-model
-    deployment_revision: author-model-configured-v1
+    deployment: author-harness
     parameters: {temperature: 0.0}
   solver:
-    name: solver-model
-    deployment_revision: solver-model-configured-v1
+    deployment: solver-local
     parameters: {temperature: 0.2}
   judge:
-    name: judge-model
-    deployment_revision: judge-model-configured-v1
+    deployment: judge-local
     parameters: {temperature: 0.0}
+  optimizer:
+    deployment: solver-local
+    parameters: {temperature: 0.7}
 
 stages:
   author:
@@ -40,18 +75,15 @@ stages:
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
   validate_judge:
-    executor: local-inference
-    model: judge
     reuse: {policy: exact}
     budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
+  optimize:
+    reuse: {policy: exact}
+    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   solve:
-    executor: local-inference
-    model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
-    executor: local-inference
-    model: judge
     reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
   fit:
@@ -128,6 +160,9 @@ evaluation:
 experiments:
   baseline:
     mode: evaluate
+    roles:
+      solver: solver
+      judge: judge
     solver:
       dspy:
         module: Predict
@@ -142,11 +177,14 @@ experiments:
       type: response_only
       python: "3.12"
     repetitions: 1
-  optimize-few-shot:
+  optimize-solver:
     mode: optimize
     based_on: baseline
+    roles:
+      solver: solver
+      judge: judge
     optimizer:
-      name: LabeledFewShot
+      strategy: labeled_few_shot
       search:
         k: [1, 2, 4]
     cross_validation:
@@ -154,9 +192,19 @@ experiments:
       seed: 0
     budget:
       solver:
-        model_calls: 100
-        tokens: 250000
+        model_calls: 10000
+        tokens: 40000000
       judge:
-        model_calls: 300
-        tokens: 500000
-      wall_seconds: 1800
+        model_calls: 30000
+        tokens: 60000000
+      wall_seconds: 14400
+
+comparisons:
+  solver-optimization-models:
+    baseline_experiments:
+      - baseline
+    optimization_experiments:
+      - optimize-solver
+    primary_metric: score.mean
+    grouping:
+      - solver

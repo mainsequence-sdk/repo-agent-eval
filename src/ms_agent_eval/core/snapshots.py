@@ -109,9 +109,7 @@ def validate_instruction_selection(
             for unit_id, source_path in _source_units(checkout, source):
                 key = (bundle.id, unit_id)
                 if key in unit_keys:
-                    raise ResolutionError(
-                        f"instruction unit collision for bundle/id {key!r}"
-                    )
+                    raise ResolutionError(f"instruction unit collision for bundle/id {key!r}")
                 unit_keys.add(key)
                 selected.append(
                     SelectedInstructionUnit(
@@ -221,9 +219,7 @@ class SnapshotBuilder:
                     self._copy_locked(source_file, context.source_path, staging, files)
             for selected in selected_units:
                 source_file = _safe_source_file(checkout, selected.source_path)
-                locked_file = self._copy_locked(
-                    source_file, selected.source_path, staging, files
-                )
+                locked_file = self._copy_locked(source_file, selected.source_path, staging, files)
                 units.append(
                     LockedInstructionUnit(
                         bundle_id=selected.bundle_id,

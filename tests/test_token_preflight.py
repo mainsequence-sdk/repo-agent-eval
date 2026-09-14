@@ -5,7 +5,7 @@ from io import BytesIO
 from urllib.error import HTTPError, URLError
 
 from ms_agent_eval.core.token_preflight import EndpointTokenPreflight
-from ms_agent_eval.core.workspace import EndpointConfiguration
+from ms_agent_eval.core.workspace import EndpointConfiguration, EndpointRouteConfiguration
 
 
 def _endpoint() -> EndpointConfiguration:
@@ -14,6 +14,7 @@ def _endpoint() -> EndpointConfiguration:
         "http://localhost:18080/v1",
         4,
         None,
+        (EndpointRouteConfiguration("test-deployment", "test-model"),),
     )
 
 
@@ -89,6 +90,38 @@ def test_exact_preflight_rejects_a_request_larger_than_context() -> None:
     assert result.status == "exceeds"
     assert result.required_tokens == 9
     assert not result.permits_dispatch
+
+
+def test_exact_expected_response_measurement_uses_raw_text_without_special_tokens() -> None:
+    calls: list[tuple[str, dict[str, object] | None]] = []
+
+    def open_url(request, *, timeout):  # type: ignore[no-untyped-def]
+        del timeout
+        payload = json.loads(request.data) if request.data is not None else None
+        calls.append((request.full_url, payload))
+        if request.full_url.endswith("/props"):
+            value = {"default_generation_settings": {"n_ctx": 8192}}
+        else:
+            assert request.full_url.endswith("/tokenize")
+            value = {"tokens": [11, 12, 13]}
+        return BytesIO(json.dumps(value).encode())
+
+    result = EndpointTokenPreflight(open_url=open_url).measure_text(
+        _endpoint(),
+        model="test-model",
+        deployment_revision="revision-1",
+        content="hidden expected answer",
+        api_key=None,
+    )
+
+    assert result.status == "exact"
+    assert result.token_count == 3
+    assert result.as_dict()["chat_template_applied"] is False
+    assert calls[-1] == (
+        "http://localhost:18080/tokenize",
+        {"content": "hidden expected answer", "add_special": False},
+    )
+    assert all(not url.endswith("/apply-template") for url, _ in calls)
 
 
 def test_missing_optional_capability_skips_without_blocking_dispatch() -> None:
@@ -175,9 +208,7 @@ def test_missing_template_extension_skips_after_context_discovery() -> None:
     def open_url(request, *, timeout):  # type: ignore[no-untyped-def]
         del timeout
         if request.full_url.endswith("/props"):
-            return BytesIO(
-                json.dumps({"default_generation_settings": {"n_ctx": 16}}).encode()
-            )
+            return BytesIO(json.dumps({"default_generation_settings": {"n_ctx": 16}}).encode())
         raise HTTPError(request.full_url, 404, "missing", {}, None)
 
     result = EndpointTokenPreflight(open_url=open_url).evaluate(

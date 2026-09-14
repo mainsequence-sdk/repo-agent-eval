@@ -57,7 +57,9 @@ cases/<skill>/<case>/
 ```
 
 `case.yaml` identifies the skill, leakage group, primary and supporting
-capabilities, archetype, difficulty, source evidence, and authoring provenance.
+capabilities, archetype, source evidence, and authoring provenance. Authors do
+not assign difficulty or estimate token counts; reporting derives an exact
+expected-response token measurement after evaluation.
 Changing the policy, capability catalog, source set, or package bytes requires
 review and refreshed provenance before the case can run.
 

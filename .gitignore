@@ -9,4 +9,6 @@ __pycache__/
 /var/
 /results/
 /snapshots/
+/mlflow.db
+/mlruns/
 /.implementation_tasks/

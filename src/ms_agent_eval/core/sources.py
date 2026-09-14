@@ -97,9 +97,7 @@ def _credential_from_helper(repository_url: str) -> GitCredential | None:
     except (OSError, subprocess.SubprocessError):
         return None
     values = dict(
-        line.split("=", maxsplit=1)
-        for line in completed.stdout.splitlines()
-        if "=" in line
+        line.split("=", maxsplit=1) for line in completed.stdout.splitlines() if "=" in line
     )
     username = values.get("username", "")
     password = values.get("password", "")
@@ -109,14 +107,12 @@ def _credential_from_helper(repository_url: str) -> GitCredential | None:
 
 
 def _credential_environment(credential: GitCredential) -> dict[str, str]:
-    encoded = b64encode(
-        f"{credential.username}:{credential.password}".encode("utf-8")
-    ).decode("ascii")
+    encoded = b64encode(f"{credential.username}:{credential.password}".encode("utf-8")).decode(
+        "ascii"
+    )
     return {
         "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": (
-            f"http.{credential.protocol}://{credential.host}/.extraHeader"
-        ),
+        "GIT_CONFIG_KEY_0": (f"http.{credential.protocol}://{credential.host}/.extraHeader"),
         "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
     }
 

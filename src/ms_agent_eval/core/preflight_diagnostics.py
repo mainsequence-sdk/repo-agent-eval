@@ -9,7 +9,12 @@ from dataclasses import dataclass
 
 import dspy
 
-from ms_agent_eval.programs.dspy.engine import create_judge_program, create_solver_program
+from ms_agent_eval.programs.dspy.engine import (
+    create_copro_proposal_program,
+    create_judge_program,
+    create_solver_program,
+    solver_prompt_state,
+)
 
 from .errors import ConfigurationError
 from .evaluation import CaseDefinition
@@ -21,11 +26,12 @@ from .workspace import (
     ExecutorConfiguration,
     ExecutorType,
     ExperimentMode,
+    CoproConfiguration,
     ResolvedRoleModel,
 )
 
 
-_SUPPORTED_STAGES = ("validate_judge", "solve", "judge")
+_SUPPORTED_STAGES = ("validate_judge", "optimize", "solve", "judge")
 
 
 @dataclass(frozen=True)
@@ -62,10 +68,25 @@ def calculate_preflight(
     reports: list[Mapping[str, object]] = []
 
     for stage in selected_stages:
-        role = "solver" if stage == "solve" else "judge"
+        role = "solver" if stage == "solve" else ("optimizer" if stage == "optimize" else "judge")
+        if stage == "optimize" and not isinstance(lock.configuration.optimizer, CoproConfiguration):
+            reports.append(
+                _deferred_stage_report(
+                    stage,
+                    role,
+                    lock.models["solver"],
+                    workspace.repository.workspace.executors[
+                        lock.models["solver"].executor_id
+                    ],
+                    request_count=0,
+                    reason="strategy_does_not_use_optimizer_calls",
+                    detail="labeled_few_shot compiles demonstrations locally.",
+                    state="not_applicable",
+                )
+            )
+            continue
         model = lock.models[role]
-        stage_configuration = workspace.repository.workspace.stages[stage]
-        executor = workspace.repository.workspace.executors[stage_configuration.executor]
+        executor = workspace.repository.workspace.executors[model.executor_id]
 
         if stage == "judge":
             reports.append(
@@ -105,6 +126,7 @@ def calculate_preflight(
             continue
 
         if stage == "solve" and lock.configuration.mode is ExperimentMode.OPTIMIZE:
+            strategy = lock.configuration.optimizer.strategy  # type: ignore[union-attr]
             reports.append(
                 _deferred_stage_report(
                     stage,
@@ -114,8 +136,8 @@ def calculate_preflight(
                     request_count=0,
                     reason="compiled_program_required",
                     detail=(
-                        "Optimization changes the solver demonstrations. Exact messages can "
-                        "be calculated only after the fitted DSPy state exists."
+                        f"The {strategy} strategy changes the compiled solver state. Exact "
+                        "messages can be calculated only after that state exists."
                     ),
                 )
             )
@@ -124,14 +146,22 @@ def calculate_preflight(
         requests = (
             _judge_validation_requests(workspace, pilot=pilot)
             if stage == "validate_judge"
-            else _solver_requests(
-                workspace,
-                cases,
-                repetitions=_solver_repetitions(
+            else (
+                _optimizer_requests(
                     workspace,
-                    experiment_repetitions=lock.configuration.repetitions,
-                    pilot=pilot,
-                ),
+                    lock.configuration.optimizer,
+                    folds=lock.configuration.cross_validation.folds,  # type: ignore[union-attr]
+                )
+                if stage == "optimize"
+                else _solver_requests(
+                    workspace,
+                    cases,
+                    repetitions=_solver_repetitions(
+                        workspace,
+                        experiment_repetitions=lock.configuration.repetitions,
+                        pilot=pilot,
+                    ),
+                )
             )
         )
         reports.append(
@@ -166,15 +196,14 @@ def calculate_preflight(
         "execution_mode": "pilot" if pilot else "benchmark",
         "selected_case_count": len(cases),
         "selected_case_ids": [case.id for case in cases],
+        "optimization_plan": workspace.validation.get("optimization", {}).get(experiment_id),
         "stages": reports,
         "summary": {
             "calculated_stages": len(exact),
             "deferred_stages": sum(item["state"] == "deferred" for item in reports),
             "blocked_requests": blocked,
             "unknown_only_requests": unknown,
-            "all_calculated_requests_have_exact_fit": bool(exact)
-            and blocked == 0
-            and unknown == 0,
+            "all_calculated_requests_have_exact_fit": bool(exact) and blocked == 0 and unknown == 0,
         },
     }
 
@@ -241,17 +270,56 @@ def _solver_requests(
     )
 
 
+def _optimizer_requests(
+    workspace: CompiledWorkspace,
+    optimizer: object,
+    *,
+    folds: int,
+) -> tuple[_RenderedRequest, ...]:
+    if not isinstance(optimizer, CoproConfiguration):
+        return ()
+    program = create_copro_proposal_program()
+    instruction, prefix = solver_prompt_state(create_solver_program())
+    skills = (
+        sorted(workspace.context.skill_contexts)
+        if optimizer.skills == "all"
+        else list(optimizer.skills)
+    )
+    targets = []
+    if optimizer.optimize_prompt:
+        targets.append(("solver_prompt", "solver", instruction, prefix))
+    targets.extend(("skill", skill, workspace.context.skill(skill), "") for skill in skills)
+    multiplicity = optimizer.depth * (folds + 1)
+    return tuple(
+        _RenderedRequest(
+            id=f"optimize:{kind}:{target_id}",
+            stage="optimize",
+            case_id=target_id,
+            messages=_adapter_messages(
+                program,
+                {
+                    "target_kind": kind,
+                    "target_id": target_id,
+                    "current_text": text,
+                    "current_output_prefix": output_prefix,
+                    "scored_attempts": "[]",
+                    "requirements": "Preserve the locked contract and technical facts.",
+                    "candidate_count": optimizer.breadth - 1,
+                },
+            ),
+            multiplicity=multiplicity,
+        )
+        for kind, target_id, text, output_prefix in targets
+    )
+
+
 def _judge_validation_requests(
     workspace: CompiledWorkspace,
     *,
     pilot: bool,
 ) -> tuple[_RenderedRequest, ...]:
     program = create_judge_program()
-    repetitions = (
-        1
-        if pilot
-        else workspace.repository.workspace.evaluation.judge.repetitions
-    )
+    repetitions = 1 if pilot else workspace.repository.workspace.evaluation.judge.repetitions
     cases = {case.id: case for case in workspace.case_bank.cases}
     requests = []
     for fixture in workspace.judge_validation.fixtures:
@@ -273,9 +341,7 @@ def _judge_validation_requests(
                             ensure_ascii=False,
                             sort_keys=True,
                         ),
-                        "candidate_response": fixture.candidate_path.read_text(
-                            encoding="utf-8"
-                        ),
+                        "candidate_response": fixture.candidate_path.read_text(encoding="utf-8"),
                     },
                 ),
                 multiplicity=repetitions,
@@ -308,11 +374,7 @@ def _judge_request_count(
         experiment_repetitions=experiment_repetitions,
         pilot=pilot,
     )
-    judge_repetitions = (
-        1
-        if pilot
-        else workspace.repository.workspace.evaluation.judge.repetitions
-    )
+    judge_repetitions = 1 if pilot else workspace.repository.workspace.evaluation.judge.repetitions
     return len(cases) * solver_repetitions * judge_repetitions
 
 
@@ -333,6 +395,7 @@ def _check_stage(
     environment: Mapping[str, str],
     token_preflight: EndpointTokenPreflight,
 ) -> Mapping[str, object]:
+    endpoints = model.eligible_endpoints(executor)
     results: dict[tuple[str, str], TokenPreflightResult] = {}
     with ExitStack() as stack:
         endpoint_pools = {
@@ -342,13 +405,13 @@ def _check_stage(
                     thread_name_prefix=f"preflight-{stage}-{endpoint.id}",
                 )
             )
-            for endpoint in executor.endpoints
+            for endpoint in endpoints
         }
         futures = {
             endpoint_pools[endpoint.id].submit(
                 token_preflight.evaluate,
                 endpoint,
-                model=model.model,
+                model=model.bind_endpoint(endpoint).model,
                 deployment_revision=model.deployment_revision,
                 messages=request.messages,
                 maximum_output_tokens=_maximum_output_tokens(model),
@@ -356,7 +419,7 @@ def _check_stage(
                 api_key=endpoint.api_key(environment),
             ): (request.id, endpoint.id)
             for request in requests
-            for endpoint in executor.endpoints
+            for endpoint in endpoints
         }
         for future in as_completed(futures):
             results[futures[future]] = future.result()
@@ -364,10 +427,7 @@ def _check_stage(
     checked = tuple(
         _CheckedRequest(
             request,
-            {
-                endpoint.id: results[(request.id, endpoint.id)]
-                for endpoint in executor.endpoints
-            },
+            {endpoint.id: results[(request.id, endpoint.id)] for endpoint in endpoints},
         )
         for request in requests
     )
@@ -378,10 +438,7 @@ def _check_stage(
         for request, detail in zip(requests, details, strict=True)
     )
     unknown_only = sum(
-        int(
-            detail["guaranteed_fit_capacity"] == 0
-            and detail["dispatchable_capacity"] > 0
-        )
+        int(detail["guaranteed_fit_capacity"] == 0 and detail["dispatchable_capacity"] > 0)
         * request.multiplicity
         for request, detail in zip(requests, details, strict=True)
     )
@@ -395,9 +452,8 @@ def _check_stage(
         executor,
         allowed_statuses={"fits", "skipped"},
     )
-    endpoint_reports = tuple(
-        _endpoint_report(endpoint, checked) for endpoint in executor.endpoints
-    )
+    endpoint_reports = tuple(_endpoint_report(endpoint, checked) for endpoint in endpoints)
+    configured_capacity = sum(endpoint.max_concurrent_requests for endpoint in endpoints)
     state = "calculated"
     status = "blocked" if blocked else ("unknown" if unknown_only else "fits")
     return {
@@ -406,10 +462,11 @@ def _check_stage(
         "state": state,
         "status": status,
         "model": model.model,
+        "deployment_id": model.deployment_id,
         "deployment_revision": model.deployment_revision,
         "reasoning_effort": model.reasoning_effort,
         "executor": executor.id,
-        "configured_capacity": executor.total_concurrency,
+        "configured_capacity": configured_capacity,
         "logical_request_count": logical_count,
         "unique_rendered_request_count": len(requests),
         "maximum_output_tokens": _maximum_output_tokens(model),
@@ -435,6 +492,8 @@ def _request_report(
     guaranteed = 0
     dispatchable = 0
     for endpoint in executor.endpoints:
+        if endpoint.id not in checked.endpoint_results:
+            continue
         result = checked.endpoint_results[endpoint.id]
         if result.status == "fits":
             guaranteed += endpoint.max_concurrent_requests
@@ -463,8 +522,7 @@ def _endpoint_report(
     requests: Sequence[_CheckedRequest],
 ) -> Mapping[str, object]:
     weighted_results = [
-        (item.endpoint_results[endpoint.id], item.request.multiplicity)
-        for item in requests
+        (item.endpoint_results[endpoint.id], item.request.multiplicity) for item in requests
     ]
     results = [result for result, _ in weighted_results]
     statuses = Counter()
@@ -475,9 +533,7 @@ def _endpoint_report(
     known_required = [
         result.required_tokens for result in results if result.required_tokens is not None
     ]
-    contexts = {
-        result.context_window for result in results if result.context_window is not None
-    }
+    contexts = {result.context_window for result in results if result.context_window is not None}
     return {
         "id": endpoint.id,
         "base_url": endpoint.base_url,
@@ -517,10 +573,12 @@ def _minimum_waves(
     logical_count = sum(item.request.multiplicity for item in requests)
     if logical_count == 0:
         return 0
+    endpoint_ids = set(requests[0].endpoint_results) if requests else set()
     if any(
         not any(
             item.endpoint_results[endpoint.id].status in allowed_statuses
             for endpoint in executor.endpoints
+            if endpoint.id in endpoint_ids
         )
         for item in requests
     ):
@@ -550,16 +608,14 @@ def _matched_request_count(
     capacity_multiplier: int,
 ) -> int:
 
+    endpoint_ids = set(requests[0].endpoint_results) if requests else set()
     slots = [
         endpoint.id
         for endpoint in executor.endpoints
+        if endpoint.id in endpoint_ids
         for _ in range(endpoint.max_concurrent_requests * capacity_multiplier)
     ]
-    logical_requests = [
-        item
-        for item in requests
-        for _ in range(item.request.multiplicity)
-    ]
+    logical_requests = [item for item in requests for _ in range(item.request.multiplicity)]
     slot_owner: dict[int, int] = {}
 
     def assign(request_index: int, visited: set[int]) -> bool:
@@ -602,10 +658,14 @@ def _deferred_stage_report(
         "state": state,
         "status": state,
         "model": model.model,
+        "deployment_id": model.deployment_id,
         "deployment_revision": model.deployment_revision,
         "reasoning_effort": model.reasoning_effort,
         "executor": executor.id,
-        "configured_capacity": executor.total_concurrency,
+        "configured_capacity": sum(
+            endpoint.max_concurrent_requests
+            for endpoint in model.eligible_endpoints(executor)
+        ),
         "logical_request_count": request_count,
         "unique_rendered_request_count": 0,
         "guaranteed_parallel_capacity": 0,

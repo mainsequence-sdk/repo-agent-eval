@@ -13,6 +13,8 @@ flowchart TB
     Packets --> Calls[Model calls or local execution]
     Calls --> Results[Validated results]
     Results --> Aggregate[Summary and regression evidence]
+    Results --> Recorder[Retryable recorder projection]
+    Recorder --> MLflow[MLflow]
 
     Snapshots --> External[(External data root)]
     Lock --> External
@@ -33,6 +35,7 @@ flowchart TB
 │   ├── manifests/              revisions, work graph, attempts, runs, and results
 │   ├── locks/work/             bounded single-flight work lock buckets
 │   ├── locks/executors/        per-pool, per-endpoint request slots
+│   ├── recorders/              outbox, bindings, receipts, and delivery errors
 │   └── tmp/                    atomic staging and disposable attempts
 └── summary/
     └── runs/<run-id>/          derived Markdown, CSV, JSON, and case reports
@@ -44,6 +47,11 @@ The framework creates `summary/runs/<run-id>/` at terminal experiment
 finalization. `summary.md`, `results.csv`, `results.json`, and `cases/*.md` are
 deterministic projections over retained evidence; reporting never calls an LLM.
 These files are derived and can be deleted and rebuilt.
+
+Recorder state is also derived, but its outbox is durable so an unavailable
+tracking server can be retried without inference. Pending recorder events are
+garbage-collection roots until delivery or supersession has a receipt. MLflow
+never replaces the canonical local manifests and blobs.
 
 Within `operations/manifests/`, selected experiment definitions live under
 `experiments/<family>/<revision>/`, reusable computations under `graph/work/`,
@@ -109,3 +117,6 @@ expires.
 The collector fails closed when any JSON manifest is invalid. It does not
 delete manifests, retained snapshots, or unknown files placed in the blob
 directory.
+
+See [Experiment recording](../execution/experiment-recording.md) for the
+external projection, privacy policies, and recovery commands.

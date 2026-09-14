@@ -4,7 +4,9 @@ import csv
 import io
 import json
 import os
+import random
 import shutil
+import statistics
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     from .planning import CompiledWorkspace
 
 
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 CSV_COLUMNS = (
     "report_schema_version",
     "workspace_id",
@@ -39,7 +41,13 @@ CSV_COLUMNS = (
     "case_id",
     "case_title",
     "case_hash",
+    "leakage_group",
     "repetition",
+    "comparison_arm",
+    "candidate_id",
+    "strategy",
+    "expected_response_tokens",
+    "expected_response_length_band",
     "author_model_details",
     "solver_model_details",
     "judge_model_details",
@@ -136,24 +144,25 @@ class RunReportBuilder:
             for item in _mapping_sequence(lock.get("cases"), "experiment lock cases")
         }
         source = self._source_details(lock)
-        models = {
-            role: self._model_details(role, lock, statuses)
-            for role in ("author", "solver", "judge")
-        }
+        locked_models = _mapping(lock.get("models", {}), "experiment lock models")
+        report_roles = (
+            ("author", "optimizer", "solver", "judge")
+            if "optimizer" in locked_models
+            else ("author", "solver", "judge")
+        )
+        models = {role: self._model_details(role, lock, statuses) for role in report_roles}
+        aggregate = self._aggregate(statuses)
+        token_measurements = self._token_measurements(aggregate)
         case_results = []
         for status in statuses:
             if status.packet.stage is not StageKind.JUDGE:
                 continue
             if status.state is not StageState.PERSISTED or status.result is None:
                 continue
-            evaluation = _mapping(
-                self.ledger.read_output(status.result), "judge evaluation output"
-            )
+            evaluation = _mapping(self.ledger.read_output(status.result), "judge evaluation output")
             if evaluation.get("evaluation_phase") not in {"test", "pilot"}:
                 continue
-            judge_input = _mapping(
-                self._read_input(status, "evaluation"), "judge evaluation input"
-            )
+            judge_input = _mapping(self._read_input(status, "evaluation"), "judge evaluation input")
             case_id = _string(evaluation.get("case_id"), "judge evaluation case_id")
             if judge_input.get("case_id") != case_id:
                 raise IntegrityError(f"judge input and output disagree for case {case_id!r}")
@@ -174,6 +183,7 @@ class RunReportBuilder:
                     locked,
                     current,
                     models,
+                    token_measurements.get(case_id),
                 )
             )
         case_results.sort(
@@ -181,9 +191,9 @@ class RunReportBuilder:
                 str(item["skill_name"]),
                 str(item["case_id"]),
                 int(item["repetition"]),
+                str(item["comparison_arm"]),
             )
         )
-        aggregate = self._aggregate(statuses)
         self._validate_aggregate(run, lock, aggregate, case_results)
         stage_states = [self._stage_state(status) for status in statuses]
         execution_summary = self._execution_summary(statuses)
@@ -192,8 +202,10 @@ class RunReportBuilder:
             report_status = "pilot_completed"
         usage_by_role = self._usage_by_role(statuses)
         endpoint_execution = self._endpoint_summary(statuses)
-        skill_summary = self._skill_summary(case_results)
-        criterion_summary = self._criterion_summary(case_results)
+        scored_cases = self._primary_scored_cases(case_results)
+        skill_summary = self._skill_summary(scored_cases)
+        criterion_summary = self._criterion_summary(scored_cases)
+        test_comparison = self._test_comparison(case_results)
         benchmark_valid = run.get("benchmark_valid") is True
         identity: dict[str, object] = {
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -222,9 +234,11 @@ class RunReportBuilder:
                 "capability_catalog_hash": lock.get("capability_catalog_hash"),
                 "solver_program_hash": lock.get("solver_program_hash"),
                 "judge_program_hash": lock.get("judge_program_hash"),
-                "run_graph_id": (
-                    None if aggregate is None else aggregate.get("run_graph_id")
-                ),
+                "benchmark_revision_id": lock.get("benchmark_revision_id"),
+                "comparison_group_id": lock.get("comparison_group_id"),
+                "comparison_id": lock.get("comparison_id"),
+                "arm_id": lock.get("arm_id"),
+                "run_graph_id": (None if aggregate is None else aggregate.get("run_graph_id")),
             },
             "models": models,
             "usage_by_role": usage_by_role,
@@ -232,6 +246,10 @@ class RunReportBuilder:
             "execution": execution_summary,
             "case_count": len(case_results),
             "cases": case_results,
+            "expected_response_token_measurements": (
+                None if aggregate is None else aggregate.get("expected_response_token_measurements")
+            ),
+            "test_comparison": test_comparison,
             "skills": skill_summary,
             "criteria": criterion_summary,
             "stages": stage_states,
@@ -242,18 +260,27 @@ class RunReportBuilder:
             ],
             "benchmark_metrics": None,
             "cross_validation": self._cross_validation(statuses),
+            "optimization": self._optimization(statuses, lock),
         }
         if benchmark_valid and aggregate is not None:
             identity["benchmark_metrics"] = {
                 "mean_score": aggregate.get("mean_score"),
+                **(
+                    {}
+                    if test_comparison is None
+                    else {
+                        "baseline_mean_score": test_comparison["baseline_mean_score"],
+                        "optimized_mean_score": test_comparison["optimized_mean_score"],
+                        "micro_case_delta": test_comparison["micro_case_delta"],
+                        "macro_skill_delta": test_comparison["macro_skill_delta"],
+                    }
+                ),
             }
         return RunReport({**identity, "content_hash": content_hash(identity)})
 
     def _load_lock(self, run_id: str) -> Mapping[str, object]:
         run = self.ledger.load_run(run_id)
-        artifact = _mapping(
-            run.get("experiment_lock_artifact"), "experiment lock artifact"
-        )
+        artifact = _mapping(run.get("experiment_lock_artifact"), "experiment lock artifact")
         try:
             reference = ArtifactReference(
                 _string(artifact.get("content_id"), "experiment lock content_id"),
@@ -318,6 +345,7 @@ class RunReportBuilder:
             "solver": {StageKind.SOLVE},
             "judge": {StageKind.VALIDATE_JUDGE, StageKind.JUDGE},
             "author": {StageKind.AUTHOR},
+            "optimizer": {StageKind.OPTIMIZE},
         }[role]
         role_statuses = [item for item in statuses if item.packet.stage in relevant]
         observed = sorted(
@@ -330,12 +358,12 @@ class RunReportBuilder:
             }
         )
         configured_name = model.get("model") or model.get("name")
+        profile_id = model.get("profile_id")
+        deployment_id = model.get("deployment_id")
         deployment_revision = model.get("deployment_revision")
         provider = model.get("provider")
         configuration_hash = model.get("content_hash")
-        parameters = _public_parameters(
-            _mapping(model.get("parameters", {}), f"{role} parameters")
-        )
+        parameters = _public_parameters(_mapping(model.get("parameters", {}), f"{role} parameters"))
         reasoning = model.get("reasoning_effort")
         if reasoning is None:
             reasoning = parameters.pop("reasoning_effort", None)
@@ -343,19 +371,20 @@ class RunReportBuilder:
         executor_adapters = sorted({item.packet.executor.adapter for item in role_statuses})
         authoring_agent = None
         if role == "author":
-            agents = {
-                case.provenance.authoring_agent for case in self.case_bank.cases
-            }
+            agents = {case.provenance.authoring_agent for case in self.case_bank.cases}
             authoring_agent = next(iter(agents)) if len(agents) == 1 else None
             if not model:
                 configured = self.repository.workspace.models.get("author")
                 stage = self.repository.workspace.stages.get("author")
                 if configured is not None:
-                    configured_name = configured.model
-                    deployment_revision = configured.deployment_revision
+                    deployment = self.repository.workspace.deployments[configured.deployment]
+                    profile_id = "author"
+                    deployment_id = deployment.id
+                    configured_name = deployment.model
+                    deployment_revision = deployment.revision
                     parameters = _public_parameters(configured.parameters)
                     reasoning = configured.reasoning_effort
-                if stage is not None:
+                if stage is not None and stage.executor is not None:
                     executor_ids = [stage.executor]
                     configured_executor = self.repository.workspace.executors.get(stage.executor)
                     if configured_executor is not None:
@@ -371,6 +400,8 @@ class RunReportBuilder:
         observed_name: object = observed[0] if len(observed) == 1 else (observed or None)
         return {
             "role": role,
+            "profile_id": profile_id,
+            "deployment_id": deployment_id,
             **({"authoring_agent": authoring_agent} if role == "author" else {}),
             "configured_name": configured_name,
             "deployment_revision": deployment_revision,
@@ -400,6 +431,7 @@ class RunReportBuilder:
         locked: Mapping[str, object],
         current: object | None,
         models: Mapping[str, Mapping[str, object]],
+        token_measurement: Mapping[str, object] | None,
     ) -> Mapping[str, object]:
         assert judge_status.result is not None
         case_id = _string(evaluation.get("case_id"), "evaluation case_id")
@@ -477,15 +509,27 @@ class RunReportBuilder:
             expected_artifacts = raw_expected_artifacts
         return {
             "skill_name": _string(locked.get("skill"), "locked case skill"),
+            "leakage_group": _string(locked.get("group"), "locked case leakage group"),
             "case_id": case_id,
             "case_title": current_title or case_id,
             "case_hash": _string(locked.get("content_hash"), "locked case hash"),
             "split": split,
             "repetition": repetition,
-            "prompt": _string(judge_input.get("task"), "judge task"),
-            "solver_response": _string(
-                solver_output.get("response"), "solver response"
+            "candidate_id": _string(
+                evaluation.get("candidate_id", "baseline"), "evaluation candidate_id"
             ),
+            "strategy": _string(evaluation.get("strategy", "baseline"), "evaluation strategy"),
+            "comparison_arm": (
+                "optimized" if evaluation.get("strategy") == "copro" else "baseline"
+            ),
+            "expected_response_tokens": (
+                None if token_measurement is None else token_measurement.get("token_count")
+            ),
+            "expected_response_length_band": (
+                None if token_measurement is None else token_measurement.get("length_band")
+            ),
+            "prompt": _string(judge_input.get("task"), "judge task"),
+            "solver_response": _string(solver_output.get("response"), "solver response"),
             "expected_response": _string(
                 judge_input.get("expected_response"), "judge expected response"
             ),
@@ -527,9 +571,7 @@ class RunReportBuilder:
         }
 
     def _read_input(self, status: StageStatus, input_id: str) -> object:
-        artifact = next(
-            (item for item in status.packet.inputs if item.id == input_id), None
-        )
+        artifact = next((item for item in status.packet.inputs if item.id == input_id), None)
         if artifact is None:
             raise IntegrityError(f"packet has no {input_id!r} input")
         return self._read_artifact(artifact)
@@ -539,9 +581,7 @@ class RunReportBuilder:
         with self.ledger.store.get_blob(reference) as handle:
             return json.load(handle)
 
-    def _aggregate(
-        self, statuses: Sequence[StageStatus]
-    ) -> Mapping[str, object] | None:
+    def _aggregate(self, statuses: Sequence[StageStatus]) -> Mapping[str, object] | None:
         values = [
             status
             for status in statuses
@@ -556,24 +596,235 @@ class RunReportBuilder:
         assert values[0].result is not None
         return _mapping(self.ledger.read_output(values[0].result), "aggregate output")
 
-    def _cross_validation(
-        self, statuses: Sequence[StageStatus]
+    @staticmethod
+    def _token_measurements(
+        aggregate: Mapping[str, object] | None,
+    ) -> Mapping[str, Mapping[str, object]]:
+        if aggregate is None:
+            return {}
+        raw = aggregate.get("expected_response_token_measurements")
+        if not isinstance(raw, Mapping):
+            return {}
+        cases = raw.get("cases", [])
+        if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes, bytearray)):
+            raise IntegrityError("expected-response token measurements cases must be a list")
+        values: dict[str, Mapping[str, object]] = {}
+        for item in cases:
+            measurement = _mapping(item, "expected-response token measurement")
+            case_id = _string(measurement.get("case_id"), "token measurement case id")
+            if case_id in values:
+                raise IntegrityError("expected-response token measurements contain duplicates")
+            values[case_id] = measurement
+        return values
+
+    @staticmethod
+    def _primary_scored_cases(
+        cases: Sequence[Mapping[str, object]],
+    ) -> list[Mapping[str, object]]:
+        if any(item.get("comparison_arm") == "optimized" for item in cases):
+            return [item for item in cases if item.get("comparison_arm") == "optimized"]
+        return list(cases)
+
+    @staticmethod
+    def _test_comparison(
+        cases: Sequence[Mapping[str, object]],
     ) -> Mapping[str, object] | None:
+        if not any(item.get("comparison_arm") == "optimized" for item in cases):
+            return None
+        pairs: dict[tuple[str, int], dict[str, Mapping[str, object]]] = defaultdict(dict)
+        for item in cases:
+            arm = _string(item.get("comparison_arm"), "comparison arm")
+            if arm not in {"baseline", "optimized"}:
+                raise IntegrityError(f"unknown comparison arm {arm!r}")
+            key = (
+                _string(item.get("case_id"), "comparison case id"),
+                _integer(item.get("repetition"), "comparison repetition"),
+            )
+            if arm in pairs[key]:
+                raise IntegrityError(f"duplicate {arm} result for comparison pair {key!r}")
+            pairs[key][arm] = item
+        incomplete = sorted(
+            key for key, arms in pairs.items() if set(arms) != {"baseline", "optimized"}
+        )
+        if incomplete:
+            raise IntegrityError(f"COPRO test comparison has incomplete pairs: {incomplete[:5]}")
+        pair_rows = []
+        for (case_id, repetition), arms in sorted(pairs.items()):
+            baseline = arms["baseline"]
+            optimized = arms["optimized"]
+            for field in (
+                "skill_name",
+                "leakage_group",
+                "expected_response_tokens",
+                "expected_response_length_band",
+            ):
+                if baseline.get(field) != optimized.get(field):
+                    raise IntegrityError(f"COPRO comparison pair {case_id!r} disagrees on {field}")
+            baseline_score = float(baseline["score"])
+            optimized_score = float(optimized["score"])
+            pair_rows.append(
+                {
+                    "case_id": case_id,
+                    "case_title": baseline.get("case_title"),
+                    "skill_name": baseline["skill_name"],
+                    "leakage_group": baseline["leakage_group"],
+                    "repetition": repetition,
+                    "expected_response_tokens": baseline.get("expected_response_tokens"),
+                    "expected_response_length_band": baseline.get("expected_response_length_band"),
+                    "baseline_candidate_id": baseline["candidate_id"],
+                    "optimized_candidate_id": optimized["candidate_id"],
+                    "baseline_score": baseline_score,
+                    "optimized_score": optimized_score,
+                    "delta": optimized_score - baseline_score,
+                }
+            )
+        by_skill = _paired_summary(pair_rows, "skill_name")
+        by_length_band = _paired_summary(
+            [row for row in pair_rows if row.get("expected_response_length_band") is not None],
+            "expected_response_length_band",
+            band_order=True,
+        )
+        criterion_rows = []
+        for arms in pairs.values():
+            baseline_scores = {
+                str(item["id"]): float(item["score"])
+                for item in _mapping_sequence(
+                    arms["baseline"]["criterion_scores"], "baseline criterion scores"
+                )
+            }
+            optimized_scores = {
+                str(item["id"]): float(item["score"])
+                for item in _mapping_sequence(
+                    arms["optimized"]["criterion_scores"], "optimized criterion scores"
+                )
+            }
+            if set(baseline_scores) != set(optimized_scores):
+                raise IntegrityError("COPRO comparison criterion sets disagree")
+            for criterion_id in sorted(baseline_scores):
+                criterion_rows.append(
+                    {
+                        "criterion_id": criterion_id,
+                        "baseline_score": baseline_scores[criterion_id],
+                        "optimized_score": optimized_scores[criterion_id],
+                        "delta": optimized_scores[criterion_id] - baseline_scores[criterion_id],
+                    }
+                )
+        by_criterion = _paired_summary(criterion_rows, "criterion_id")
+        deltas = [float(row["delta"]) for row in pair_rows]
+        baseline_mean = statistics.fmean(float(row["baseline_score"]) for row in pair_rows)
+        optimized_mean = statistics.fmean(float(row["optimized_score"]) for row in pair_rows)
+        ci_low, ci_high = _cluster_bootstrap_interval(pair_rows)
+        return {
+            "schema_version": 1,
+            "pairing_unit": "case_id+solver_repetition",
+            "paired_case_count": len(pair_rows),
+            "leakage_group_count": len({str(row["leakage_group"]) for row in pair_rows}),
+            "baseline_mean_score": baseline_mean,
+            "optimized_mean_score": optimized_mean,
+            "micro_case_delta": statistics.fmean(deltas),
+            "macro_skill_delta": statistics.fmean(float(row["delta"]) for row in by_skill),
+            "delta_ci95": {"lower": ci_low, "upper": ci_high},
+            "positive_skill_count": sum(float(row["delta"]) > 1e-12 for row in by_skill),
+            "negative_skill_count": sum(float(row["delta"]) < -1e-12 for row in by_skill),
+            "unchanged_skill_count": sum(abs(float(row["delta"])) <= 1e-12 for row in by_skill),
+            "cases": pair_rows,
+            "skills": by_skill,
+            "length_bands": by_length_band,
+            "criteria": by_criterion,
+        }
+
+    def _cross_validation(self, statuses: Sequence[StageStatus]) -> Mapping[str, object] | None:
         values = [
             status
             for status in statuses
             if status.packet.stage is StageKind.SELECT
             and status.state is StageState.PERSISTED
             and status.result is not None
+            and (status.packet.output_schema == "cross-validation-selection-v1")
         ]
         if len(values) > 1:
             raise IntegrityError("run contains multiple persisted selection results")
         if not values:
             return None
         assert values[0].result is not None
-        return _mapping(
-            self.ledger.read_output(values[0].result), "cross-validation selection"
-        )
+        return _mapping(self.ledger.read_output(values[0].result), "cross-validation selection")
+
+    def _optimization(
+        self,
+        statuses: Sequence[StageStatus],
+        lock: Mapping[str, object],
+    ) -> Mapping[str, object] | None:
+        configuration = _mapping(lock.get("configuration", {}), "lock configuration")
+        if configuration.get("mode") != "optimize":
+            return None
+        optimizer = _mapping(configuration.get("optimizer"), "optimizer configuration")
+        strategy = _string(optimizer.get("strategy"), "optimizer strategy")
+        final_fits = [
+            status
+            for status in statuses
+            if status.packet.stage is StageKind.FIT
+            and status.state is StageState.PERSISTED
+            and status.result is not None
+            and status.packet.work_spec.get("phase") == "final_fit"
+        ]
+        final_program = None
+        if final_fits:
+            selected = final_fits[-1]
+            assert selected.result is not None
+            output = _mapping(self.ledger.read_output(selected.result), "final fitted program")
+            final_program = {
+                "candidate_id": output.get("candidate_id"),
+                "program_hash": output.get("fitted_program_hash"),
+                "state_artifact": output.get("state_artifact"),
+                "compiled_manifest_artifact": output.get("compiled_manifest_artifact"),
+                "candidate_lineage_artifact": output.get("candidate_lineage_artifact"),
+                "search_summary_artifact": output.get("search_summary_artifact"),
+                "demonstration_count": output.get("demonstration_count"),
+                "solver_instruction": output.get("solver_instruction"),
+                "solver_instruction_artifact": output.get("solver_instruction_artifact"),
+                "output_prefix": output.get("output_prefix"),
+                "output_prefix_artifact": output.get("output_prefix_artifact"),
+                "skill_overlays": output.get("skill_overlay_artifacts"),
+            }
+        rounds = []
+        if strategy == "copro":
+            for status in statuses:
+                if (
+                    status.packet.output_schema != "copro-selection-v1"
+                    or status.state is not StageState.PERSISTED
+                    or status.result is None
+                ):
+                    continue
+                output = _mapping(self.ledger.read_output(status.result), "COPRO selection")
+                rounds.append(
+                    {
+                        key: output.get(key)
+                        for key in (
+                            "scope",
+                            "round",
+                            "target_kind",
+                            "target_id",
+                            "selected_candidate_id",
+                            "selected_mean_score",
+                            "candidates",
+                            "proposal_accounting",
+                        )
+                    }
+                )
+            rounds.sort(
+                key=lambda item: (
+                    str(item.get("scope")),
+                    int(item.get("round") or 0),
+                    0 if item.get("target_kind") == "solver_prompt" else 1,
+                    str(item.get("target_id")),
+                )
+            )
+        return {
+            "strategy": strategy,
+            "configuration": optimizer,
+            "final_program": final_program,
+            "rounds": rounds,
+        }
 
     @staticmethod
     def _validate_aggregate(
@@ -584,7 +835,7 @@ class RunReportBuilder:
     ) -> None:
         if aggregate is None:
             return
-        if aggregate.get("schema_version") != 3:
+        if aggregate.get("schema_version") != 4:
             raise IntegrityError("aggregate output schema version is not supported")
         if aggregate.get("run_id") != run.get("run_id"):
             raise IntegrityError("aggregate belongs to another run")
@@ -613,10 +864,10 @@ class RunReportBuilder:
             raise IntegrityError("aggregate cases disagree with persisted judge results")
         aggregate_report_cases = [report_by_identity[identity] for identity in aggregate_identity]
         if run.get("benchmark_valid") is True:
+            scored_cases = RunReportBuilder._primary_scored_cases(aggregate_report_cases)
             mean_score = (
-                sum(float(item["score"]) for item in aggregate_report_cases)
-                / len(aggregate_report_cases)
-                if aggregate_report_cases
+                sum(float(item["score"]) for item in scored_cases) / len(scored_cases)
+                if scored_cases
                 else 0.0
             )
             if (
@@ -628,8 +879,7 @@ class RunReportBuilder:
             raise IntegrityError("pilot aggregate must not contain benchmark metrics")
 
     def _report_status(
-        self,
-        statuses: Sequence[StageStatus], aggregate: Mapping[str, object] | None
+        self, statuses: Sequence[StageStatus], aggregate: Mapping[str, object] | None
     ) -> str:
         if aggregate is not None:
             return "completed"
@@ -649,10 +899,7 @@ class RunReportBuilder:
             )
             if output.get("ordering_consistent") is False:
                 return "judge_validation_failed"
-        if any(
-            status.state in {StageState.FAILED, StageState.REJECTED}
-            for status in statuses
-        ):
+        if any(status.state in {StageState.FAILED, StageState.REJECTED} for status in statuses):
             return "failed"
         return "partial"
 
@@ -675,13 +922,10 @@ class RunReportBuilder:
             "model": status.packet.model.id,
             "result_id": None if status.result is None else status.result.result_id,
             "reused": (
-                status.result is not None
-                and status.result.provenance.get("cache_hit") is True
+                status.result is not None and status.result.provenance.get("cache_hit") is True
             ),
             "source_result_id": (
-                None
-                if status.result is None
-                else status.result.provenance.get("source_result_id")
+                None if status.result is None else status.result.provenance.get("source_result_id")
             ),
             "error": error,
         }
@@ -721,6 +965,7 @@ class RunReportBuilder:
     def _usage_by_role(statuses: Sequence[StageStatus]) -> Mapping[str, object]:
         values: dict[str, Counter[str]] = {
             "author": Counter(),
+            "optimizer": Counter(),
             "solver": Counter(),
             "judge": Counter(),
         }
@@ -729,6 +974,7 @@ class RunReportBuilder:
                 continue
             role = {
                 StageKind.AUTHOR: "author",
+                StageKind.OPTIMIZE: "optimizer",
                 StageKind.SOLVE: "solver",
                 StageKind.VALIDATE_JUDGE: "judge",
                 StageKind.JUDGE: "judge",
@@ -738,11 +984,9 @@ class RunReportBuilder:
             for key, value in status.result.usage.items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     values[role][str(key)] += value
-        return {role: dict(sorted(counter.items())) for role, counter in values.items()}
+        return {role: dict(sorted(counter.items())) for role, counter in values.items() if counter}
 
-    def _endpoint_summary(
-        self, statuses: Sequence[StageStatus]
-    ) -> Mapping[str, object]:
+    def _endpoint_summary(self, statuses: Sequence[StageStatus]) -> Mapping[str, object]:
         endpoints: dict[str, dict[str, object]] = {}
         for executor in self.repository.workspace.executors.values():
             if executor.type is not ExecutorType.ENDPOINT:
@@ -819,16 +1063,14 @@ class RunReportBuilder:
                         endpoint[usage_key] = int(endpoint[usage_key]) + value
                 latency = route.get("latency_seconds", 0.0)
                 if isinstance(latency, (int, float)) and not isinstance(latency, bool):
-                    endpoint["latency_seconds"] = float(
-                        endpoint["latency_seconds"]
-                    ) + float(latency)
+                    endpoint["latency_seconds"] = float(endpoint["latency_seconds"]) + float(
+                        latency
+                    )
                 queue_wait = route.get("queue_wait_seconds", 0.0)
-                if isinstance(queue_wait, (int, float)) and not isinstance(
-                    queue_wait, bool
-                ):
-                    endpoint["queue_wait_seconds"] = float(
-                        endpoint["queue_wait_seconds"]
-                    ) + float(queue_wait)
+                if isinstance(queue_wait, (int, float)) and not isinstance(queue_wait, bool):
+                    endpoint["queue_wait_seconds"] = float(endpoint["queue_wait_seconds"]) + float(
+                        queue_wait
+                    )
                 for summary_key in (
                     "peak_observed_endpoint_concurrency",
                     "peak_observed_pool_concurrency",
@@ -838,8 +1080,7 @@ class RunReportBuilder:
                         endpoint[summary_key] = max(int(endpoint[summary_key]), value)
         return {
             "configured_capacity": sum(
-                int(endpoint["configured_capacity"])
-                for endpoint in endpoints.values()
+                int(endpoint["configured_capacity"]) for endpoint in endpoints.values()
             ),
             "endpoints": [endpoints[key] for key in sorted(endpoints)],
         }
@@ -868,9 +1109,7 @@ class RunReportBuilder:
         values: dict[tuple[str, str], list[float]] = defaultdict(list)
         for case in cases:
             skill = str(case["skill_name"])
-            for criterion in _mapping_sequence(
-                case["criterion_scores"], "case criterion scores"
-            ):
+            for criterion in _mapping_sequence(case["criterion_scores"], "case criterion scores"):
                 values[(skill, str(criterion["id"]))].append(float(criterion["score"]))
         return [
             {
@@ -992,7 +1231,13 @@ def render_report_csv(report: RunReport) -> bytes:
             "case_id": case["case_id"],
             "case_title": case["case_title"],
             "case_hash": case["case_hash"],
+            "leakage_group": case["leakage_group"],
             "repetition": case["repetition"],
+            "comparison_arm": case["comparison_arm"],
+            "candidate_id": case["candidate_id"],
+            "strategy": case["strategy"],
+            "expected_response_tokens": case["expected_response_tokens"],
+            "expected_response_length_band": case["expected_response_length_band"],
             "author_model_details": models.get("author"),
             "solver_model_details": models.get("solver"),
             "judge_model_details": models.get("judge"),
@@ -1059,6 +1304,57 @@ def render_report_markdown(report: RunReport) -> bytes:
                 "",
             ]
         )
+    comparison = value.get("test_comparison")
+    if isinstance(comparison, Mapping):
+        interval = _mapping(comparison.get("delta_ci95", {}), "comparison interval")
+        lines.extend(
+            [
+                "## COPRO paired test comparison",
+                "",
+                "The original and optimized programs were judged on the same untouched test cases.",
+                "",
+                f"- Paired test results: `{comparison.get('paired_case_count')}`",
+                f"- Baseline mean: `{_format_score(comparison.get('baseline_mean_score'))}`",
+                f"- Optimized mean: `{_format_score(comparison.get('optimized_mean_score'))}`",
+                f"- Mean paired delta: `{_format_score(comparison.get('micro_case_delta'))}`",
+                f"- Macro skill delta: `{_format_score(comparison.get('macro_skill_delta'))}`",
+                f"- Cluster-bootstrap 95% interval: `[{_format_score(interval.get('lower'))}, {_format_score(interval.get('upper'))}]`",
+                f"- Skills improved / regressed / unchanged: `{comparison.get('positive_skill_count')} / {comparison.get('negative_skill_count')} / {comparison.get('unchanged_skill_count')}`",
+                "",
+                "| Skill | Pairs | Baseline | Optimized | Delta |",
+                "| --- | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for skill in _mapping_sequence(comparison.get("skills", []), "comparison skills"):
+            lines.append(
+                f"| {_table(skill['skill_name'])} | {skill['pair_count']} | "
+                f"{_format_score(skill['baseline_mean_score'])} | "
+                f"{_format_score(skill['optimized_mean_score'])} | "
+                f"{_format_signed_score(skill['delta'])} |"
+            )
+        lines.extend(
+            [
+                "",
+                "### Expected-response token bands",
+                "",
+                "Token bands use the exact configured solver tokenizer over the hidden expected response, without a chat template or special tokens.",
+                "",
+                "| Expected-response tokens | Pairs | Baseline | Optimized | Delta |",
+                "| --- | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        token_rows = _mapping_sequence(comparison.get("length_bands", []), "token bands")
+        if token_rows:
+            for band in token_rows:
+                lines.append(
+                    f"| `{band['expected_response_length_band']}` | {band['pair_count']} | "
+                    f"{_format_score(band['baseline_mean_score'])} | "
+                    f"{_format_score(band['optimized_mean_score'])} | "
+                    f"{_format_signed_score(band['delta'])} |"
+                )
+        else:
+            lines.append("| unavailable | 0 | — | — | — |")
+        lines.append("")
     cross_validation = value.get("cross_validation")
     if isinstance(cross_validation, Mapping):
         lines.extend(
@@ -1082,9 +1378,46 @@ def render_report_markdown(report: RunReport) -> bytes:
                 f"{candidate['case_count']} | {_format_score(candidate['mean_score'])} |"
             )
         lines.append("")
+    optimization = value.get("optimization")
+    if isinstance(optimization, Mapping):
+        final_program = optimization.get("final_program")
+        final_mapping = (
+            _mapping(final_program, "final optimized program")
+            if isinstance(final_program, Mapping)
+            else {}
+        )
+        rounds = optimization.get("rounds", [])
+        degraded_rounds = (
+            sum(
+                1
+                for raw_round in rounds
+                if isinstance(raw_round, Mapping)
+                and isinstance(raw_round.get("proposal_accounting"), Mapping)
+                and raw_round["proposal_accounting"].get("degraded") is True
+            )
+            if isinstance(rounds, Sequence)
+            and not isinstance(rounds, (str, bytes, bytearray))
+            else 0
+        )
+        lines.extend(
+            [
+                "## Optimization",
+                "",
+                f"- Strategy: `{optimization.get('strategy')}`",
+                f"- Final candidate: `{final_mapping.get('candidate_id')}`",
+                f"- Final program hash: `{final_mapping.get('program_hash')}`",
+                f"- Demonstrations: `{final_mapping.get('demonstration_count')}`",
+                f"- Search rounds: `{len(rounds) if isinstance(rounds, Sequence) else 0}`",
+                f"- Degraded proposal rounds: `{degraded_rounds}`",
+                f"- Compiled manifest: `{_artifact_id(final_mapping.get('compiled_manifest_artifact'))}`",
+                f"- Candidate lineage: `{_artifact_id(final_mapping.get('candidate_lineage_artifact'))}`",
+                f"- Search summary: `{_artifact_id(final_mapping.get('search_summary_artifact'))}`",
+                "",
+            ]
+        )
     lines.extend(["## Models", ""])
-    for role in ("author", "solver", "judge"):
-        model = _mapping(_mapping(value["models"], "report models")[role], f"{role} model")
+    for role, raw_model in _mapping(value["models"], "report models").items():
+        model = _mapping(raw_model, f"{role} model")
         lines.append(
             f"- {role.title()}: configured `{model.get('configured_name')}`, observed "
             f"`{model.get('observed_name')}`, executor `{model.get('executor')}`, "
@@ -1108,9 +1441,7 @@ def render_report_markdown(report: RunReport) -> bytes:
         lines.append(
             f"| {stage['stage']} | {stage['executed_this_run']} | {stage['reused_this_run']} |"
         )
-    endpoint_execution = _mapping(
-        value.get("endpoint_execution", {}), "endpoint execution"
-    )
+    endpoint_execution = _mapping(value.get("endpoint_execution", {}), "endpoint execution")
     endpoint_rows = _mapping_sequence(
         endpoint_execution.get("endpoints", []), "endpoint execution endpoints"
     )
@@ -1161,16 +1492,21 @@ def render_report_markdown(report: RunReport) -> bytes:
             "",
             "## Cases",
             "",
-            "| Skill | Case | Split | Repetition | Score | Critical violations |",
-            "| --- | --- | --- | ---: | ---: | ---: |",
+            "| Skill | Case | Arm | Tokens | Split | Repetition | Score | Critical violations |",
+            "| --- | --- | --- | ---: | --- | ---: | ---: | ---: |",
         ]
     )
     filenames = _case_filenames(_case_sequence(report))
     for case in _case_sequence(report):
-        key = (str(case["case_id"]), int(case["repetition"]))
+        key = (
+            str(case["case_id"]),
+            int(case["repetition"]),
+            str(case["comparison_arm"]),
+        )
         lines.append(
             f"| {_table(case['skill_name'])} | "
             f"[{_table(case['case_title'])}](cases/{filenames[key]}) | "
+            f"{case['comparison_arm']} | {case.get('expected_response_tokens') or '—'} | "
             f"{_table(case['split'])} | {case['repetition']} | "
             f"{_format_score(case['score'])} | {len(case['hard_failures'])} |"
         )
@@ -1223,6 +1559,11 @@ def render_case_markdown(report: RunReport, case: Mapping[str, object]) -> bytes
         f"- Skill: `{case['skill_name']}`",
         f"- Split: `{case['split']}`",
         f"- Repetition: `{case['repetition']}`",
+        f"- Comparison arm: `{case['comparison_arm']}`",
+        f"- Candidate: `{case['candidate_id']}`",
+        f"- Strategy: `{case['strategy']}`",
+        f"- Expected-response tokens: `{case.get('expected_response_tokens')}`",
+        f"- Expected-response token band: `{case.get('expected_response_length_band')}`",
         f"- Score: `{_format_score(case['score'])}`",
         "",
         "## Prompt",
@@ -1292,21 +1633,71 @@ def _render_bundle(report: RunReport) -> dict[str, bytes]:
         "results.csv": render_report_csv(report),
         "results.json": render_report_json(report),
     }
+    comparison = report.value.get("test_comparison")
+    if isinstance(comparison, Mapping):
+        for field, filename in (
+            ("cases", "copro-case-comparison.csv"),
+            ("skills", "copro-skill-comparison.csv"),
+            ("length_bands", "copro-token-band-comparison.csv"),
+            ("criteria", "copro-criterion-comparison.csv"),
+        ):
+            rows = _mapping_sequence(comparison.get(field, []), f"comparison {field}")
+            if rows:
+                files[f"tables/{filename}"] = _render_rows_csv(rows)
+    token_measurements = report.value.get("expected_response_token_measurements")
+    if isinstance(token_measurements, Mapping):
+        files["tables/expected-response-token-counts.json"] = (
+            json.dumps(
+                json_value(token_measurements),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
     for case in cases:
-        key = (str(case["case_id"]), int(case["repetition"]))
+        key = (
+            str(case["case_id"]),
+            int(case["repetition"]),
+            str(case["comparison_arm"]),
+        )
         files[f"cases/{filenames[key]}"] = render_case_markdown(report, case)
     return dict(sorted(files.items()))
 
 
+def _render_rows_csv(rows: Sequence[Mapping[str, object]]) -> bytes:
+    columns = tuple(sorted({str(key) for row in rows for key in row}))
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(
+            {
+                column: (
+                    _compact_json(row.get(column))
+                    if isinstance(row.get(column), (Mapping, Sequence))
+                    and not isinstance(row.get(column), str)
+                    else _safe_cell(row.get(column))
+                )
+                for column in columns
+            }
+        )
+    return output.getvalue().encode("utf-8")
+
+
 def _case_filenames(
     cases: Sequence[Mapping[str, object]],
-) -> Mapping[tuple[str, int], str]:
+) -> Mapping[tuple[str, int, str], str]:
     counts = Counter(str(case["case_id"]) for case in cases)
     return {
-        (str(case["case_id"]), int(case["repetition"])): (
+        (
+            str(case["case_id"]),
+            int(case["repetition"]),
+            str(case["comparison_arm"]),
+        ): (
             f"{case['case_id']}.md"
             if counts[str(case["case_id"])] == 1
-            else f"{case['case_id']}-repetition-{case['repetition']}.md"
+            else (f"{case['case_id']}-{case['comparison_arm']}-repetition-{case['repetition']}.md")
         )
         for case in cases
     }
@@ -1320,9 +1711,7 @@ def _published(
     changed: bool,
 ) -> PublishedReport:
     case_paths = tuple(
-        destination / relative
-        for relative in sorted(files)
-        if relative.startswith("cases/")
+        destination / relative for relative in sorted(files) if relative.startswith("cases/")
     )
     return PublishedReport(
         report.run_id,
@@ -1351,9 +1740,7 @@ def _case_sequence(report: RunReport) -> list[Mapping[str, object]]:
 
 
 def _compact_json(value: object) -> str:
-    return json.dumps(
-        json_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    return json.dumps(json_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _safe_cell(value: object) -> object:
@@ -1374,6 +1761,82 @@ def _format_score(value: object) -> str:
     if value is None:
         return "null"
     return f"{float(value):.6f}".rstrip("0").rstrip(".")
+
+
+def _format_signed_score(value: object) -> str:
+    if value is None:
+        return "null"
+    return f"{float(value):+.6f}".rstrip("0").rstrip(".")
+
+
+def _artifact_id(value: object) -> object:
+    if isinstance(value, Mapping):
+        return value.get("content_id")
+    return None
+
+
+def _paired_summary(
+    rows: Sequence[Mapping[str, object]],
+    key: str,
+    *,
+    band_order: bool = False,
+) -> list[Mapping[str, object]]:
+    grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[_string(row.get(key), f"paired summary {key}")].append(row)
+    result = [
+        {
+            key: name,
+            "pair_count": len(items),
+            "baseline_mean_score": statistics.fmean(
+                float(item["baseline_score"]) for item in items
+            ),
+            "optimized_mean_score": statistics.fmean(
+                float(item["optimized_score"]) for item in items
+            ),
+            "delta": statistics.fmean(float(item["delta"]) for item in items),
+        }
+        for name, items in grouped.items()
+    ]
+    if band_order:
+        result.sort(key=lambda item: _token_band_lower(str(item[key])))
+    else:
+        result.sort(key=lambda item: (-float(item["delta"]), str(item[key])))
+    return result
+
+
+def _token_band_lower(value: str) -> int:
+    prefix = value.split("-", 1)[0].removesuffix("+")
+    try:
+        return int(prefix)
+    except ValueError as error:
+        raise IntegrityError(f"invalid expected-response token band {value!r}") from error
+
+
+def _cluster_bootstrap_interval(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    samples: int = 2000,
+) -> tuple[float | None, float | None]:
+    by_group: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        by_group[_string(row.get("leakage_group"), "comparison leakage group")].append(
+            float(row["delta"])
+        )
+    groups = sorted(by_group)
+    if len(groups) < 2:
+        return None, None
+    seed = int(content_hash({"groups": by_group, "samples": samples})[-16:], 16)
+    generator = random.Random(seed)
+    estimates = []
+    for _ in range(samples):
+        sampled = [generator.choice(groups) for _ in groups]
+        deltas = [delta for group in sampled for delta in by_group[group]]
+        estimates.append(statistics.fmean(deltas))
+    estimates.sort()
+    lower_index = max(0, int(samples * 0.025))
+    upper_index = min(samples - 1, int(samples * 0.975) - 1)
+    return estimates[lower_index], estimates[upper_index]
 
 
 def _configuration_id(lock: Mapping[str, object]) -> object:

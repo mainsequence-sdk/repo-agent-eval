@@ -25,10 +25,13 @@ flowchart TB
     end
 
     subgraph Runtime[Execution definition]
-        Executors[Executors]
-        Models[Author, solver, and judge models]
-        Stages[Stage bindings and budgets]
-        Experiments[Baseline or optimization configuration]
+        Executors[Executors and endpoint routes]
+        Deployments[Semantic deployments]
+        Models[Role-specific model profiles]
+        Stages[Stage reuse and budgets]
+        Experiments[Baseline and optimization arms]
+        Comparisons[Cross-model comparisons]
+        Recorder[Optional recorder and MLflow destination]
     end
 
     Source --> Snapshot[Immutable source snapshots]
@@ -39,6 +42,8 @@ flowchart TB
     Cases --> Splits
     Cases --> Fixtures
     Runtime --> Lock[Content-addressed experiment lock]
+    Runtime --> Recorder
+    Lock --> Recorder
     Catalog --> Ready{Readiness gate}
     Splits --> Ready
     Fixtures --> Ready
@@ -60,8 +65,10 @@ integrity check can be locked.
 | Case bank | `evaluation.cases.directory` | Packages validate, retain provenance, and meet capability depth and diversity floors. |
 | Splits | `evaluation.splits` | Whole leakage groups map deterministically to train, test, or challenge. |
 | Judge validation | `evaluation.judge.validation` | Controlled training-case fixtures cover every required label and the judge preserves their ordinal quality ordering. |
-| Execution | `executors`, `models`, and `stages` | Every stage has a valid executor, model where required, and finite budget. |
-| Run definition | `experiments` | The selected experiment is either an evaluation or an optimization based on an evaluation. |
+| Execution | `executors`, `deployments`, `models`, and `stages` | Every profile resolves to an eligible deployment route and every stage has finite reuse and budget policy. |
+| Run definition | `experiments` | The selected arm binds solver and judge profiles, plus an optimizer profile for COPRO. |
+| Comparison | `comparisons` | Named baseline and optimization arms share one compatible benchmark and fixed-judge comparison group. |
+| Recording | `recording` and `recorders` | Optional projection destination and privacy policies validate independently from experiment identity. |
 
 ## Versioned workspace layout
 
@@ -95,15 +102,18 @@ and reports do not belong in this directory. See the
 3. Ask the configured author stage to build the capability catalog, case bank,
    grouped splits, and judge-validation set.
 4. Run `validate` and `inspect`. Address every reported blocker.
-5. Use a pilot while the corpus is incomplete; treat its output only as
+5. If recording is enabled, run `recorder doctor` against the configured
+   destination.
+6. Use a pilot while the corpus is incomplete; treat its output only as
    diagnostics.
-6. Run the baseline benchmark, an optimization experiment, or both after the
+7. Run the baseline benchmark, an optimization experiment, or both after the
    scored-run readiness gate passes.
-7. Compare only results whose locked evaluation identities are compatible.
+8. Compare only results whose locked evaluation identities are compatible.
 
 Use the [getting-started guide](getting-started.md) for commands and a complete
 configuration example. Use [target sources](target-sources.md) for snapshot and
 reference-repository rules. The focused guides cover
 [workspace configuration](workspace-configuration.md),
+[model arms and cross-model comparisons](model-comparisons.md),
 [case authoring](case-authoring.md), and
 [running an experiment](running-an-experiment.md).

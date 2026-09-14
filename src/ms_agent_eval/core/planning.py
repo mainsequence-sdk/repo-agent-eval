@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ms_agent_eval.programs.dspy.engine import (
@@ -19,6 +19,7 @@ from .evaluation import (
     CapabilityCatalog,
     CaseBank,
     SplitManifest,
+    deterministic_group_k_fold,
     validate_deterministic_splits,
     validate_case_authoring_provenance,
     validate_case_bank,
@@ -33,6 +34,7 @@ from .snapshots import (
 from .sources import GitHubSourceProvider
 from .workspace import (
     AuthoringSourceConfiguration,
+    CoproConfiguration,
     ExperimentConfiguration,
     ExperimentMode,
     ModelConfiguration,
@@ -40,6 +42,201 @@ from .workspace import (
     WorkspaceRepository,
     resolve_role_models,
 )
+
+
+def _optimization_preflight(
+    repository: WorkspaceRepository,
+    context: SnapshotContext,
+    case_bank: CaseBank,
+    splits: SplitManifest,
+) -> Mapping[str, object]:
+    workspace = repository.workspace
+    plans: dict[str, object] = {}
+    train = tuple(case for case in case_bank.cases if splits.split_for(case) == "train")
+    test = tuple(case for case in case_bank.cases if splits.split_for(case) == "test")
+    judge_repetitions = workspace.evaluation.judge.repetitions
+
+    def output_limit(experiment_id: str, role: str) -> int | None:
+        model = resolve_role_models(workspace, experiment_id).get(role)
+        if model is None:
+            return None
+        parameters = model.parameters
+        value = parameters.get("max_tokens", parameters.get("max_completion_tokens"))
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def validate_budget(
+        experiment_id: str,
+        strategy: str,
+        required_calls: Mapping[str, int],
+        configured_budget: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        stage_by_role = {"optimizer": "optimize", "solver": "solve", "judge": "judge"}
+        configured_calls = {
+            role: int(getattr(configured_budget[role], "model_calls")) for role in required_calls
+        }
+        configured_tokens = {
+            role: int(getattr(configured_budget[role], "tokens")) for role in required_calls
+        }
+        output_tokens = {
+            role: (
+                None
+                if output_limit(experiment_id, role) is None
+                else required_calls[role] * int(output_limit(experiment_id, role))
+            )
+            for role in required_calls
+        }
+        short_calls = {
+            role: {"required": required_calls[role], "configured": configured_calls[role]}
+            for role in required_calls
+            if configured_calls[role] < required_calls[role]
+        }
+        short_tokens = {
+            role: {
+                "required_maximum_output_tokens": output_tokens[role],
+                "configured": configured_tokens[role],
+            }
+            for role in required_calls
+            if (
+                output_tokens[role] is not None
+                and configured_tokens[role] < int(output_tokens[role])
+            )
+            or configured_tokens[role] < workspace.stages[stage_by_role[role]].budget.tokens
+        }
+        if short_calls or short_tokens:
+            raise PreflightError(
+                f"{strategy} experiment {experiment_id!r} has insufficient hard budget: "
+                f"model_calls={short_calls}, tokens={short_tokens}"
+            )
+        return {
+            "configured_model_calls": configured_calls,
+            "configured_tokens": configured_tokens,
+            "planned_maximum_output_tokens": output_tokens,
+        }
+
+    for experiment_id, experiment in workspace.experiments.items():
+        if experiment.mode is not ExperimentMode.OPTIMIZE:
+            continue
+        optimizer = experiment.optimizer
+        budget = experiment.budget
+        folds = experiment.cross_validation
+        assert optimizer is not None and budget is not None and folds is not None
+        if isinstance(optimizer, CoproConfiguration):
+            skills = (
+                sorted(context.skill_contexts)
+                if optimizer.skills == "all"
+                else list(optimizer.skills)
+            )
+            unknown = sorted(set(skills) - set(context.skill_contexts))
+            if unknown:
+                raise PreflightError(
+                    f"COPRO experiment {experiment_id!r} targets unknown skills: {unknown}"
+                )
+            groups_by_skill = {
+                skill: sorted({case.group for case in train if case.skill == skill})
+                for skill in skills
+            }
+            insufficient = {
+                skill: groups
+                for skill, groups in groups_by_skill.items()
+                if len(groups) < folds.folds
+            }
+            if insufficient:
+                detail = ", ".join(
+                    f"{skill}={len(groups)} groups"
+                    for skill, groups in sorted(insufficient.items())
+                )
+                raise PreflightError(
+                    f"COPRO experiment {experiment_id!r} requires at least {folds.folds} "
+                    f"training leakage groups per selected skill; {detail}"
+                )
+            target_count = int(optimizer.optimize_prompt) + len(skills)
+            search_scopes = folds.folds + 1
+            proposal_calls = search_scopes * optimizer.depth * target_count
+            candidate_evaluations = 0
+            group_to_fold = {
+                item.group: item.fold
+                for item in deterministic_group_k_fold(train, folds=folds.folds, seed=folds.seed)
+            }
+            fitting_sets = [
+                tuple(case for case in train if group_to_fold[case.group] != fold)
+                for fold in range(folds.folds)
+            ] + [train]
+            missing_fold_targets = {
+                f"fold-{fold}": [
+                    skill
+                    for skill in skills
+                    if not any(case.skill == skill for case in fitting_sets[fold])
+                ]
+                for fold in range(folds.folds)
+            }
+            missing_fold_targets = {
+                fold: values for fold, values in missing_fold_targets.items() if values
+            }
+            if missing_fold_targets:
+                raise PreflightError(
+                    f"COPRO experiment {experiment_id!r} has no fitting cases for selected "
+                    f"skills in one or more outer folds: {missing_fold_targets}"
+                )
+            for fitting in fitting_sets:
+                per_round = (len(fitting) if optimizer.optimize_prompt else 0) + sum(
+                    sum(case.skill == skill for case in fitting) for skill in skills
+                )
+                candidate_evaluations += optimizer.depth * optimizer.breadth * per_round
+            # Final COPRO validation is paired: the untouched test cases are
+            # solved once with the original program and once with the frozen
+            # optimized program, then judged under the same locked rubric.
+            final_test_calls = 2 * len(test)
+            solver_calls = candidate_evaluations + len(train) + final_test_calls
+            judge_calls = (
+                candidate_evaluations + len(train) + final_test_calls
+            ) * judge_repetitions
+            required = {
+                "optimizer": proposal_calls,
+                "solver": solver_calls,
+                "judge": judge_calls,
+            }
+            assert budget.optimizer is not None
+            budget_plan = validate_budget(
+                experiment_id,
+                "COPRO",
+                required,
+                {
+                    "optimizer": budget.optimizer,
+                    "solver": budget.solver,
+                    "judge": budget.judge,
+                },
+            )
+            plans[experiment_id] = {
+                "strategy": "copro",
+                "targets": {"prompt": optimizer.optimize_prompt, "skills": skills},
+                "folds": folds.folds,
+                "breadth": optimizer.breadth,
+                "depth": optimizer.depth,
+                "planned_upper_bound": required,
+                **budget_plan,
+                "training_groups_by_skill": {
+                    skill: len(groups) for skill, groups in groups_by_skill.items()
+                },
+            }
+        else:
+            candidates = len(optimizer.k_values) + 1
+            solver_calls = candidates * len(train) + len(test)
+            judge_calls = (solver_calls) * judge_repetitions
+            required = {"solver": solver_calls, "judge": judge_calls}
+            budget_plan = validate_budget(
+                experiment_id,
+                "labeled_few_shot",
+                required,
+                {"solver": budget.solver, "judge": budget.judge},
+            )
+            plans[experiment_id] = {
+                "strategy": "labeled_few_shot",
+                "folds": folds.folds,
+                "candidates": candidates,
+                "planned_upper_bound": required,
+                **budget_plan,
+            }
+    return plans
 
 
 @dataclass(frozen=True)
@@ -70,6 +267,10 @@ class ExperimentLock:
     capability_catalog_hash: str
     solver_program_hash: str
     judge_program_hash: str
+    benchmark_revision_id: str
+    comparison_group_id: str
+    comparison_id: str
+    arm_id: str
     effective_configuration: Mapping[str, object]
     models: Mapping[str, ResolvedRoleModel]
     cases: tuple[CaseLock, ...]
@@ -88,6 +289,7 @@ class CompiledWorkspace:
     splits: SplitManifest
     judge_validation: JudgeValidationCorpus
     validation: Mapping[str, object]
+    lock_overrides: Mapping[str, ExperimentLock] = field(default_factory=dict, repr=False)
 
     def experiment_lock(
         self,
@@ -95,6 +297,9 @@ class CompiledWorkspace:
         *,
         environment: Mapping[str, str] | None = None,
     ) -> ExperimentLock:
+        override = self.lock_overrides.get(experiment_id)
+        if override is not None:
+            return override
         workspace = self.repository.workspace
         try:
             experiment = workspace.experiments[experiment_id]
@@ -127,6 +332,7 @@ class CompiledWorkspace:
         referenced_stage_ids = (
             "author",
             "validate_judge",
+            *(("optimize",) if isinstance(experiment.optimizer, CoproConfiguration) else ()),
             "solve",
             "judge",
             "fit",
@@ -134,12 +340,21 @@ class CompiledWorkspace:
             "aggregate",
         )
         referenced_executor_ids = {
-            workspace.stages[stage_id].executor for stage_id in referenced_stage_ids
+            item.executor_id for item in models.values()
+        } | {
+            stage.executor
+            for stage_id, stage in workspace.stages.items()
+            if stage_id in referenced_stage_ids and stage.executor is not None
         }
         referenced_model_ids = {
-            stage.model
-            for stage in workspace.stages.values()
-            if stage.model is not None
+            experiment.roles.solver,
+            experiment.roles.judge,
+            *(tuple([experiment.roles.optimizer]) if experiment.roles.optimizer is not None else ()),
+            *(
+                tuple([workspace.stages["author"].model])
+                if workspace.stages["author"].model is not None
+                else ()
+            ),
         }
         effective_configuration = {
             "experiment": experiment,
@@ -150,21 +365,70 @@ class CompiledWorkspace:
             ),
             "runtime": workspace.runtime(experiment_id),
             "judge": workspace.evaluation.judge,
-            "stages": {
-                stage_id: workspace.stages[stage_id]
-                for stage_id in referenced_stage_ids
-            },
+            "stages": {stage_id: workspace.stages[stage_id] for stage_id in referenced_stage_ids},
             "executors": {
                 executor_id: workspace.executors[executor_id]
                 for executor_id in sorted(referenced_executor_ids)
             },
+            "deployments": {
+                model.deployment_id: workspace.deployments[model.deployment_id]
+                for model in models.values()
+            },
             "models": {
-                model_id: workspace.models[model_id]
-                for model_id in sorted(referenced_model_ids)
+                model_id: workspace.models[model_id] for model_id in sorted(referenced_model_ids)
             },
         }
+        benchmark_revision_id = content_hash(
+            {
+                "schema_version": 1,
+                "source_snapshot_hash": self.context.snapshot_hash,
+                "case_bank_hash": self.case_bank.content_hash,
+                "split_hash": self.splits.content_hash,
+                "judge_validation_hash": self.judge_validation.content_hash,
+                "authoring_instructions_hash": authoring_hash,
+                "capability_catalog_hash": catalog_hash,
+                "solver_program_hash": solver_hash,
+                "judge_program_hash": judge_hash,
+                "cases": cases,
+                "runtime": workspace.runtime(experiment_id),
+                "judge_policy": workspace.evaluation.judge,
+                "aggregation_implementation": "run-summary-v4",
+            }
+        )
+        comparison_group_id = content_hash(
+            {
+                "schema_version": 1,
+                "benchmark_revision_id": benchmark_revision_id,
+                "judge_model": models["judge"].content_hash,
+                "judge_program_hash": judge_hash,
+                "judge_repetitions": workspace.evaluation.judge.repetitions,
+            }
+        )
+        arm_id = content_hash(
+            {
+                "schema_version": 1,
+                "comparison_group_id": comparison_group_id,
+                "roles": experiment.roles,
+                "models": models,
+                "mode": experiment.mode.value,
+                "optimizer": experiment.optimizer,
+                "solver_repetitions": experiment.repetitions,
+            }
+        )
+        comparison_id = next(
+            (
+                comparison.id
+                for comparison in workspace.comparisons.values()
+                if experiment_id
+                in (
+                    *comparison.baseline_experiments,
+                    *comparison.optimization_experiments,
+                )
+            ),
+            "all-compatible-arms",
+        )
         identity = {
-            "schema_version": 6,
+            "schema_version": 8,
             "id": f"{workspace.id}-{experiment.id}",
             "workspace_id": workspace.id,
             "mode": experiment.mode.value,
@@ -177,6 +441,9 @@ class CompiledWorkspace:
             "capability_catalog_hash": catalog_hash,
             "solver_program_hash": solver_hash,
             "judge_program_hash": judge_hash,
+            "benchmark_revision_id": benchmark_revision_id,
+            "comparison_group_id": comparison_group_id,
+            "arm_id": arm_id,
             "effective_configuration": effective_configuration,
             "models": models,
             "cases": cases,
@@ -185,6 +452,7 @@ class CompiledWorkspace:
         return ExperimentLock(
             **identity,
             workspace_hash=workspace.identity_hash,
+            comparison_id=comparison_id,
             content_hash=content_hash(identity),
         )
 
@@ -248,12 +516,8 @@ class CompiledWorkspace:
                     "status": self.validation["capability_catalog_status"],
                     "missing_skills": self.validation["missing_catalog_skills"],
                     "capabilities": self.validation["capability_count"],
-                    "satisfied_capabilities": self.validation[
-                        "satisfied_capability_count"
-                    ],
-                    "missing_primary_cases": self.validation[
-                        "missing_primary_case_count"
-                    ],
+                    "satisfied_capabilities": self.validation["satisfied_capability_count"],
+                    "missing_primary_cases": self.validation["missing_primary_case_count"],
                 },
                 "coverage_by_skill": self.validation["coverage_by_skill"],
                 "coverage_gaps": self.validation["coverage_gaps"],
@@ -294,11 +558,21 @@ class CompiledWorkspace:
                     "lock_id": lock.id,
                     "lock_hash": lock.content_hash,
                     "experiment_revision_id": lock.content_hash,
+                    "benchmark_revision_id": lock.benchmark_revision_id,
+                    "comparison_group_id": lock.comparison_group_id,
+                    "comparison_id": lock.comparison_id,
+                    "arm_id": lock.arm_id,
                     "revision": f"{key}@{lock.content_hash.removeprefix('sha256:')[:12]}",
                     "solver_program_hash": lock.solver_program_hash,
                     "solver_model": json_value(lock.models["solver"]),
+                    "optimizer": json_value(lock.configuration.optimizer),
+                    "optimizer_model": (
+                        json_value(lock.models["optimizer"]) if "optimizer" in lock.models else None
+                    ),
+                    "optimization_preflight": self.validation.get("optimization", {}).get(key),
                     "runtime": json_value(workspace.runtime(key)),
-                    "projected_case_runs": len(lock.cases),
+                    "projected_case_runs": len(lock.cases)
+                    * (2 if isinstance(lock.configuration.optimizer, CoproConfiguration) else 1),
                     "reuse": {
                         stage_id: json_value(configuration.reuse)
                         for stage_id, configuration in workspace.stages.items()
@@ -307,6 +581,7 @@ class CompiledWorkspace:
                 for key, lock in locks.items()
             },
             "executors": json_value(workspace.executors),
+            "deployments": json_value(workspace.deployments),
             "stages": json_value(workspace.stages),
         }
 
@@ -426,29 +701,27 @@ def compile_workspace(
     )
     splits = SplitManifest.load(repository.split_file, case_bank)
     _validate_splits(repository, splits)
-    judge_validation = JudgeValidationCorpus.load(
-        repository.judge_validation_root, case_bank
-    )
-    validation = validate_case_bank(
-        case_bank,
-        capability_catalog=capability_catalog,
-        skill_ids=tuple(context.skill_contexts),
-        split_manifest=splits,
-        source_paths=context.source_paths,
-        minimum_cases_per_skill=(
-            repository.workspace.evaluation.cases.coverage.minimum_cases_per_skill
-        ),
-        minimum_leakage_groups_per_skill=(
-            repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
-        ),
+    judge_validation = JudgeValidationCorpus.load(repository.judge_validation_root, case_bank)
+    validation = dict(
+        validate_case_bank(
+            case_bank,
+            capability_catalog=capability_catalog,
+            skill_ids=tuple(context.skill_contexts),
+            split_manifest=splits,
+            source_paths=context.source_paths,
+            minimum_cases_per_skill=(
+                repository.workspace.evaluation.cases.coverage.minimum_cases_per_skill
+            ),
+            minimum_leakage_groups_per_skill=(
+                repository.workspace.evaluation.cases.coverage.minimum_leakage_groups_per_skill
+            ),
+        )
     )
     if allow_incomplete_coverage:
         if capability_catalog.status != "complete":
             raise PreflightError("pilot runs require a complete capability catalog")
         if validation["missing_catalog_skills"]:
-            raise PreflightError(
-                "pilot runs require capability entries for every configured skill"
-            )
+            raise PreflightError("pilot runs require capability entries for every configured skill")
         if not case_bank.cases:
             raise PreflightError("pilot runs require at least one authored case")
     elif validation["status"] != "valid":
@@ -458,6 +731,12 @@ def compile_workspace(
         )
     if snapshot.target_specification_hash != repository.target_specification().specification_hash:
         raise IntegrityError("snapshot was not built from the active workspace manifest")
+    validation["optimization"] = _optimization_preflight(
+        repository,
+        context,
+        case_bank,
+        splits,
+    )
     return CompiledWorkspace(
         repository,
         snapshot,
@@ -539,8 +818,7 @@ def inspect_workspace(
         blockers.append("case bank has no authored cases")
     elif validation["coverage_gaps"]:
         blockers.append(
-            "case bank does not satisfy the configured per-skill case and "
-            "leakage-group minima"
+            "case bank does not satisfy the configured per-skill case and leakage-group minima"
         )
     if validation["capability_gaps"]:
         blockers.append("case bank does not satisfy required primary capability coverage")
@@ -569,14 +847,14 @@ def inspect_workspace(
 
     workspace = repository.workspace
     first_experiment = next(iter(workspace.experiments))
-    judge_stage = workspace.stages["judge"]
-    solve_stage = workspace.stages["solve"]
-    assert judge_stage.model is not None and solve_stage.model is not None
+    first_configuration = workspace.experiments[first_experiment]
     judge_model = (
         json_value(resolved[first_experiment]["judge"])
         if first_experiment in resolved
         else _unresolved_model(
-            workspace.models[judge_stage.model], workspace.executors[judge_stage.executor]
+            first_configuration.roles.judge,
+            workspace.models[first_configuration.roles.judge],
+            workspace,
         )
     )
     split_counts = Counter(splits.split_for(case) for case in case_bank.cases)
@@ -623,9 +901,7 @@ def inspect_workspace(
             "split_counts": dict(sorted(split_counts.items())),
             "split_hash": splits.content_hash,
             "minimum_cases_per_skill": validation["minimum_cases_per_skill"],
-            "minimum_leakage_groups_per_skill": validation[
-                "minimum_leakage_groups_per_skill"
-            ],
+            "minimum_leakage_groups_per_skill": validation["minimum_leakage_groups_per_skill"],
             "capability_catalog": {
                 "path": repository.capability_catalog_path.as_posix(),
                 "content_hash": validation["capability_catalog_hash"],
@@ -691,8 +967,9 @@ def inspect_workspace(
                     json_value(resolved[experiment_id]["solver"])
                     if experiment_id in resolved
                     else _unresolved_model(
-                        workspace.models[solve_stage.model],
-                        workspace.executors[solve_stage.executor],
+                        experiment.roles.solver,
+                        workspace.models[experiment.roles.solver],
+                        workspace,
                     )
                 ),
                 "model_resolution_error": unresolved_models.get(experiment_id),
@@ -701,6 +978,7 @@ def inspect_workspace(
                     len(case_bank.cases) * experiment.repetitions
                     if experiment.mode is ExperimentMode.EVALUATE
                     else sum(splits.split_for(case) == "test" for case in case_bank.cases)
+                    * (2 if isinstance(experiment.optimizer, CoproConfiguration) else 1)
                 ),
                 "reuse": {
                     stage_id: json_value(configuration.reuse)
@@ -723,27 +1001,40 @@ def inspect_workspace(
             }
             for executor_id, executor in workspace.executors.items()
         },
+        "deployments": json_value(workspace.deployments),
         "stages": json_value(workspace.stages),
     }
 
 
 def _unresolved_model(
-    configuration: ModelConfiguration, executor
+    profile_id: str,
+    configuration: ModelConfiguration,
+    workspace,
 ) -> Mapping[str, object]:  # type: ignore[no-untyped-def]
+    deployment = workspace.deployments[configuration.deployment]
+    executor = workspace.executors[deployment.executor]
     return {
         "status": "unresolved",
+        "profile_id": profile_id,
+        "deployment_id": deployment.id,
         "executor": executor.id,
         "provider": executor.adapter,
-        "name": configuration.model,
-        "deployment_revision": configuration.deployment_revision,
+        "name": deployment.model,
+        "deployment_revision": deployment.revision,
         "endpoints": [
             {
                 "id": endpoint.id,
                 "base_url": endpoint.base_url,
                 "max_concurrent_requests": endpoint.max_concurrent_requests,
                 "api_key_env": endpoint.api_key_env,
+                "route_model": (
+                    endpoint.route(deployment.id).model
+                    if endpoint.route(deployment.id) is not None
+                    else None
+                ),
             }
             for endpoint in executor.endpoints
+            if endpoint.route(deployment.id) is not None
         ],
         "reasoning_effort": configuration.reasoning_effort,
         "parameters": dict(configuration.parameters),

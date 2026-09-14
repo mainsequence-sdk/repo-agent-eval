@@ -28,6 +28,8 @@ class _Response(BytesIO):
 def _model() -> ResolvedRoleModel:
     return ResolvedRoleModel(
         role="solver",
+        profile_id="solver",
+        deployment_id="solver-deployment",
         executor_id="remote-models",
         provider="openai_compatible",
         model="solver-model",

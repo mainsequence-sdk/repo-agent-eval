@@ -49,9 +49,7 @@ class _FixedPreflight:
         return TokenPreflightResult(
             status=status,  # type: ignore[arg-type]
             reason=(
-                "exact_endpoint_tokenization"
-                if status != "skipped"
-                else "tokenize_unsupported"
+                "exact_endpoint_tokenization" if status != "skipped" else "tokenize_unsupported"
             ),
             context_window=context,
             input_tokens=input_tokens,
@@ -74,20 +72,28 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
             "base_url": "http://localhost:8000/v1",
             "max_concurrent_requests": 2,
             "api_key_env": "TEST_API_KEY",
+            "routes": [
+                {"deployment": "solver-test", "model": "solver"},
+                {"deployment": "optimizer-test", "model": "optimizer"},
+                {"deployment": "judge-test", "model": "judge"},
+            ],
         },
         {
             "id": "secondary",
             "base_url": "http://localhost:8001/v1",
             "max_concurrent_requests": 1,
             "api_key_env": "TEST_API_KEY",
+            "routes": [
+                {"deployment": "solver-test", "model": "solver"},
+                {"deployment": "optimizer-test", "model": "optimizer"},
+                {"deployment": "judge-test", "model": "judge"},
+            ],
         },
     ]
     payload["models"]["solver"]["parameters"]["max_tokens"] = 100
     payload["models"]["judge"]["parameters"]["max_tokens"] = 50
     payload["experiments"]["baseline"]["repetitions"] = 3
-    repository.workspace_file.write_text(
-        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
-    )
+    repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(repository.workspace_file)
     lock, directory = create_snapshot(
         repository,
@@ -122,6 +128,8 @@ def test_preflight_calculates_exact_request_fit_and_usable_concurrency(
     assert report["status"] == "fits"
     assert report["generation_calls"] == 0
     stages = {item["stage"]: item for item in report["stages"]}
+    assert stages["optimize"]["state"] == "not_applicable"
+    assert stages["optimize"]["reason"] == "strategy_does_not_use_optimizer_calls"
     validation = stages["validate_judge"]
     assert validation["logical_request_count"] == 5
     assert validation["unique_rendered_request_count"] == 5

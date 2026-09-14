@@ -24,3 +24,7 @@ class ResolutionError(AgentEvalError):
 
 class PreflightError(AgentEvalError):
     pass
+
+
+class RecordingError(AgentEvalError):
+    """An external recorder projection or delivery operation failed."""

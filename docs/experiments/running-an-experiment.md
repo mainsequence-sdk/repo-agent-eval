@@ -6,12 +6,15 @@ Run static checks before spending model capacity:
 uv run ms-agent-eval validate --workspace workspace.yaml
 uv run ms-agent-eval inspect --workspace workspace.yaml
 uv run ms-agent-eval preflight baseline --workspace workspace.yaml
+uv run --extra mlflow ms-agent-eval recorder doctor --workspace workspace.yaml
 ```
 
 `inspect` reports resolved commits and snapshots, selected instructions,
 coverage gaps, case projection hashes, split integrity, model deployment
 identities, reuse policies, judge-validation configuration, budgets, and experiment
-revision hashes.
+revision hashes. It also prints the `benchmark_revision_id`, fixed-judge
+`comparison_group_id`, named `comparison_id`, and treatment `arm_id` used for
+cross-model reporting.
 
 `preflight` is networked but generation-free: it renders the actual DSPy
 messages, asks each configured endpoint for its optional native context and
@@ -34,11 +37,18 @@ Valid baseline benchmark after readiness passes:
 uv run ms-agent-eval run baseline --workspace workspace.yaml
 ```
 
-Grouped K-fold model selection followed by one held-out test evaluation:
+Run the optimization strategy selected by the named experiment, followed by
+one held-out test evaluation:
 
 ```bash
-uv run ms-agent-eval run optimize-few-shot --workspace workspace.yaml
+uv run ms-agent-eval run optimize-solver --workspace workspace.yaml
 ```
+
+For `labeled_few_shot`, this compares demonstration counts and never calls the
+optimizer model. For `copro`, it runs explicit optimizer proposal, candidate
+fit/solve/judge, and deterministic selection packets for the solver prompt and
+configured skills. The terminal identifies the strategy, target, scope, round,
+candidate, and endpoint as work progresses.
 
 When standard output is an interactive terminal, the command renders live
 stage and case progress. It identifies the active case by title and id, shows
@@ -67,6 +77,26 @@ run without rerunning models:
 uv run ms-agent-eval report build --run <run-id> --workspace workspace.yaml
 ```
 
+When `recording.enabled` is true, the same terminal transition also flushes a
+retryable MLflow projection containing metrics, tables, traces, graphs, reports,
+and identity artifacts according to the configured privacy policies. A valid
+completed arm also produces an immutable `model_comparison` run from compatible
+arms in the same workspace-level MLflow Experiment. Recorder
+failure is reported separately and does not change run validity. Inspect or
+retry it without model calls:
+
+```bash
+uv run --extra mlflow ms-agent-eval recorder status --run <run-id> \
+  --workspace workspace.yaml
+uv run --extra mlflow ms-agent-eval recorder sync --run <run-id> \
+  --workspace workspace.yaml
+```
+
+See [Experiment recording](../execution/experiment-recording.md) for the MLflow
+mapping, recovery model, and server setup. See
+[Model comparisons](model-comparisons.md) to add solver and optimizer arms
+without copying the workspace.
+
 The experiment id is the key under `experiments` in `workspace.yaml`; it is not
 a global framework default.
 
@@ -88,7 +118,10 @@ with `--pilot` so its execution mode cannot be confused with a benchmark.
 Starting another run is not the same as forcing another model sample. Under the
 default `exact` policy the coordinator attaches eligible validated work from
 any compatible prior run. Use `refresh` or solver `replicate` intentionally
-when fresh execution is the experiment. See
+when fresh execution is the experiment. A failed run does not delete completed
+stage results. After a framework or deployment fix, resuming preserves the old
+failure and uses append-only retries where supported; starting the same
+experiment again can reuse compatible completed work in a new run. See
 [Incremental execution](../execution/incremental-execution.md).
 
 See [Pilot versus scored runs](../evaluation/pilot-vs-scored-runs.md),

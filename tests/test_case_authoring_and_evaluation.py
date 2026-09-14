@@ -21,7 +21,13 @@ from ms_agent_eval.core.evaluation import (
     validate_deterministic_splits,
 )
 from ms_agent_eval.core.hashing import sha256_file
-from ms_agent_eval.programs.dspy.engine import create_judge_program, program_state
+from ms_agent_eval.programs.dspy.engine import (
+    apply_solver_prompt,
+    create_judge_program,
+    create_solver_program,
+    program_state,
+    solver_prompt_state,
+)
 from .helpers import create_workspace
 
 
@@ -80,9 +86,7 @@ def test_capability_depth_is_a_separate_readiness_gate(tmp_path: Path) -> None:
     from .helpers import create_case
 
     catalog_payload = _retain_catalog_skills(repository, "alpha")
-    catalog_payload["skills"]["alpha"]["capabilities"][0][
-        "minimum_primary_cases"
-    ] = 2
+    catalog_payload["skills"]["alpha"]["capabilities"][0]["minimum_primary_cases"] = 2
     repository.capability_catalog_path.write_text(
         yaml.safe_dump(catalog_payload, sort_keys=False), encoding="utf-8"
     )
@@ -128,9 +132,7 @@ def test_mainsequence_capability_catalog_uses_only_current_time_index_api() -> N
     catalog = CapabilityCatalog.load(catalog_path)
     capability_ids = {
         item.id
-        for item in (
-            catalog.requirements_for("data_publishing/time_index_table_updates") or ()
-        )
+        for item in (catalog.requirements_for("data_publishing/time_index_table_updates") or ())
     }
 
     active_authoring_files = (
@@ -161,9 +163,9 @@ def test_mainsequence_capability_catalog_uses_only_current_time_index_api() -> N
 def test_experiment_authoring_policies_make_judge_validation_a_campaign_output() -> None:
     root = Path(__file__).resolve().parents[1]
     for experiment_id in ("mainsequence-sdk", "command-center-sdk"):
-        policy = (
-            root / "experiments" / experiment_id / "case-authoring.md"
-        ).read_text(encoding="utf-8")
+        policy = (root / "experiments" / experiment_id / "case-authoring.md").read_text(
+            encoding="utf-8"
+        )
         assert "Mandatory judge-validation deliverable" in policy
         assert re.search(r"not a separate\s+manual follow-up", policy)
         assert "judge-validation/manifest.yaml" in policy
@@ -176,6 +178,21 @@ def test_judge_program_treats_candidate_response_as_untrusted_data() -> None:
 
     assert "untrusted evaluation data" in instructions
     assert "Assess each criterion independently" in instructions
+
+
+def test_copro_prompt_state_changes_instruction_and_prefix_without_demonstrations() -> None:
+    program = apply_solver_prompt(
+        create_solver_program(),
+        instruction="Use the locked evidence and state assumptions explicitly.",
+        output_prefix="Grounded response:",
+    )
+
+    assert solver_prompt_state(program) == (
+        "Use the locked evidence and state assumptions explicitly.",
+        "Grounded response:",
+    )
+    state = program_state(program)["predictors"][0]
+    assert state["demos"] == []
 
 
 def test_mainsequence_judge_validation_is_complete_and_not_held_out() -> None:
@@ -194,10 +211,7 @@ def test_mainsequence_judge_validation_is_complete_and_not_held_out() -> None:
         "contradictory",
         "adversarial",
     }
-    assert all(
-        splits.split_for(cases[fixture.case_id]) == "train"
-        for fixture in corpus.fixtures
-    )
+    assert all(splits.split_for(cases[fixture.case_id]) == "train" for fixture in corpus.fixtures)
 
 
 def test_llm_judge_validates_exact_criterion_ids(tmp_path: Path) -> None:
@@ -366,8 +380,7 @@ def test_group_k_fold_is_deterministic_balanced_and_leakage_safe(tmp_path: Path)
     assert {item.group for item in assignments} == {"large", "medium", "small"}
     fold_by_group = {item.group: item.fold for item in assignments}
     fold_sizes = [
-        sum(1 for case in cases if fold_by_group[case.group] == fold)
-        for fold in range(2)
+        sum(1 for case in cases if fold_by_group[case.group] == fold) for fold in range(2)
     ]
     assert sorted(fold_sizes) == [3, 3]
 

@@ -5,8 +5,8 @@
 - `src/ms_agent_eval` owns generic DSPy programs, source locking, case
   provenance, LLM judging, optimization governance, isolation, and reporting.
 - `workspace.yaml` owns a target repository URL/ref, optional case-authoring
-  reference repositories, exact instruction selection, stage executors and models, case
-  location, judge validation, and experiments.
+  reference repositories, exact instruction selection, stage executors and models,
+  recorder projection, case location, judge validation, and experiments.
 - `case-authoring.md` owns the durable policy used to generate evaluation cases;
   `workspace.yaml` points to it explicitly.
 - `cases/coverage.yaml` owns the complete skill-to-capability decomposition and
@@ -16,7 +16,10 @@
 - Reviewed case packages and reference-labelled judge-validation inputs
   are versioned.
 - External storage owns repository snapshots, solver
-  calls, judge calls, compiled state, evaluations, and reports.
+  calls, judge calls, compiled state, evaluations, reports, and retryable recorder
+  delivery state.
+- An external recorder such as MLflow is a derived comparison and inspection
+  surface. It is never authoritative for scores, resume, or cache reuse.
 
 An evaluated repository must never become a core dependency or default path.
 
@@ -66,10 +69,13 @@ judge/expected/response.md
 judge/expected/artifacts/ optional judge-only evidence
 ```
 
-Schema-v5 `case.yaml` declares id, title, skill, leakage group, exactly one
-primary capability, at most two supporting capabilities, archetype, difficulty,
-local file references, immutable source paths, and authoring provenance hashes. Direct edits
+Schema-v6 `case.yaml` declares id, title, skill, leakage group, exactly one
+primary capability, at most two supporting capabilities, archetype, local file
+references, immutable source paths, and authoring provenance hashes. Direct edits
 that change package identity invalidate provenance.
+
+Cases do not carry subjective difficulty labels. Reports measure the exact
+hidden expected-response token count and derive fixed response-length bands.
 
 The coordinator never mounts this canonical package into a model runtime. It
 projects `solver/` and `judge/` into independent, immutable stage views so a

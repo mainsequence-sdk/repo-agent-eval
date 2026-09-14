@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+from collections import Counter
+from string import Formatter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -26,7 +28,7 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 11
+WORKSPACE_SCHEMA_VERSION = 14
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -132,9 +134,7 @@ def _api_base_url(value: object, field: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ConfigurationError(f"{field} must be an HTTP(S) URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ConfigurationError(
-            f"{field} must not contain credentials, a query, or a fragment"
-        )
+        raise ConfigurationError(f"{field} must not contain credentials, a query, or a fragment")
     return result
 
 
@@ -209,11 +209,7 @@ def validate_external_data_root(candidate: Path, workspace_root: Path) -> Path:
     if root == workspace or workspace in root.parents:
         raise ConfigurationError("workspace.data_root must be outside the workspace")
     git_root = next(
-        (
-            ancestor
-            for ancestor in (workspace, *workspace.parents)
-            if (ancestor / ".git").exists()
-        ),
+        (ancestor for ancestor in (workspace, *workspace.parents) if (ancestor / ".git").exists()),
         None,
     )
     if git_root is not None and (root == git_root or git_root in root.parents):
@@ -224,6 +220,201 @@ def validate_external_data_root(candidate: Path, workspace_root: Path) -> Path:
 class ExperimentMode(str, Enum):
     EVALUATE = "evaluate"
     OPTIMIZE = "optimize"
+
+
+class RecordingMode(str, Enum):
+    FINALIZE_ONLY = "finalize_only"
+    LIVE_AND_FINALIZE = "live_and_finalize"
+
+
+class RecordingFailurePolicy(str, Enum):
+    CONTINUE = "continue"
+
+
+class RecordingArtifactPolicy(str, Enum):
+    INDEX_ONLY = "index_only"
+    FULL = "full"
+
+
+class RecordingContentPolicy(str, Enum):
+    HASHES_ONLY = "hashes_only"
+    SUMMARY = "summary"
+    FULL = "full"
+
+
+@dataclass(frozen=True)
+class RecorderAuthenticationConfiguration:
+    type: str
+    username_env: str | None
+    password_env: str | None
+    token_env: str | None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str,
+    ) -> RecorderAuthenticationConfiguration:
+        _reject_unknown(
+            payload,
+            {"type", "username_env", "password_env", "token_env"},
+            field,
+        )
+        authentication_type = _identifier(payload.get("type"), f"{field}.type")
+        if authentication_type not in {"none", "basic", "bearer"}:
+            raise ConfigurationError(f"{field}.type must be none, basic, or bearer")
+        username = payload.get("username_env")
+        password = payload.get("password_env")
+        token = payload.get("token_env")
+        if authentication_type == "none":
+            if any(value is not None for value in (username, password, token)):
+                raise ConfigurationError(f"{field} type none cannot declare credential references")
+            return cls("none", None, None, None)
+        if authentication_type == "basic":
+            if username is None or password is None or token is not None:
+                raise ConfigurationError(
+                    f"{field} type basic requires username_env and password_env only"
+                )
+            return cls(
+                "basic",
+                _environment(username, f"{field}.username_env"),
+                _environment(password, f"{field}.password_env"),
+                None,
+            )
+        if token is None or username is not None or password is not None:
+            raise ConfigurationError(f"{field} type bearer requires token_env only")
+        return cls(
+            "bearer",
+            None,
+            None,
+            _environment(token, f"{field}.token_env"),
+        )
+
+
+@dataclass(frozen=True)
+class RecorderConfiguration:
+    id: str
+    type: str
+    tracking_uri: str
+    experiment_name: str
+    authentication: RecorderAuthenticationConfiguration
+
+    @classmethod
+    def from_mapping(
+        cls,
+        recorder_id: str,
+        payload: Mapping[str, object],
+    ) -> RecorderConfiguration:
+        field = f"recorders.{recorder_id}"
+        _reject_unknown(
+            payload,
+            {"type", "tracking_uri", "experiment_name", "authentication"},
+            field,
+        )
+        recorder_type = _identifier(payload.get("type"), f"{field}.type")
+        if recorder_type != "mlflow":
+            raise ConfigurationError(f"{field}.type must be mlflow")
+        experiment_name = _string(payload.get("experiment_name"), f"{field}.experiment_name")
+        try:
+            parsed_fields = tuple(Formatter().parse(experiment_name))
+        except ValueError as error:
+            raise ConfigurationError(f"{field}.experiment_name has invalid placeholders") from error
+        for _, placeholder, format_spec, conversion in parsed_fields:
+            if placeholder is None:
+                continue
+            if placeholder not in {"workspace_id", "experiment_id"}:
+                raise ConfigurationError(
+                    f"{field}.experiment_name supports only workspace_id and "
+                    "experiment_id placeholders"
+                )
+            if format_spec or conversion:
+                raise ConfigurationError(
+                    f"{field}.experiment_name placeholders cannot use conversions or formats"
+                )
+        return cls(
+            _identifier(recorder_id, "recorder id"),
+            recorder_type,
+            _api_base_url(payload.get("tracking_uri"), f"{field}.tracking_uri"),
+            experiment_name,
+            RecorderAuthenticationConfiguration.from_mapping(
+                _mapping(payload.get("authentication"), f"{field}.authentication"),
+                field=f"{field}.authentication",
+            ),
+        )
+
+    @property
+    def configuration_hash(self) -> str:
+        """Hash operational destination configuration without resolved secrets."""
+
+        return content_hash(self)
+
+    def resolved_experiment_name(self, workspace_id: str, experiment_id: str) -> str:
+        name = self.experiment_name.format(
+            workspace_id=workspace_id,
+            experiment_id=experiment_id,
+        ).strip()
+        if not name:
+            raise ConfigurationError("resolved recorder experiment name must not be empty")
+        return name
+
+
+@dataclass(frozen=True)
+class RecordingConfiguration:
+    enabled: bool
+    recorder: str
+    mode: RecordingMode
+    failure_policy: RecordingFailurePolicy
+    artifact_policy: RecordingArtifactPolicy
+    content_policy: RecordingContentPolicy
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> RecordingConfiguration:
+        _reject_unknown(
+            payload,
+            {
+                "enabled",
+                "recorder",
+                "mode",
+                "failure_policy",
+                "artifact_policy",
+                "content_policy",
+            },
+            "recording",
+        )
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ConfigurationError("recording.enabled must be a boolean")
+        try:
+            mode = RecordingMode(payload.get("mode"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                "recording.mode must be finalize_only or live_and_finalize"
+            ) from error
+        try:
+            failure_policy = RecordingFailurePolicy(payload.get("failure_policy"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError("recording.failure_policy must be continue") from error
+        try:
+            artifact_policy = RecordingArtifactPolicy(payload.get("artifact_policy"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                "recording.artifact_policy must be index_only or full"
+            ) from error
+        try:
+            content_policy = RecordingContentPolicy(payload.get("content_policy"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                "recording.content_policy must be hashes_only, summary, or full"
+            ) from error
+        return cls(
+            enabled,
+            _identifier(payload.get("recorder"), "recording.recorder"),
+            mode,
+            failure_policy,
+            artifact_policy,
+            content_policy,
+        )
 
 
 @dataclass(frozen=True)
@@ -305,9 +496,7 @@ class SkillSelection:
         raw_directory = payload.get("directory")
         raw_files = payload.get("files")
         if (raw_directory is None) == (raw_files is None):
-            raise ConfigurationError(
-                f"{field} requires exactly one of directory or files"
-            )
+            raise ConfigurationError(f"{field} requires exactly one of directory or files")
         if raw_directory is not None:
             return cls(_relative_path(raw_directory, f"{field}.directory"), ())
         files = tuple(
@@ -447,8 +636,7 @@ class DspyProgramConfiguration:
 
 @dataclass(frozen=True)
 class ModelConfiguration:
-    model: str
-    deployment_revision: str
+    deployment: str
     reasoning_effort: str | None
     parameters: Mapping[str, object]
     configured_cost_per_call: float
@@ -458,8 +646,7 @@ class ModelConfiguration:
         _reject_unknown(
             payload,
             {
-                "name",
-                "deployment_revision",
+                "deployment",
                 "reasoning_effort",
                 "parameters",
                 "configured_cost_per_call",
@@ -471,8 +658,7 @@ class ModelConfiguration:
         )
         if "reasoning_effort" in parameters:
             raise ConfigurationError(
-                f"{field}.reasoning_effort is a first-class model field; "
-                "remove it from parameters"
+                f"{field}.reasoning_effort is a first-class model field; remove it from parameters"
             )
         raw_reasoning_effort = payload.get("reasoning_effort")
         reasoning_effort = (
@@ -482,18 +668,13 @@ class ModelConfiguration:
         )
         if reasoning_effort is not None and reasoning_effort not in _REASONING_EFFORTS:
             raise ConfigurationError(
-                f"{field}.reasoning_effort must be one of "
-                f"{sorted(_REASONING_EFFORTS)}"
+                f"{field}.reasoning_effort must be one of {sorted(_REASONING_EFFORTS)}"
             )
         cost = payload.get("configured_cost_per_call", 0.0)
         if not isinstance(cost, (int, float)) or isinstance(cost, bool) or float(cost) < 0:
             raise ConfigurationError(f"{field}.configured_cost_per_call must be non-negative")
         return cls(
-            _string(payload.get("name"), f"{field}.name"),
-            _string(
-                payload.get("deployment_revision"),
-                f"{field}.deployment_revision",
-            ),
+            _identifier(payload.get("deployment"), f"{field}.deployment"),
             reasoning_effort,
             parameters,
             float(cost),
@@ -575,9 +756,7 @@ class CodexCliConfiguration:
     resources: CodexResourceConfiguration
 
     @classmethod
-    def from_mapping(
-        cls, payload: Mapping[str, object], *, field: str
-    ) -> CodexCliConfiguration:
+    def from_mapping(cls, payload: Mapping[str, object], *, field: str) -> CodexCliConfiguration:
         _reject_unknown(
             payload,
             {
@@ -593,9 +772,7 @@ class CodexCliConfiguration:
         image = _string(payload.get("image"), f"{field}.image")
         if _DIGEST_PINNED_IMAGE.fullmatch(image) is None:
             raise ConfigurationError(f"{field}.image must be pinned by sha256 digest")
-        authentication = _identifier(
-            payload.get("authentication"), f"{field}.authentication"
-        )
+        authentication = _identifier(payload.get("authentication"), f"{field}.authentication")
         if authentication != "chatgpt_subscription":
             raise ConfigurationError(
                 f"{field}.authentication must be chatgpt_subscription; "
@@ -611,9 +788,7 @@ class CodexCliConfiguration:
         return cls(
             image,
             authentication,
-            _identifier(
-                payload.get("permission_profile"), f"{field}.permission_profile"
-            ),
+            _identifier(payload.get("permission_profile"), f"{field}.permission_profile"),
             instruction_policy,
             CodexControlPlaneConfiguration.from_mapping(
                 _mapping(payload.get("control_plane"), f"{field}.control_plane"),
@@ -627,11 +802,28 @@ class CodexCliConfiguration:
 
 
 @dataclass(frozen=True)
+class EndpointRouteConfiguration:
+    deployment: str
+    model: str
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object], *, field: str
+    ) -> EndpointRouteConfiguration:
+        _reject_unknown(payload, {"deployment", "model"}, field)
+        return cls(
+            _identifier(payload.get("deployment"), f"{field}.deployment"),
+            _string(payload.get("model"), f"{field}.model"),
+        )
+
+
+@dataclass(frozen=True)
 class EndpointConfiguration:
     id: str
     base_url: str
     max_concurrent_requests: int
     api_key_env: str | None
+    routes: tuple[EndpointRouteConfiguration, ...]
 
     @classmethod
     def from_mapping(
@@ -642,10 +834,24 @@ class EndpointConfiguration:
     ) -> EndpointConfiguration:
         _reject_unknown(
             payload,
-            {"id", "base_url", "max_concurrent_requests", "api_key_env"},
+            {"id", "base_url", "max_concurrent_requests", "api_key_env", "routes"},
             field,
         )
         raw_key = payload.get("api_key_env")
+        routes = tuple(
+            EndpointRouteConfiguration.from_mapping(
+                _mapping(item, f"{field}.routes[{index}]"),
+                field=f"{field}.routes[{index}]",
+            )
+            for index, item in enumerate(
+                _sequence(payload.get("routes"), f"{field}.routes")
+            )
+        )
+        if not routes:
+            raise ConfigurationError(f"{field}.routes must not be empty")
+        deployment_ids = [route.deployment for route in routes]
+        if len(deployment_ids) != len(set(deployment_ids)):
+            raise ConfigurationError(f"{field}.routes deployments must be unique")
         return cls(
             _identifier(payload.get("id"), f"{field}.id"),
             _api_base_url(payload.get("base_url"), f"{field}.base_url"),
@@ -653,12 +859,12 @@ class EndpointConfiguration:
                 payload.get("max_concurrent_requests"),
                 f"{field}.max_concurrent_requests",
             ),
-            (
-                _environment(raw_key, f"{field}.api_key_env")
-                if raw_key is not None
-                else None
-            ),
+            (_environment(raw_key, f"{field}.api_key_env") if raw_key is not None else None),
+            routes,
         )
+
+    def route(self, deployment_id: str) -> EndpointRouteConfiguration | None:
+        return next((item for item in self.routes if item.deployment == deployment_id), None)
 
     def api_key(self, environment: Mapping[str, str]) -> str | None:
         if self.api_key_env is None:
@@ -718,17 +924,13 @@ class ExecutorConfiguration:
         raw_endpoints = payload.get("endpoints")
         if executor_type is ExecutorType.ENDPOINT:
             if raw_endpoints is None:
-                raise ConfigurationError(
-                    f"{field}.endpoints is required for endpoint executors"
-                )
+                raise ConfigurationError(f"{field}.endpoints is required for endpoint executors")
             endpoints = tuple(
                 EndpointConfiguration.from_mapping(
                     _mapping(item, f"{field}.endpoints[{index}]"),
                     field=f"{field}.endpoints[{index}]",
                 )
-                for index, item in enumerate(
-                    _sequence(raw_endpoints, f"{field}.endpoints")
-                )
+                for index, item in enumerate(_sequence(raw_endpoints, f"{field}.endpoints"))
             )
             if not endpoints:
                 raise ConfigurationError(f"{field}.endpoints must not be empty")
@@ -740,14 +942,10 @@ class ExecutorConfiguration:
                 raise ConfigurationError(f"{field}.endpoints base URLs must be unique")
         else:
             if raw_endpoints is not None:
-                raise ConfigurationError(
-                    f"{field}.endpoints is only valid for endpoint executors"
-                )
+                raise ConfigurationError(f"{field}.endpoints is only valid for endpoint executors")
             endpoints = ()
         raw_version = payload.get("version")
-        version = (
-            _string(raw_version, f"{field}.version") if raw_version is not None else None
-        )
+        version = _string(raw_version, f"{field}.version") if raw_version is not None else None
         options = _mapping(payload.get("options", {}), f"{field}.options")
         codex_cli = None
         if adapter == "codex_cli":
@@ -798,7 +996,29 @@ class ExecutorConfiguration:
         return content_hash(identity)
 
 
-_MODEL_STAGES = {"author", "validate_judge", "solve", "judge"}
+@dataclass(frozen=True)
+class DeploymentConfiguration:
+    id: str
+    executor: str
+    model: str
+    revision: str
+
+    @classmethod
+    def from_mapping(
+        cls, deployment_id: str, payload: Mapping[str, object]
+    ) -> DeploymentConfiguration:
+        field = f"deployments.{deployment_id}"
+        _reject_unknown(payload, {"executor", "model", "revision"}, field)
+        return cls(
+            _identifier(deployment_id, "deployment id"),
+            _identifier(payload.get("executor"), f"{field}.executor"),
+            _string(payload.get("model"), f"{field}.model"),
+            _string(payload.get("revision"), f"{field}.revision"),
+        )
+
+
+_MODEL_STAGES = {"author", "validate_judge", "optimize", "solve", "judge"}
+_EXPERIMENT_MODEL_STAGES = {"validate_judge", "optimize", "solve", "judge"}
 _CANONICAL_STAGES = _MODEL_STAGES | {"fit", "select", "aggregate"}
 
 
@@ -832,24 +1052,18 @@ class StageReuseConfiguration:
         samples = _positive_int(raw_samples, f"{field}.samples")
         if policy is ReusePolicy.REPLICATE:
             if stage_id != "solve":
-                raise ConfigurationError(
-                    f"{field}.policy replicate is supported only for solve"
-                )
+                raise ConfigurationError(f"{field}.policy replicate is supported only for solve")
             if samples < 2:
-                raise ConfigurationError(
-                    f"{field}.samples must be at least 2 for replicate"
-                )
+                raise ConfigurationError(f"{field}.samples must be at least 2 for replicate")
         elif samples != 1:
-            raise ConfigurationError(
-                f"{field}.samples is valid only when policy is replicate"
-            )
+            raise ConfigurationError(f"{field}.samples is valid only when policy is replicate")
         return cls(policy, samples)
 
 
 @dataclass(frozen=True)
 class StageConfiguration:
     id: str
-    executor: str
+    executor: str | None
     model: str | None
     reuse: StageReuseConfiguration
     budget: RoleBudget
@@ -864,15 +1078,27 @@ class StageConfiguration:
         if stage_id not in _CANONICAL_STAGES:
             raise ConfigurationError(f"unknown canonical stage: {stage_id}")
         _reject_unknown(payload, {"executor", "model", "reuse", "budget"}, field)
+        raw_executor = payload.get("executor")
+        executor = (
+            _identifier(raw_executor, f"{field}.executor")
+            if raw_executor is not None
+            else None
+        )
         raw_model = payload.get("model")
         model = _identifier(raw_model, f"{field}.model") if raw_model is not None else None
-        if stage_id in _MODEL_STAGES and model is None:
-            raise ConfigurationError(f"{field}.model is required")
+        if stage_id == "author" and (model is None or executor is None):
+            raise ConfigurationError(f"{field}.executor and model are required")
+        if stage_id in _EXPERIMENT_MODEL_STAGES and (model is not None or executor is not None):
+            raise ConfigurationError(
+                f"{field} resolves executor and model from experiment.roles"
+            )
         if stage_id not in _MODEL_STAGES and model is not None:
             raise ConfigurationError(f"{field}.model is not valid for a deterministic stage")
+        if stage_id not in _MODEL_STAGES and executor is None:
+            raise ConfigurationError(f"{field}.executor is required")
         return cls(
             stage_id,
-            _identifier(payload.get("executor"), f"{field}.executor"),
+            executor,
             model,
             StageReuseConfiguration.from_mapping(
                 _mapping(payload.get("reuse"), f"{field}.reuse"),
@@ -928,17 +1154,13 @@ class CaseAuthoringConfiguration:
         )
         source_ids = [item.id for item in sources]
         if len(source_ids) != len(set(source_ids)):
-            raise ConfigurationError(
-                "evaluation.case_authoring.sources must use unique source ids"
-            )
+            raise ConfigurationError("evaluation.case_authoring.sources must use unique source ids")
         if "target" in source_ids:
             raise ConfigurationError(
                 "evaluation.case_authoring.sources reserves the source id 'target'"
             )
         return cls(
-            _relative_path(
-                payload.get("instructions"), "evaluation.case_authoring.instructions"
-            ),
+            _relative_path(payload.get("instructions"), "evaluation.case_authoring.instructions"),
             sources,
         )
 
@@ -951,9 +1173,7 @@ class JudgeConfiguration:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> JudgeConfiguration:
-        _reject_unknown(
-            payload, {"dspy", "validation", "repetitions"}, "evaluation.judge"
-        )
+        _reject_unknown(payload, {"dspy", "validation", "repetitions"}, "evaluation.judge")
         validation = _mapping(payload.get("validation"), "evaluation.judge.validation")
         _reject_unknown(validation, {"directory"}, "evaluation.judge.validation")
         return cls(
@@ -979,9 +1199,7 @@ class CaseCoverageConfiguration:
             {"catalog", "minimum_cases_per_skill", "minimum_leakage_groups_per_skill"},
             "evaluation.cases.coverage",
         )
-        catalog = _relative_path(
-            payload.get("catalog"), "evaluation.cases.coverage.catalog"
-        )
+        catalog = _relative_path(payload.get("catalog"), "evaluation.cases.coverage.catalog")
         minimum_cases = _positive_int(
             payload.get("minimum_cases_per_skill", 8),
             "evaluation.cases.coverage.minimum_cases_per_skill",
@@ -1143,32 +1361,108 @@ class RuntimeConfiguration:
 
 
 @dataclass(frozen=True)
-class OptimizerConfiguration:
-    name: str
+class LabeledFewShotConfiguration:
+    strategy: str
     k_values: tuple[int, ...]
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> OptimizerConfiguration:
-        _reject_unknown(payload, {"name", "search"}, "experiment.optimizer")
-        name = _string(payload.get("name"), "experiment.optimizer.name")
-        if name != "LabeledFewShot":
-            raise ConfigurationError("the initial DSPy optimizer must be LabeledFewShot")
+    def from_mapping(cls, payload: Mapping[str, object]) -> LabeledFewShotConfiguration:
+        _reject_unknown(payload, {"strategy", "search"}, "experiment.optimizer")
         search = _mapping(payload.get("search"), "experiment.optimizer.search")
         _reject_unknown(search, {"k"}, "experiment.optimizer.search")
         raw_values = search.get("k")
-        if not isinstance(raw_values, Sequence) or isinstance(
-            raw_values, (str, bytes, bytearray)
-        ):
+        if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes, bytearray)):
             raise ConfigurationError("experiment.optimizer.search.k must be a list")
         values = tuple(raw_values)
         if not values or any(
-            not isinstance(value, int) or isinstance(value, bool) or value < 1
-            for value in values
+            not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in values
         ):
             raise ConfigurationError("experiment.optimizer.search.k must contain positive integers")
         if len(values) != len(set(values)):
             raise ConfigurationError("experiment.optimizer.search.k must not contain duplicates")
-        return cls(name, tuple(sorted(values)))
+        return cls("labeled_few_shot", tuple(sorted(values)))
+
+
+@dataclass(frozen=True)
+class CoproConfiguration:
+    strategy: str
+    optimize_prompt: bool
+    skills: str | tuple[str, ...]
+    breadth: int
+    depth: int
+    init_temperature: float
+    metric: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> CoproConfiguration:
+        _reject_unknown(
+            payload,
+            {"strategy", "targets", "search", "metric"},
+            "experiment.optimizer",
+        )
+        targets = _mapping(payload.get("targets"), "experiment.optimizer.targets")
+        _reject_unknown(targets, {"prompt", "skills"}, "experiment.optimizer.targets")
+        optimize_prompt = targets.get("prompt")
+        if not isinstance(optimize_prompt, bool):
+            raise ConfigurationError("experiment.optimizer.targets.prompt must be a boolean")
+        raw_skills = targets.get("skills")
+        if raw_skills == "all":
+            skills: str | tuple[str, ...] = "all"
+        else:
+            skills = _string_list(raw_skills, "experiment.optimizer.targets.skills")
+            if any("*" in item or "?" in item or "[" in item for item in skills):
+                raise ConfigurationError(
+                    "experiment.optimizer.targets.skills must contain exact skill identifiers, not globs"
+                )
+        if not optimize_prompt and skills == ():
+            raise ConfigurationError("COPRO must optimize the prompt or at least one skill")
+
+        search = _mapping(payload.get("search"), "experiment.optimizer.search")
+        _reject_unknown(
+            search,
+            {"breadth", "depth", "init_temperature"},
+            "experiment.optimizer.search",
+        )
+        breadth = _positive_int(search.get("breadth"), "experiment.optimizer.search.breadth")
+        if breadth < 2:
+            raise ConfigurationError("experiment.optimizer.search.breadth must be at least 2")
+        depth = _positive_int(search.get("depth"), "experiment.optimizer.search.depth")
+        temperature = _positive_number(
+            search.get("init_temperature"),
+            "experiment.optimizer.search.init_temperature",
+        )
+
+        metric = _mapping(payload.get("metric"), "experiment.optimizer.metric")
+        _reject_unknown(metric, {"name"}, "experiment.optimizer.metric")
+        metric_name = _identifier(metric.get("name"), "experiment.optimizer.metric.name")
+        if metric_name != "rubric_mean_score":
+            raise ConfigurationError("experiment.optimizer.metric.name must be rubric_mean_score")
+        return cls(
+            "copro",
+            optimize_prompt,
+            skills,
+            breadth,
+            depth,
+            temperature,
+            metric_name,
+        )
+
+
+OptimizerConfiguration = LabeledFewShotConfiguration | CoproConfiguration
+
+
+def _optimizer_configuration(payload: Mapping[str, object]) -> OptimizerConfiguration:
+    strategy = payload.get("strategy")
+    if strategy is None and "name" in payload:
+        raise ConfigurationError(
+            "experiment.optimizer.name was removed; use optimizer.strategy with "
+            "labeled_few_shot or copro"
+        )
+    if strategy == "labeled_few_shot":
+        return LabeledFewShotConfiguration.from_mapping(payload)
+    if strategy == "copro":
+        return CoproConfiguration.from_mapping(payload)
+    raise ConfigurationError("experiment.optimizer.strategy must be labeled_few_shot or copro")
 
 
 @dataclass(frozen=True)
@@ -1190,14 +1484,28 @@ class CrossValidationConfiguration:
 
 @dataclass(frozen=True)
 class OptimizationBudget:
+    optimizer: RoleBudget | None
     solver: RoleBudget
     judge: RoleBudget
     wall_seconds: float
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> OptimizationBudget:
-        _reject_unknown(payload, {"solver", "judge", "wall_seconds"}, "experiment.budget")
+        _reject_unknown(
+            payload,
+            {"optimizer", "solver", "judge", "wall_seconds"},
+            "experiment.budget",
+        )
+        raw_optimizer = payload.get("optimizer")
         return cls(
+            (
+                RoleBudget.from_mapping(
+                    _mapping(raw_optimizer, "experiment.budget.optimizer"),
+                    field="experiment.budget.optimizer",
+                )
+                if raw_optimizer is not None
+                else None
+            ),
             RoleBudget.from_mapping(
                 _mapping(payload.get("solver"), "experiment.budget.solver"),
                 field="experiment.budget.solver",
@@ -1211,9 +1519,42 @@ class OptimizationBudget:
 
 
 @dataclass(frozen=True)
+class ExperimentRoles:
+    solver: str
+    judge: str
+    optimizer: str | None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        field: str,
+        requires_optimizer: bool,
+    ) -> ExperimentRoles:
+        _reject_unknown(payload, {"solver", "optimizer", "judge"}, field)
+        raw_optimizer = payload.get("optimizer")
+        optimizer = (
+            _identifier(raw_optimizer, f"{field}.optimizer")
+            if raw_optimizer is not None
+            else None
+        )
+        if requires_optimizer and optimizer is None:
+            raise ConfigurationError(f"{field}.optimizer is required for COPRO")
+        if not requires_optimizer and optimizer is not None:
+            raise ConfigurationError(f"{field}.optimizer is valid only for COPRO")
+        return cls(
+            _identifier(payload.get("solver"), f"{field}.solver"),
+            _identifier(payload.get("judge"), f"{field}.judge"),
+            optimizer,
+        )
+
+
+@dataclass(frozen=True)
 class ExperimentConfiguration:
     id: str
     mode: ExperimentMode
+    roles: ExperimentRoles
     solver: SolverConfiguration | None
     based_on: str | None
     runtime: RuntimeConfiguration | None
@@ -1233,7 +1574,7 @@ class ExperimentConfiguration:
         if mode is ExperimentMode.EVALUATE:
             _reject_unknown(
                 payload,
-                {"mode", "solver", "runtime", "repetitions"},
+                {"mode", "roles", "solver", "runtime", "repetitions"},
                 f"experiments.{experiment_id}",
             )
             if payload.get("based_on") is not None or payload.get("optimizer") is not None:
@@ -1241,6 +1582,11 @@ class ExperimentConfiguration:
             return cls(
                 _identifier(experiment_id, "experiment id"),
                 mode,
+                ExperimentRoles.from_mapping(
+                    _mapping(payload.get("roles"), f"experiments.{experiment_id}.roles"),
+                    field=f"experiments.{experiment_id}.roles",
+                    requires_optimizer=False,
+                ),
                 SolverConfiguration.from_mapping(
                     _mapping(payload.get("solver"), f"experiments.{experiment_id}.solver")
                 ),
@@ -1255,19 +1601,25 @@ class ExperimentConfiguration:
             )
         _reject_unknown(
             payload,
-            {"mode", "based_on", "optimizer", "cross_validation", "budget"},
+            {"mode", "roles", "based_on", "optimizer", "cross_validation", "budget"},
             f"experiments.{experiment_id}",
+        )
+        optimizer_configuration = _optimizer_configuration(
+            _mapping(payload.get("optimizer"), "experiment.optimizer")
         )
         return cls(
             _identifier(experiment_id, "experiment id"),
             mode,
+            ExperimentRoles.from_mapping(
+                _mapping(payload.get("roles"), f"experiments.{experiment_id}.roles"),
+                field=f"experiments.{experiment_id}.roles",
+                requires_optimizer=isinstance(optimizer_configuration, CoproConfiguration),
+            ),
             None,
             _identifier(payload.get("based_on"), "experiment.based_on"),
             None,
             1,
-            OptimizerConfiguration.from_mapping(
-                _mapping(payload.get("optimizer"), "experiment.optimizer")
-            ),
+            optimizer_configuration,
             CrossValidationConfiguration.from_mapping(
                 _mapping(payload.get("cross_validation"), "experiment.cross_validation")
             ),
@@ -1276,15 +1628,77 @@ class ExperimentConfiguration:
 
 
 @dataclass(frozen=True)
+class ComparisonConfiguration:
+    id: str
+    baseline_experiments: tuple[str, ...]
+    optimization_experiments: tuple[str, ...]
+    primary_metric: str
+    grouping: tuple[str, ...]
+
+    @classmethod
+    def from_mapping(
+        cls, comparison_id: str, payload: Mapping[str, object]
+    ) -> ComparisonConfiguration:
+        field = f"comparisons.{comparison_id}"
+        _reject_unknown(
+            payload,
+            {"baseline_experiments", "optimization_experiments", "primary_metric", "grouping"},
+            field,
+        )
+        baselines = tuple(
+            _identifier(item, f"{field}.baseline_experiments")
+            for item in _sequence(payload.get("baseline_experiments"), f"{field}.baseline_experiments")
+        )
+        optimizations = tuple(
+            _identifier(item, f"{field}.optimization_experiments")
+            for item in _sequence(
+                payload.get("optimization_experiments"),
+                f"{field}.optimization_experiments",
+            )
+        )
+        if not baselines or not optimizations:
+            raise ConfigurationError(f"{field} requires baseline and optimization experiments")
+        if len(set((*baselines, *optimizations))) != len((*baselines, *optimizations)):
+            raise ConfigurationError(f"{field} experiment ids must be unique")
+        grouping = tuple(
+            _identifier(item, f"{field}.grouping")
+            for item in _sequence(payload.get("grouping", ["solver", "optimizer"]), f"{field}.grouping")
+        )
+        if not grouping or not set(grouping) <= {"solver", "optimizer"}:
+            raise ConfigurationError(f"{field}.grouping supports only solver and optimizer")
+        if len(grouping) != len(set(grouping)):
+            raise ConfigurationError(f"{field}.grouping values must be unique")
+        primary_metric = _string(
+            payload.get("primary_metric", "score.mean"),
+            f"{field}.primary_metric",
+        )
+        if primary_metric != "score.mean":
+            raise ConfigurationError(
+                f"{field}.primary_metric supports only score.mean in schema 14"
+            )
+        return cls(
+            _identifier(comparison_id, "comparison id"),
+            baselines,
+            optimizations,
+            primary_metric,
+            grouping,
+        )
+
+
+@dataclass(frozen=True)
 class WorkspaceConfiguration:
     schema_version: int
     id: str
     data_root: str | None
+    recording: RecordingConfiguration
+    recorders: Mapping[str, RecorderConfiguration]
     executors: Mapping[str, ExecutorConfiguration]
+    deployments: Mapping[str, DeploymentConfiguration]
     models: Mapping[str, ModelConfiguration]
     stages: Mapping[str, StageConfiguration]
     evaluation: EvaluationConfiguration
     experiments: Mapping[str, ExperimentConfiguration]
+    comparisons: Mapping[str, ComparisonConfiguration]
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> WorkspaceConfiguration:
@@ -1293,11 +1707,15 @@ class WorkspaceConfiguration:
             {
                 "schema_version",
                 "workspace",
+                "recording",
+                "recorders",
                 "executors",
+                "deployments",
                 "models",
                 "stages",
                 "evaluation",
                 "experiments",
+                "comparisons",
             },
             "workspace",
         )
@@ -1311,6 +1729,20 @@ class WorkspaceConfiguration:
         data_root = (
             _string(raw_data_root, "workspace.data_root") if raw_data_root is not None else None
         )
+        recording = RecordingConfiguration.from_mapping(
+            _mapping(payload.get("recording"), "recording")
+        )
+        recorders_payload = _mapping(payload.get("recorders"), "recorders")
+        recorders = {
+            recorder_id: RecorderConfiguration.from_mapping(
+                recorder_id, _mapping(item, f"recorders.{recorder_id}")
+            )
+            for recorder_id, item in recorders_payload.items()
+        }
+        if recording.recorder not in recorders:
+            raise ConfigurationError(
+                f"recording references unknown recorder {recording.recorder!r}"
+            )
         experiments_payload = _mapping(payload.get("experiments"), "experiments")
         experiments = {
             experiment_id: ExperimentConfiguration.from_mapping(
@@ -1329,6 +1761,15 @@ class WorkspaceConfiguration:
         }
         if not executors:
             raise ConfigurationError("workspace requires at least one executor")
+        deployments_payload = _mapping(payload.get("deployments"), "deployments")
+        deployments = {
+            deployment_id: DeploymentConfiguration.from_mapping(
+                deployment_id, _mapping(item, f"deployments.{deployment_id}")
+            )
+            for deployment_id, item in deployments_payload.items()
+        }
+        if not deployments:
+            raise ConfigurationError("workspace requires at least one deployment")
         models_payload = _mapping(payload.get("models"), "models")
         models = {
             model_id: ModelConfiguration.from_mapping(
@@ -1341,8 +1782,7 @@ class WorkspaceConfiguration:
         stages_payload = _mapping(payload.get("stages"), "stages")
         if set(stages_payload) != _CANONICAL_STAGES:
             raise ConfigurationError(
-                "stages must configure exactly the canonical stages: "
-                f"{sorted(_CANONICAL_STAGES)}"
+                f"stages must configure exactly the canonical stages: {sorted(_CANONICAL_STAGES)}"
             )
         stages = {
             stage_id: StageConfiguration.from_mapping(
@@ -1350,8 +1790,38 @@ class WorkspaceConfiguration:
             )
             for stage_id, item in stages_payload.items()
         }
+        for executor in executors.values():
+            for endpoint in executor.endpoints:
+                for route in endpoint.routes:
+                    deployment = deployments.get(route.deployment)
+                    if deployment is None:
+                        raise ConfigurationError(
+                            f"endpoint {endpoint.id!r} references unknown deployment {route.deployment!r}"
+                        )
+                    if deployment.executor != executor.id:
+                        raise ConfigurationError(
+                            f"endpoint {endpoint.id!r} route for deployment {route.deployment!r} "
+                            f"belongs to executor {deployment.executor!r}"
+                        )
+        for deployment in deployments.values():
+            if deployment.executor not in executors:
+                raise ConfigurationError(
+                    f"deployment {deployment.id!r} references unknown executor {deployment.executor!r}"
+                )
+            executor = executors[deployment.executor]
+            if executor.type is ExecutorType.ENDPOINT and not any(
+                endpoint.route(deployment.id) is not None for endpoint in executor.endpoints
+            ):
+                raise ConfigurationError(
+                    f"deployment {deployment.id!r} has no eligible endpoint route"
+                )
+        for model_id, model in models.items():
+            if model.deployment not in deployments:
+                raise ConfigurationError(
+                    f"model {model_id!r} references unknown deployment {model.deployment!r}"
+                )
         for stage in stages.values():
-            if stage.executor not in executors:
+            if stage.executor is not None and stage.executor not in executors:
                 raise ConfigurationError(
                     f"stage {stage.id!r} references unknown executor {stage.executor!r}"
                 )
@@ -1359,6 +1829,8 @@ class WorkspaceConfiguration:
                 raise ConfigurationError(
                     f"stage {stage.id!r} references unknown model {stage.model!r}"
                 )
+            if stage.executor is None:
+                continue
             executor = executors[stage.executor]
             if stage.id in _MODEL_STAGES and executor.type is ExecutorType.PROCESS:
                 raise ConfigurationError(
@@ -1374,23 +1846,111 @@ class WorkspaceConfiguration:
                     "use local or artifact_exchange"
                 )
         for experiment in experiments.values():
+            for role, model_id in (
+                ("solver", experiment.roles.solver),
+                ("judge", experiment.roles.judge),
+                ("optimizer", experiment.roles.optimizer),
+            ):
+                if model_id is not None and model_id not in models:
+                    raise ConfigurationError(
+                        f"experiment {experiment.id!r} {role} role references unknown model {model_id!r}"
+                    )
             if experiment.mode is ExperimentMode.OPTIMIZE:
                 base = experiments.get(experiment.based_on or "")
                 if base is None or base.mode is not ExperimentMode.EVALUATE:
                     raise ConfigurationError(
                         f"optimization experiment {experiment.id!r} must reference an evaluate experiment"
                     )
+                assert experiment.optimizer is not None and experiment.budget is not None
+                assert base is not None
+                if experiment.roles.solver != base.roles.solver:
+                    raise ConfigurationError(
+                        f"optimization experiment {experiment.id!r} must use the solver from "
+                        f"baseline {base.id!r}"
+                    )
+                if experiment.roles.judge != base.roles.judge:
+                    raise ConfigurationError(
+                        f"optimization experiment {experiment.id!r} must use the judge from "
+                        f"baseline {base.id!r}"
+                    )
+                if isinstance(experiment.optimizer, CoproConfiguration):
+                    if experiment.budget.optimizer is None:
+                        raise ConfigurationError(
+                            f"COPRO experiment {experiment.id!r} requires budget.optimizer"
+                        )
+                elif experiment.budget.optimizer is not None:
+                    raise ConfigurationError(
+                        f"labeled_few_shot experiment {experiment.id!r} cannot declare budget.optimizer"
+                    )
+        comparisons_payload = _mapping(payload.get("comparisons", {}), "comparisons")
+        comparisons = {
+            comparison_id: ComparisonConfiguration.from_mapping(
+                comparison_id, _mapping(item, f"comparisons.{comparison_id}")
+            )
+            for comparison_id, item in comparisons_payload.items()
+        }
+        for comparison in comparisons.values():
+            for experiment_id in comparison.baseline_experiments:
+                experiment = experiments.get(experiment_id)
+                if experiment is None or experiment.mode is not ExperimentMode.EVALUATE:
+                    raise ConfigurationError(
+                        f"comparison {comparison.id!r} baseline {experiment_id!r} must be an evaluate experiment"
+                    )
+            for experiment_id in comparison.optimization_experiments:
+                experiment = experiments.get(experiment_id)
+                if experiment is None or experiment.mode is not ExperimentMode.OPTIMIZE:
+                    raise ConfigurationError(
+                        f"comparison {comparison.id!r} optimization {experiment_id!r} must be an optimize experiment"
+                    )
+                if experiment.based_on not in comparison.baseline_experiments:
+                    raise ConfigurationError(
+                        f"comparison {comparison.id!r} optimization {experiment_id!r} is based on "
+                        f"{experiment.based_on!r}, which is not one of its baseline experiments"
+                    )
+            comparison_experiments = tuple(
+                experiments[experiment_id]
+                for experiment_id in (
+                    *comparison.baseline_experiments,
+                    *comparison.optimization_experiments,
+                )
+            )
+            judge_profiles = {item.roles.judge for item in comparison_experiments}
+            if len(judge_profiles) != 1:
+                raise ConfigurationError(
+                    f"comparison {comparison.id!r} must use one fixed judge profile"
+                )
+        comparison_memberships = Counter(
+            experiment_id
+            for comparison in comparisons.values()
+            for experiment_id in (
+                *comparison.baseline_experiments,
+                *comparison.optimization_experiments,
+            )
+        )
+        duplicated_memberships = sorted(
+            experiment_id
+            for experiment_id, count in comparison_memberships.items()
+            if count > 1
+        )
+        if duplicated_memberships:
+            raise ConfigurationError(
+                "an experiment may belong to only one comparison in schema 14: "
+                f"{duplicated_memberships}"
+            )
         result = cls(
             WORKSPACE_SCHEMA_VERSION,
             _identifier(workspace.get("id"), "workspace.id"),
             data_root,
+            recording,
+            MappingProxyType(recorders),
             MappingProxyType(executors),
+            MappingProxyType(deployments),
             MappingProxyType(models),
             MappingProxyType(stages),
             EvaluationConfiguration.from_mapping(_mapping(payload.get("evaluation"), "evaluation")),
             MappingProxyType(experiments),
+            MappingProxyType(comparisons),
         )
-        result._validate_role_configuration()
         result.evaluation.judge.program.validate_role("judge", field="evaluation.judge.dspy")
         for experiment in result.experiments.values():
             if experiment.mode is ExperimentMode.EVALUATE:
@@ -1406,11 +1966,15 @@ class WorkspaceConfiguration:
             {
                 "schema_version": self.schema_version,
                 "id": self.id,
+                # Recorder selection and destination are operational projection
+                # concerns. They must not invalidate experiment work or reuse.
                 "executors": self.executors,
+                "deployments": self.deployments,
                 "models": self.models,
                 "stages": self.stages,
                 "evaluation": self.evaluation,
                 "experiments": self.experiments,
+                "comparisons": self.comparisons,
             }
         )
 
@@ -1436,20 +2000,11 @@ class WorkspaceConfiguration:
         assert experiment.runtime is not None
         return experiment.runtime
 
-    def _validate_role_configuration(self) -> None:
-        solve = self.stages["solve"]
-        judge = self.stages["judge"]
-        validation = self.stages["validate_judge"]
-        assert solve.model is not None and judge.model is not None
-        if (validation.executor, validation.model) != (judge.executor, judge.model):
-            raise ConfigurationError(
-                "validate_judge must use the exact executor and model configured for judge"
-            )
-
-
 @dataclass(frozen=True)
 class ResolvedRoleModel:
     role: str
+    profile_id: str
+    deployment_id: str
     executor_id: str
     provider: str
     model: str
@@ -1465,24 +2020,29 @@ class ResolvedRoleModel:
     def resolve(
         cls,
         role: str,
+        profile_id: str,
         configuration: ModelConfiguration,
+        deployment: DeploymentConfiguration,
         executor: ExecutorConfiguration,
         environment: Mapping[str, str] | None = None,
     ) -> ResolvedRoleModel:
         del environment
         semantic_identity = {
             "provider": executor.adapter,
-            "model": configuration.model,
-            "deployment_revision": configuration.deployment_revision,
+            "deployment_id": deployment.id,
+            "model": deployment.model,
+            "deployment_revision": deployment.revision,
             "reasoning_effort": configuration.reasoning_effort,
             "parameters": configuration.parameters,
         }
         return cls(
             role=role,
+            profile_id=profile_id,
+            deployment_id=deployment.id,
             executor_id=executor.id,
             provider=executor.adapter,
-            model=configuration.model,
-            deployment_revision=configuration.deployment_revision,
+            model=deployment.model,
+            deployment_revision=deployment.revision,
             base_url="",
             api_key_env=None,
             reasoning_effort=configuration.reasoning_effort,
@@ -1494,11 +2054,32 @@ class ResolvedRoleModel:
     def bind_endpoint(self, endpoint: EndpointConfiguration) -> ResolvedRoleModel:
         """Return a transport-bound copy without changing semantic model identity."""
 
+        route = endpoint.route(self.deployment_id)
+        if route is None:
+            raise ResolutionError(
+                f"endpoint {endpoint.id!r} does not serve deployment {self.deployment_id!r}"
+            )
+
         return replace(
             self,
+            model=route.model,
             base_url=endpoint.base_url,
             api_key_env=endpoint.api_key_env,
         )
+
+    def eligible_endpoints(
+        self, executor: ExecutorConfiguration
+    ) -> tuple[EndpointConfiguration, ...]:
+        if executor.id != self.executor_id:
+            raise ResolutionError(
+                f"model profile {self.profile_id!r} requires executor {self.executor_id!r}"
+            )
+        return tuple(
+            endpoint
+            for endpoint in executor.endpoints
+            if endpoint.route(self.deployment_id) is not None
+        )
+
 
 def resolve_role_models(
     workspace: WorkspaceConfiguration,
@@ -1506,23 +2087,30 @@ def resolve_role_models(
     environment: Mapping[str, str] | None = None,
 ) -> Mapping[str, ResolvedRoleModel]:
     workspace.solver(experiment_id)
-    solve_stage = workspace.stages["solve"]
-    judge_stage = workspace.stages["judge"]
-    assert solve_stage.model is not None and judge_stage.model is not None
+    experiment = workspace.experiments[experiment_id]
+
+    def resolve(role: str, profile_id: str) -> ResolvedRoleModel:
+        configuration = workspace.models[profile_id]
+        deployment = workspace.deployments[configuration.deployment]
+        executor = workspace.executors[deployment.executor]
+        return ResolvedRoleModel.resolve(
+            role,
+            profile_id,
+            configuration,
+            deployment,
+            executor,
+            environment,
+        )
+
     models = {
-        "solver": ResolvedRoleModel.resolve(
-            "solver",
-            workspace.models[solve_stage.model],
-            workspace.executors[solve_stage.executor],
-            environment,
-        ),
-        "judge": ResolvedRoleModel.resolve(
-            "judge",
-            workspace.models[judge_stage.model],
-            workspace.executors[judge_stage.executor],
-            environment,
-        ),
+        "solver": resolve("solver", experiment.roles.solver),
+        "judge": resolve("judge", experiment.roles.judge),
     }
+    if experiment.mode is ExperimentMode.OPTIMIZE and isinstance(
+        experiment.optimizer, CoproConfiguration
+    ):
+        assert experiment.roles.optimizer is not None
+        models["optimizer"] = resolve("optimizer", experiment.roles.optimizer)
     return MappingProxyType(models)
 
 
@@ -1530,17 +2118,32 @@ def resolve_stage_model(
     workspace: WorkspaceConfiguration,
     stage_id: str,
     *,
+    experiment_id: str | None = None,
     role: str | None = None,
 ) -> ResolvedRoleModel | None:
     try:
         stage = workspace.stages[stage_id]
     except KeyError as error:
         raise ResolutionError(f"unknown stage: {stage_id}") from error
-    if stage.model is None:
+    if stage_id in _EXPERIMENT_MODEL_STAGES:
+        if experiment_id is None:
+            raise ResolutionError(f"stage {stage_id!r} requires an experiment id")
+        mapped_role = role or {
+            "validate_judge": "judge",
+            "optimize": "optimizer",
+            "solve": "solver",
+            "judge": "judge",
+        }[stage_id]
+        return resolve_role_models(workspace, experiment_id).get(mapped_role)
+    if stage.model is None or stage.executor is None:
         return None
+    configuration = workspace.models[stage.model]
+    deployment = workspace.deployments[configuration.deployment]
     return ResolvedRoleModel.resolve(
         role or stage_id,
-        workspace.models[stage.model],
+        stage.model,
+        configuration,
+        deployment,
         workspace.executors[stage.executor],
     )
 
@@ -1579,9 +2182,7 @@ class WorkspaceRepository:
         relative = self.workspace.evaluation.cases.coverage.catalog
         source = self.root / relative
         if source.is_symlink() or not source.is_file():
-            raise ResolutionError(
-                f"capability catalog does not exist or is unsafe: {source}"
-            )
+            raise ResolutionError(f"capability catalog does not exist or is unsafe: {source}")
         return self.path(relative, field="evaluation.cases.coverage.catalog")
 
     @property

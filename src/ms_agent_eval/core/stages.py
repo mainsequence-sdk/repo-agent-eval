@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -26,6 +28,7 @@ _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 class StageKind(str, Enum):
     AUTHOR = "author"
     VALIDATE_JUDGE = "validate_judge"
+    OPTIMIZE = "optimize"
     SOLVE = "solve"
     JUDGE = "judge"
     FIT = "fit"
@@ -72,9 +75,7 @@ class StageExecutorIdentity:
         return cls(
             _identifier(payload.get("id"), "stage executor id"),
             _identifier(payload.get("adapter"), "stage executor adapter"),
-            _content_id(
-                payload.get("configuration_hash"), "stage executor configuration_hash"
-            ),
+            _content_id(payload.get("configuration_hash"), "stage executor configuration_hash"),
         )
 
 
@@ -93,9 +94,7 @@ class StageModelIdentity:
             )
         return cls(
             None if value is None else _required_string(value, "stage model id"),
-            None
-            if raw_hash is None
-            else _content_id(raw_hash, "stage model configuration_hash"),
+            None if raw_hash is None else _content_id(raw_hash, "stage model configuration_hash"),
         )
 
 
@@ -248,9 +247,7 @@ class StagePacket:
         if payload.get("schema_version") != 2:
             raise ConfigurationError("stage packet schema_version must be 2")
         raw_inputs = _sequence(payload.get("inputs"), "stage packet inputs")
-        raw_dependencies = _sequence(
-            payload.get("dependencies", []), "stage packet dependencies"
-        )
+        raw_dependencies = _sequence(payload.get("dependencies", []), "stage packet dependencies")
         raw_dependency_artifacts = _sequence(
             payload.get("dependency_artifacts", []),
             "stage packet dependency_artifacts",
@@ -262,9 +259,7 @@ class StagePacket:
         output_contract = _mapping(payload.get("output_contract"), "output_contract")
         packet = cls.create(
             run_id=_required_string(payload.get("run_id"), "stage packet run_id"),
-            experiment_id=_identifier(
-                payload.get("experiment_id"), "stage packet experiment_id"
-            ),
+            experiment_id=_identifier(payload.get("experiment_id"), "stage packet experiment_id"),
             experiment_revision_id=_content_id(
                 payload.get("experiment_revision_id"), "experiment revision id"
             ),
@@ -273,9 +268,7 @@ class StagePacket:
             replicate_slot=_positive_int(
                 payload.get("replicate_slot"), "stage packet replicate_slot"
             ),
-            reuse_policy=_required_string(
-                payload.get("reuse_policy"), "stage packet reuse_policy"
-            ),
+            reuse_policy=_required_string(payload.get("reuse_policy"), "stage packet reuse_policy"),
             dependencies=tuple(
                 _content_id(item, "stage packet dependency") for item in raw_dependencies
             ),
@@ -298,9 +291,7 @@ class StagePacket:
             model=StageModelIdentity.from_mapping(
                 _mapping(payload.get("model"), "stage packet model")
             ),
-            budget=StageBudget.from_mapping(
-                _mapping(payload.get("budget"), "stage packet budget")
-            ),
+            budget=StageBudget.from_mapping(_mapping(payload.get("budget"), "stage packet budget")),
         )
         if payload.get("work_id") != packet.work_id:
             raise IntegrityError("stage packet work identity hash is invalid")
@@ -559,17 +550,40 @@ class StageLedger:
     def prepare(self, packet: StagePacket) -> StagePacket:
         self._validate_dependencies(packet)
         work_digest = packet.work_id.removeprefix("sha256:")
+        packet_digest = packet.packet_id.removeprefix("sha256:")
         if content_hash(packet.work_document()) != packet.work_id:
             raise IntegrityError("stage work document does not match work_id")
+        self.store.put_manifest(f"graph/work/{work_digest}/work", packet.work_document())
         self.store.put_manifest(
-            f"graph/work/{work_digest}/work", packet.work_document()
-        )
-        self.store.put_manifest(
-            f"graph/attempts/{packet.attempt_id.removeprefix('sha256:')}",
+            f"graph/attempts/{packet_digest}",
             packet.as_dict(),
         )
         current = self.status_or_none(packet.packet_id)
         if current is None:
+            self._enable_indexed_run(packet.run_id)
+            self.store.put_manifest(
+                f"runs/{packet.run_id}/packets/{packet_digest}",
+                {
+                    "schema_version": 1,
+                    "packet_id": packet.packet_id,
+                    "work_id": packet.work_id,
+                    "stage": packet.stage.value,
+                    "attempt": packet.attempt,
+                },
+            )
+            self.store.put_manifest(
+                f"runs/{packet.run_id}/work-index/{work_digest}/{packet_digest}",
+                {
+                    "schema_version": 1,
+                    "packet_id": packet.packet_id,
+                    "work_id": packet.work_id,
+                    "attempt": packet.attempt,
+                },
+            )
+            self.store.put_manifest(
+                f"runs/{packet.run_id}/packet-history/{packet_digest}/enabled",
+                {"schema_version": 1, "packet_id": packet.packet_id},
+            )
             self._append_transition(packet, StageState.PREPARED, {})
         elif current.packet.as_dict() != packet.as_dict():
             raise IntegrityError("packet id already identifies different packet bytes")
@@ -581,6 +595,26 @@ class StageLedger:
         return StagePacket.from_mapping(self._load_mapping(path, "stage packet"))
 
     def list(self, run_id: str) -> tuple[StageStatus, ...]:
+        index_marker = self.store.manifest_root / "runs" / run_id / "packets-indexed.json"
+        if index_marker.is_file() and not index_marker.is_symlink():
+            root = self.store.manifest_root / "runs" / run_id / "packets"
+            packet_ids = {
+                _content_id(
+                    self._load_mapping(path, "run packet index").get("packet_id"),
+                    "run packet index packet_id",
+                )
+                for path in root.glob("*.json")
+            }
+            return tuple(
+                sorted(
+                    (self.status(packet_id) for packet_id in packet_ids),
+                    key=lambda item: (
+                        list(StageKind).index(item.packet.stage),
+                        item.packet.attempt,
+                        item.packet.packet_id,
+                    ),
+                )
+            )
         root = self.store.manifest_root / "runs" / run_id / "transitions"
         if not root.is_dir():
             return ()
@@ -598,6 +632,29 @@ class StageLedger:
                 ),
             )
         )
+
+    def attempts_for_work(self, run_id: str, work_id: str) -> tuple[StagePacket, ...]:
+        """Return a run's attempts for one work ID without scanning all stage results."""
+
+        digest = _content_id(work_id, "work id").removeprefix("sha256:")
+        root = self.store.manifest_root / "runs" / run_id / "work-index" / digest
+        if root.is_dir():
+            packets = tuple(
+                self.load_packet(
+                    _content_id(
+                        self._load_mapping(path, "run work index").get("packet_id"),
+                        "run work index packet_id",
+                    )
+                )
+                for path in root.glob("*.json")
+            )
+            return tuple(sorted(packets, key=lambda packet: packet.attempt))
+        index_marker = self.store.manifest_root / "runs" / run_id / "packets-indexed.json"
+        if index_marker.is_file() and not index_marker.is_symlink():
+            return ()
+        # Runs written before the indexed ledger remain readable. New schema-v13
+        # runs always take the indexed path above.
+        return tuple(item.packet for item in self.list(run_id) if item.packet.work_id == work_id)
 
     def claim(
         self,
@@ -738,9 +795,7 @@ class StageLedger:
                     continue
                 if entry.get("work_id") != packet.work_id:
                     continue
-                result = self.load_result(
-                    _content_id(entry.get("result_id"), "reusable result id")
-                )
+                result = self.load_result(_content_id(entry.get("result_id"), "reusable result id"))
                 if result.work_id != packet.work_id or result.status != "completed":
                     continue
                 if result.provenance.get("cache_eligible") is False:
@@ -838,9 +893,7 @@ class StageLedger:
             return json.load(handle)
 
     def put_json(self, artifact_id: str, value: object) -> StageArtifact:
-        reference = self.store.put_blob(
-            BytesIO(canonical_json_bytes(value)), "application/json"
-        )
+        reference = self.store.put_blob(BytesIO(canonical_json_bytes(value)), "application/json")
         return StageArtifact(artifact_id, reference.content_id, reference.media_type)
 
     def _validate_dependencies(self, packet: StagePacket) -> None:
@@ -852,6 +905,16 @@ class StageLedger:
                 raise IntegrityError("stage dependency is not persisted")
 
     def _history(self, packet: StagePacket) -> tuple[Mapping[str, object], ...]:
+        digest = packet.packet_id.removeprefix("sha256:")
+        indexed_root = self.store.manifest_root / "runs" / packet.run_id / "packet-history" / digest
+        marker = indexed_root / "enabled.json"
+        if marker.is_file() and not marker.is_symlink():
+            history = [
+                self._load_mapping(path, "stage transition")
+                for path in indexed_root.glob("*.json")
+                if path.name != "enabled.json"
+            ]
+            return tuple(sorted(history, key=lambda item: int(item["sequence"])))
         root = self.store.manifest_root / "runs" / packet.run_id / "transitions"
         if not root.is_dir():
             return ()
@@ -907,7 +970,7 @@ class StageLedger:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             root = self.store.manifest_root / "runs" / packet.run_id / "transitions"
             root.mkdir(parents=True, exist_ok=True)
-            sequence = len(tuple(root.glob("*.json"))) + 1
+            sequence = self._next_transition_sequence(packet.run_id, root)
             payload = {
                 "schema_version": 1,
                 "sequence": sequence,
@@ -923,7 +986,68 @@ class StageLedger:
                 f"runs/{packet.run_id}/transitions/{sequence:08d}-{payload['transition_id']}",
                 payload,
             )
+            digest = packet.packet_id.removeprefix("sha256:")
+            marker = (
+                self.store.manifest_root
+                / "runs"
+                / packet.run_id
+                / "packet-history"
+                / digest
+                / "enabled.json"
+            )
+            if marker.is_file() and not marker.is_symlink():
+                self.store.put_manifest(
+                    "runs/"
+                    f"{packet.run_id}/packet-history/{digest}/"
+                    f"{sequence:08d}-{payload['transition_id']}",
+                    payload,
+                )
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _enable_indexed_run(self, run_id: str) -> None:
+        marker = self.store.manifest_root / "runs" / run_id / "packets-indexed.json"
+        if marker.is_file() and not marker.is_symlink():
+            return
+        transitions = self.store.manifest_root / "runs" / run_id / "transitions"
+        if transitions.is_dir() and next(transitions.glob("*.json"), None) is not None:
+            return
+        self.store.put_manifest(
+            f"runs/{run_id}/packets-indexed",
+            {"schema_version": 1, "run_id": run_id},
+        )
+
+    def _next_transition_sequence(self, run_id: str, root: Path) -> int:
+        state_root = self.store.operations_root / "run-state" / run_id
+        state_root.mkdir(parents=True, exist_ok=True)
+        counter = state_root / "stage-transition-sequence"
+        if counter.is_file() and not counter.is_symlink():
+            try:
+                current = int(counter.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise IntegrityError("stage transition sequence counter is invalid") from error
+        else:
+            current = max(
+                (
+                    int(self._load_mapping(path, "stage transition").get("sequence", 0))
+                    for path in root.glob("*.json")
+                ),
+                default=0,
+            )
+        sequence = current + 1
+        descriptor, temporary_name = tempfile.mkstemp(prefix="stage-sequence-", dir=state_root)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(str(sequence))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, counter)
+        except BaseException:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+        return sequence
 
     @staticmethod
     def _load_mapping(path: Path, label: str) -> Mapping[str, object]:

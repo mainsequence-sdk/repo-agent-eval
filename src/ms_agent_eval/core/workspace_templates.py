@@ -72,19 +72,13 @@ def _program(role: str) -> Mapping[str, object]:
 
 def _model(
     *,
-    name: str,
+    deployment: str,
     temperature: float,
-    deployment_revision: str | None = None,
     reasoning_effort: str | None = None,
 ) -> Mapping[str, object]:
     return {
-        "name": name,
-        "deployment_revision": deployment_revision or name,
-        **(
-            {"reasoning_effort": reasoning_effort}
-            if reasoning_effort is not None
-            else {}
-        ),
+        "deployment": deployment,
+        **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
         "parameters": {"temperature": temperature},
     }
 
@@ -106,6 +100,9 @@ def build_workspace_template(
     judge_deployment_revision: str | None = None,
     solver_reasoning_effort: str | None = None,
     judge_reasoning_effort: str | None = None,
+    optimizer_model: str | None = None,
+    optimizer_deployment_revision: str | None = None,
+    optimizer_reasoning_effort: str | None = None,
     author_model: str = "gpt-5.6-sol",
     author_deployment_revision: str | None = None,
     data_root: str | None = None,
@@ -117,7 +114,27 @@ def build_workspace_template(
     baseline_repetitions: int = 1,
     judge_repetitions: int = 3,
     include_optimization: bool = True,
+    optimization_strategy: str = "labeled_few_shot",
+    recording_enabled: bool = True,
+    mlflow_tracking_uri: str = "http://127.0.0.1:5000",
+    recording_content_policy: str = "full",
 ) -> WorkspaceTemplate:
+    resolved_optimizer_model = optimizer_model or solver_model
+    resolved_solver_revision = solver_deployment_revision or solver_model
+    resolved_judge_revision = judge_deployment_revision or judge_model
+    resolved_optimizer_revision = optimizer_deployment_revision or resolved_solver_revision
+    optimizer_uses_solver_deployment = (
+        resolved_optimizer_model == solver_model
+        and resolved_optimizer_revision == resolved_solver_revision
+    )
+    endpoint_routes = [
+        {"deployment": "solver-deployment", "model": solver_model},
+        {"deployment": "judge-deployment", "model": judge_model},
+    ]
+    if not optimizer_uses_solver_deployment:
+        endpoint_routes.append(
+            {"deployment": "optimizer-deployment", "model": resolved_optimizer_model}
+        )
     if api_endpoints is None:
         if api_base_url is None:
             raise ConfigurationError("an OpenAI-compatible endpoint is required")
@@ -127,6 +144,7 @@ def build_workspace_template(
                 "base_url": api_base_url,
                 "max_concurrent_requests": api_max_concurrent_requests,
                 **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+                "routes": endpoint_routes,
             }
         ]
     else:
@@ -134,6 +152,7 @@ def build_workspace_template(
             {
                 **dict(endpoint),
                 **({"api_key_env": api_key_env} if api_key_env is not None else {}),
+                "routes": list(endpoint.get("routes", endpoint_routes)),
             }
             for endpoint in api_endpoints
         ]
@@ -147,8 +166,24 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 11,
+        "schema_version": 14,
         "workspace": workspace,
+        "recording": {
+            "enabled": recording_enabled,
+            "recorder": "local-mlflow",
+            "mode": "live_and_finalize",
+            "failure_policy": "continue",
+            "artifact_policy": "full",
+            "content_policy": recording_content_policy,
+        },
+        "recorders": {
+            "local-mlflow": {
+                "type": "mlflow",
+                "tracking_uri": mlflow_tracking_uri,
+                "experiment_name": "ms-agent-eval/{workspace_id}",
+                "authentication": {"type": "none"},
+            }
+        },
         "executors": {
             "remote-models": {
                 "type": "endpoint",
@@ -161,23 +196,57 @@ def build_workspace_template(
             },
             "local-process": {"type": "process", "adapter": "local"},
         },
+        "deployments": {
+            "author-deployment": {
+                "executor": "authoring-harness",
+                "model": author_model,
+                "revision": author_deployment_revision or author_model,
+            },
+            "solver-deployment": {
+                "executor": "remote-models",
+                "model": solver_model,
+                "revision": resolved_solver_revision,
+            },
+            "judge-deployment": {
+                "executor": "remote-models",
+                "model": judge_model,
+                "revision": resolved_judge_revision,
+            },
+            **(
+                {}
+                if optimizer_uses_solver_deployment
+                else {
+                    "optimizer-deployment": {
+                        "executor": "remote-models",
+                        "model": resolved_optimizer_model,
+                        "revision": resolved_optimizer_revision,
+                    }
+                }
+            ),
+        },
         "models": {
             "author": _model(
-                name=author_model,
-                deployment_revision=author_deployment_revision,
+                deployment="author-deployment",
                 temperature=0.0,
             ),
             "solver": _model(
-                name=solver_model,
-                deployment_revision=solver_deployment_revision,
+                deployment="solver-deployment",
                 temperature=0.2,
                 reasoning_effort=solver_reasoning_effort,
             ),
             "judge": _model(
-                name=judge_model,
-                deployment_revision=judge_deployment_revision,
+                deployment="judge-deployment",
                 temperature=0.0,
                 reasoning_effort=judge_reasoning_effort,
+            ),
+            "optimizer": _model(
+                deployment=(
+                    "solver-deployment"
+                    if optimizer_uses_solver_deployment
+                    else "optimizer-deployment"
+                ),
+                temperature=0.7,
+                reasoning_effort=optimizer_reasoning_effort,
             ),
         },
         "stages": {
@@ -188,20 +257,18 @@ def build_workspace_template(
                 "budget": {"model_calls": 1, "tokens": 64000, "wall_seconds": 1800},
             },
             "validate_judge": {
-                "executor": "remote-models",
-                "model": "judge",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 100, "tokens": 250000, "wall_seconds": 1800},
             },
+            "optimize": {
+                "reuse": {"policy": "exact"},
+                "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
+            },
             "solve": {
-                "executor": "remote-models",
-                "model": "solver",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
             },
             "judge": {
-                "executor": "remote-models",
-                "model": "judge",
                 "reuse": {"policy": "exact"},
                 "budget": {
                     "model_calls": judge_repetitions,
@@ -252,6 +319,7 @@ def build_workspace_template(
         "experiments": {
             "baseline": {
                 "mode": "evaluate",
+                "roles": {"solver": "solver", "judge": "judge"},
                 "solver": {
                     "dspy": _program("solver"),
                 },
@@ -259,30 +327,61 @@ def build_workspace_template(
                 "repetitions": baseline_repetitions,
             }
         },
+        "comparisons": {},
     }
     if include_optimization:
+        if optimization_strategy not in {"labeled_few_shot", "copro"}:
+            raise ConfigurationError("optimization_strategy must be labeled_few_shot or copro")
         experiments = payload["experiments"]
         assert isinstance(experiments, dict)
-        experiments["optimize-few-shot"] = {
+        optimizer = (
+            {"strategy": "labeled_few_shot", "search": {"k": [1, 2, 4]}}
+            if optimization_strategy == "labeled_few_shot"
+            else {
+                "strategy": "copro",
+                "targets": {"prompt": True, "skills": "all"},
+                "search": {"breadth": 3, "depth": 2, "init_temperature": 1.4},
+                "metric": {"name": "rubric_mean_score"},
+            }
+        )
+        experiments["optimize-solver"] = {
             "mode": "optimize",
             "based_on": "baseline",
-            "optimizer": {"name": "LabeledFewShot", "search": {"k": [1, 2, 4]}},
+            "roles": {
+                "solver": "solver",
+                **({"optimizer": "optimizer"} if optimization_strategy == "copro" else {}),
+                "judge": "judge",
+            },
+            "optimizer": optimizer,
             "cross_validation": {"folds": 5, "seed": 0},
             "budget": {
-                "solver": {"model_calls": 100, "tokens": 250000},
-                "judge": {"model_calls": 300, "tokens": 500000},
-                "wall_seconds": 1800,
+                **(
+                    {"optimizer": {"model_calls": 1000, "tokens": 4000000}}
+                    if optimization_strategy == "copro"
+                    else {}
+                ),
+                "solver": {"model_calls": 10000, "tokens": 40000000},
+                "judge": {"model_calls": 30000, "tokens": 60000000},
+                "wall_seconds": 14400,
             },
         }
+        comparisons = payload["comparisons"]
+        assert isinstance(comparisons, dict)
+        comparisons["model-arms"] = {
+            "baseline_experiments": ["baseline"],
+            "optimization_experiments": ["optimize-solver"],
+            "primary_metric": "score.mean",
+            "grouping": (
+                ["solver", "optimizer"]
+                if optimization_strategy == "copro"
+                else ["solver"]
+            ),
+        }
     authoring = (
-        files("ms_agent_eval")
-        .joinpath("templates/case-authoring.md")
-        .read_text(encoding="utf-8")
+        files("ms_agent_eval").joinpath("templates/case-authoring.md").read_text(encoding="utf-8")
     )
     case_bank_readme = (
-        files("ms_agent_eval")
-        .joinpath("templates/cases-readme.md")
-        .read_text(encoding="utf-8")
+        files("ms_agent_eval").joinpath("templates/cases-readme.md").read_text(encoding="utf-8")
     )
     capability_catalog = (
         "# Mandatory semantic coverage contract. Read README.md before editing.\n"

@@ -16,6 +16,7 @@ from .workspace import EndpointConfiguration
 
 
 PreflightStatus = Literal["fits", "exceeds", "skipped"]
+TokenMeasurementStatus = Literal["exact", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,40 @@ class TokenPreflightResult:
             "capability_source": self.capability_source,
             "capability_checked_at": self.capability_checked_at,
             "rendered_message_hash": self.rendered_message_hash,
+        }
+
+
+@dataclass(frozen=True)
+class ExactTokenMeasurement:
+    """Exact raw-text token count returned by an endpoint tokenizer."""
+
+    status: TokenMeasurementStatus
+    reason: str
+    content_hash: str
+    token_count: int | None
+    model: str
+    deployment_revision: str
+    endpoint_id: str
+    endpoint_configuration_hash: str
+    tokenizer_fingerprint: str | None
+
+    @property
+    def is_exact(self) -> bool:
+        return self.status == "exact"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "content_hash": self.content_hash,
+            "token_count": self.token_count,
+            "model": self.model,
+            "deployment_revision": self.deployment_revision,
+            "endpoint_id": self.endpoint_id,
+            "endpoint_configuration_hash": self.endpoint_configuration_hash,
+            "tokenizer_fingerprint": self.tokenizer_fingerprint,
+            "add_special_tokens": False,
+            "chat_template_applied": False,
         }
 
 
@@ -174,9 +209,7 @@ class EndpointTokenPreflight:
                 self._token_counts.setdefault(cache_key, input_tokens)
 
         required = input_tokens + maximum_output_tokens
-        status: PreflightStatus = (
-            "fits" if required <= capabilities.context_window else "exceeds"
-        )
+        status: PreflightStatus = "fits" if required <= capabilities.context_window else "exceeds"
         return TokenPreflightResult(
             status=status,
             reason="exact_endpoint_tokenization",
@@ -191,6 +224,71 @@ class EndpointTokenPreflight:
             rendered_message_hash=message_hash,
         )
 
+    def measure_text(
+        self,
+        endpoint: EndpointConfiguration,
+        *,
+        model: str,
+        deployment_revision: str,
+        content: str,
+        api_key: str | None,
+    ) -> ExactTokenMeasurement:
+        """Measure raw UTF-8 text without a chat template or special tokens."""
+
+        text_hash = content_hash(content)
+        capabilities = self._capabilities_for(
+            endpoint,
+            model=model,
+            deployment_revision=deployment_revision,
+            api_key=api_key,
+        )
+        cache_key = content_hash(
+            {
+                "operation": "raw_text_token_count",
+                "endpoint_configuration_hash": endpoint.configuration_hash,
+                "model": model,
+                "deployment_revision": deployment_revision,
+                "tokenizer_fingerprint": capabilities.tokenizer_fingerprint,
+                "content_hash": text_hash,
+                "add_special_tokens": False,
+            }
+        )
+        with self._lock:
+            token_count = self._token_counts.get(cache_key)
+        if token_count is None:
+            try:
+                token_count = self._tokenize(
+                    endpoint,
+                    content,
+                    add_special=False,
+                    api_key=api_key,
+                )
+            except _ExtensionFailure as error:
+                return ExactTokenMeasurement(
+                    "skipped",
+                    error.reason,
+                    text_hash,
+                    None,
+                    model,
+                    deployment_revision,
+                    endpoint.id,
+                    endpoint.configuration_hash,
+                    capabilities.tokenizer_fingerprint,
+                )
+            with self._lock:
+                self._token_counts.setdefault(cache_key, token_count)
+        return ExactTokenMeasurement(
+            "exact",
+            "exact_endpoint_tokenization",
+            text_hash,
+            token_count,
+            model,
+            deployment_revision,
+            endpoint.id,
+            endpoint.configuration_hash,
+            capabilities.tokenizer_fingerprint,
+        )
+
     def _capabilities_for(
         self,
         endpoint: EndpointConfiguration,
@@ -203,9 +301,7 @@ class EndpointTokenPreflight:
         now = self._clock()
         with self._lock:
             cached = self._capabilities.get(key)
-            if cached is not None and (
-                cached.retry_after is None or cached.retry_after > now
-            ):
+            if cached is not None and (cached.retry_after is None or cached.retry_after > now):
                 return cached
             # Serialize first discovery per endpoint. The network timeout is
             # intentionally short, and this prevents a parallel-run probe storm.
@@ -286,11 +382,7 @@ class EndpointTokenPreflight:
             template_fingerprint,
             reason or "context_unknown",
             checked_at,
-            (
-                self._clock() + self.unavailable_retry_seconds
-                if temporary
-                else None
-            ),
+            (self._clock() + self.unavailable_retry_seconds if temporary else None),
         )
 
     @staticmethod
@@ -302,9 +394,7 @@ class EndpointTokenPreflight:
             return None
         value = settings.get("n_ctx")
         return (
-            value
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0
-            else None
+            value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
         )
 
     @staticmethod
@@ -325,7 +415,9 @@ class EndpointTokenPreflight:
         if not isinstance(meta, Mapping):
             return None
         value = meta.get("n_ctx")
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+        )
 
     def _apply_template(
         self,
@@ -358,13 +450,14 @@ class EndpointTokenPreflight:
         endpoint: EndpointConfiguration,
         content: str,
         *,
+        add_special: bool = True,
         api_key: str | None,
     ) -> int:
         response = self._request_json(
             endpoint,
             "tokenize",
             method="POST",
-            payload={"content": content, "add_special": True},
+            payload={"content": content, "add_special": add_special},
             api_key=api_key,
         )
         tokens = response.get("tokens")
@@ -408,9 +501,7 @@ class EndpointTokenPreflight:
             if error.code in self._UNSUPPORTED_HTTP:
                 with self._lock:
                     self._unsupported_extensions.add(cache_key)
-                raise _ExtensionFailure(
-                    f"{extension.replace('-', '_')}_unsupported"
-                ) from None
+                raise _ExtensionFailure(f"{extension.replace('-', '_')}_unsupported") from None
             if error.code in self._UNAUTHORIZED_HTTP:
                 raise _ExtensionFailure("capability_unauthorized") from None
             raise _ExtensionFailure("capability_http_error") from None
@@ -423,13 +514,9 @@ class EndpointTokenPreflight:
         try:
             value = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise _ExtensionFailure(
-                f"{extension.replace('-', '_')}_schema_incompatible"
-            ) from None
+            raise _ExtensionFailure(f"{extension.replace('-', '_')}_schema_incompatible") from None
         if not isinstance(value, Mapping):
-            raise _ExtensionFailure(
-                f"{extension.replace('-', '_')}_schema_incompatible"
-            )
+            raise _ExtensionFailure(f"{extension.replace('-', '_')}_schema_incompatible")
         return {str(key): item for key, item in value.items()}
 
     @staticmethod
@@ -461,12 +548,8 @@ class EndpointTokenPreflight:
             chat_template_fingerprint=(
                 None if capabilities is None else capabilities.chat_template_fingerprint
             ),
-            capability_source=(
-                None if capabilities is None else capabilities.context_source
-            ),
-            capability_checked_at=(
-                None if capabilities is None else capabilities.checked_at
-            ),
+            capability_source=(None if capabilities is None else capabilities.context_source),
+            capability_checked_at=(None if capabilities is None else capabilities.checked_at),
             rendered_message_hash=message_hash,
         )
 
@@ -474,5 +557,6 @@ class EndpointTokenPreflight:
 __all__ = [
     "ContextWindowExceededError",
     "EndpointTokenPreflight",
+    "ExactTokenMeasurement",
     "TokenPreflightResult",
 ]

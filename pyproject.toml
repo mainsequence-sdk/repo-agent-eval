@@ -10,9 +10,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "dspy==3.2.1",
+  "plotly==7.0.0",
   "pyyaml>=6.0.2",
   "questionary>=2.1,<3",
   "rich>=13,<16",
+]
+
+[project.optional-dependencies]
+mlflow = [
+  "mlflow==3.16.0",
 ]
 
 [project.scripts]
@@ -39,4 +45,5 @@ testpaths = [
 markers = [
   "docker: requires access to a running Docker daemon and pinned runtime image",
   "openai_compatible: requires a configured live OpenAI-compatible API",
+  "mlflow: requires the pinned optional MLflow client and a local tracking store",
 ]

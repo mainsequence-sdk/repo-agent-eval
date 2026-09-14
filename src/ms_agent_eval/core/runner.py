@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from .coordinator import LmFactory, RunProgress, StageCoordinator, default_lm_factory
 from .planning import CompiledWorkspace
 from .progress import ProgressSink
+from .recorder import RecorderFactory
 from .token_preflight import EndpointTokenPreflight
 
 
@@ -18,12 +19,14 @@ class ExperimentRunner:
         lm_factory: LmFactory = default_lm_factory,
         progress_sink: ProgressSink | None = None,
         token_preflight: EndpointTokenPreflight | None = None,
+        recorder_factory: RecorderFactory | None = None,
     ) -> None:
         self.coordinator = StageCoordinator(
             workspace,
             lm_factory=lm_factory,
             progress_sink=progress_sink,
             token_preflight=token_preflight,
+            recorder_factory=recorder_factory,
         )
 
     def run(

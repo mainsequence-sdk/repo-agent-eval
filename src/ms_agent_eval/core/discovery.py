@@ -78,7 +78,8 @@ def inspect_repository(
 ) -> Iterator[InspectedRepository]:
     kind = (
         SourceRefKind.COMMIT
-        if len(repository_ref) == 40 and all(character in "0123456789abcdef" for character in repository_ref)
+        if len(repository_ref) == 40
+        and all(character in "0123456789abcdef" for character in repository_ref)
         else SourceRefKind.TAG
     )
     source = GitSource.from_mapping(

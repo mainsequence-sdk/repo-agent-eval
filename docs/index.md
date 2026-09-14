@@ -16,15 +16,15 @@ flowchart LR
     Validate -->|Yes| Baseline[Run baseline benchmark]
     Validate -->|Yes| Optimize[Grouped K-fold model selection on train]
     Optimize --> Refit[Refit selected configuration on all train cases]
-    Refit --> Test[Evaluate on untouched test split once]
+    Refit --> Test[Evaluate frozen original and optimized programs on untouched test]
     Baseline --> Results[Inspect scores, usage, and evidence]
     Test --> Results
 ```
 
 A pilot is diagnostic and never produces valid benchmark metrics. An
 optimization run selects a configuration by grouped K-fold cross-validation on
-training cases, refits it on all training cases, and then evaluates the untouched
-test set once.
+training cases and refits it on all training cases. A COPRO run then evaluates
+the frozen original and optimized programs on the same untouched test cases.
 
 ## Choose what you are trying to do
 
@@ -63,6 +63,7 @@ test set once.
 - [Judging and judge validation](evaluation/judging-and-validation.md)
 - [Pilot versus scored runs](evaluation/pilot-vs-scored-runs.md)
 - [Interpreting results](evaluation/interpreting-results.md)
+- [Formal COPRO summary and MLflow assets](evaluation/formal-copro-summary.md)
 
 ### Execution
 
@@ -71,6 +72,7 @@ test set once.
 - [Codex CLI harness](execution/codex-cli.md)
 - [Resume and recovery](execution/resume-and-recovery.md)
 - [Incremental execution and cross-run reuse](execution/incremental-execution.md)
+- [Experiment recording with MLflow](execution/experiment-recording.md)
 
 ### Architecture and reference
 
@@ -81,6 +83,10 @@ test set once.
 - [ADR-002: Isolated Codex CLI harness execution](architecture/002-isolated-codex-cli-execution.md)
 - [ADR-003: Content-addressed experiment graph](architecture/003-content-addressed-experiment-graph.md)
 - [ADR-004: Pooled endpoint concurrency](architecture/004-pooled-endpoint-concurrency.md)
+- [ADR-005: Optional endpoint-native token preflight](architecture/005-optional-token-preflight.md)
+- [ADR-006: Experiment recorder projection and MLflow adapter](architecture/006-experiment-recorder-projection.md)
+- [ADR-007: Configurable DSPy optimization strategies](architecture/007-configurable-dspy-optimization-strategies.md)
+- [ADR-008: Paired COPRO evaluation and formal reporting](architecture/008-paired-copro-evaluation-and-formal-reporting.md)
 - [DSPy feasibility report](architecture/dspy-feasibility-report.md)
 - [Framework conventions](reference/conventions.md)
 - [CLI reference](reference/cli.md)
@@ -97,5 +103,5 @@ they are not part of the framework contract.
 
 Historical implementation plans live outside this documentation tree in the
 root-level `.implementation_tasks/` directory, which is local and ignored by Git. Current behavior is defined by
-these guides, schema-v11 workspaces, and the repository-local case-authoring
+these guides, schema-v14 workspaces, and the repository-local case-authoring
 skill.

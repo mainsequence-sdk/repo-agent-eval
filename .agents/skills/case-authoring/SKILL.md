@@ -42,7 +42,7 @@ leakage group.
 
 ## Case package
 
-Write schema-v5 packages under `cases/<skill-id>/<case-id>/`:
+Write schema-v6 packages under `cases/<skill-id>/<case-id>/`:
 
 ```text
 case.yaml
@@ -70,6 +70,11 @@ Hard failures are named critical violations, not a second scoring system.
 When a prompt contains a real faulty premise, configuration, test, or symptom,
 assign `error_identification` 35–50% of the score. Do not add diagnostic points
 to an ordinary case.
+
+Do not assign subjective `easy`, `medium`, `hard`, or `complex` labels. The
+framework measures the hidden expected response with the configured exact
+endpoint tokenizer after evaluation and reports fixed response-length bands.
+Authors do not enter or estimate token counts in `case.yaml`.
 
 ## Permanent splits and cross-validation
 

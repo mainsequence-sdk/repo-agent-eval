@@ -72,9 +72,7 @@ def _solve_packet(ledger: StageLedger, case: dict[str, object]) -> StagePacket:
         inputs=(ledger.put_json("case", case),),
         instructions=ledger.put_json("instructions", {"task": "solve"}),
         output_schema="solver-response-v1",
-        executor=StageExecutorIdentity(
-            "isolated-codex", "codex_cli", f"sha256:{'1' * 64}"
-        ),
+        executor=StageExecutorIdentity("isolated-codex", "codex_cli", f"sha256:{'1' * 64}"),
         model=StageModelIdentity("solver", f"sha256:{'2' * 64}"),
         budget=StageBudget(1, 1000, 60),
     )
@@ -91,6 +89,7 @@ def _case_input() -> dict[str, object]:
         "fold": None,
         "candidate_id": "baseline",
         "candidate_k": 0,
+        "strategy": "baseline",
         "global_context": "Global context.",
         "skill_context": "Skill context.",
         "task": "Solve this task.",
@@ -255,9 +254,7 @@ def test_codex_permission_profile_and_jsonl_usage() -> None:
     assert '":workspace_roots"' in config
     assert "enabled = false" in config
     assert 'inherit = "none"' in config
-    usage = _usage(
-        b'{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\n'
-    )
+    usage = _usage(b'{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\n')
     assert usage == {
         "model_calls": 1,
         "tokens": 15,
@@ -298,26 +295,23 @@ def test_codex_executor_transforms_solver_output_and_records_provenance(
                 for index, value in enumerate(arguments)
                 if value == "--mount" and "dst=/run/codex" in arguments[index + 1]
             )
-            source = next(part.removeprefix("src=") for part in mount.split(",") if part.startswith("src="))
-            assert 'model_reasoning_effort = "high"' in (
-                Path(source) / "config.toml"
-            ).read_text(encoding="utf-8")
+            source = next(
+                part.removeprefix("src=") for part in mount.split(",") if part.startswith("src=")
+            )
+            assert 'model_reasoning_effort = "high"' in (Path(source) / "config.toml").read_text(
+                encoding="utf-8"
+            )
             (Path(source) / "result.json").write_text(
                 json.dumps({"response": "The isolated answer."}), encoding="utf-8"
             )
-            stdout = (
-                b'{"type":"turn.completed","usage":{"input_tokens":10,'
-                b'"output_tokens":5}}\n'
-            )
+            stdout = b'{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}\n'
             return ContainerOutcome(0, stdout, b"")
 
     workspace_configuration = SimpleNamespace(
         stages={"solve": SimpleNamespace(model="solver")},
         models={"solver": SimpleNamespace(parameters={}, reasoning_effort="high")},
     )
-    compiled = SimpleNamespace(
-        repository=SimpleNamespace(workspace=workspace_configuration)
-    )
+    compiled = SimpleNamespace(repository=SimpleNamespace(workspace=workspace_configuration))
     ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
     packet = _solve_packet(ledger, _case_input())
     output = CodexCliExecutor(

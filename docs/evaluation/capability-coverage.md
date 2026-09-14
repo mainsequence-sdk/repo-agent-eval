@@ -90,7 +90,7 @@ that cite capabilities outside their exact skill.
 
 ### 3. Per-case coverage classification
 
-Every schema-v5 `case.yaml` connects one case to the catalog:
+Every schema-v6 `case.yaml` connects one case to the catalog:
 
 ```yaml
 coverage:
@@ -98,7 +98,6 @@ coverage:
   supporting:
     - updater-storage-separation
   archetype: diagnosis
-  difficulty: complex
 ```
 
 Each case has exactly one primary capability and no more than two supporting
@@ -106,8 +105,9 @@ capabilities. Only the primary capability counts toward required depth.
 Supporting entries record relevant context; they never earn readiness credit.
 
 Allowed archetypes are `construction`, `review`, `diagnosis`, `migration`, and
-`evidence`. Difficulty is `easy` or `complex`. These classifications help
-authors diversify the corpus but do not replace capability coverage.
+`evidence`. These classifications help authors diversify the corpus but do not
+replace capability coverage. Response length is measured later from the hidden
+expected response with an exact tokenizer; it is not a semantic difficulty label.
 
 ## How to build the catalog
 

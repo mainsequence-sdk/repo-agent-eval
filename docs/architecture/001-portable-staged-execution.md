@@ -202,8 +202,8 @@ executors:
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
         max_concurrent_requests: 2
-      - id: llama-server-10-11436
-        base_url: http://192.168.1.10:11436/v1
+      - id: llama-server-10-11434
+        base_url: http://192.168.1.10:11434/v1
         max_concurrent_requests: 4
 
   local-codex:

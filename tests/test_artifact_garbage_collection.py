@@ -14,6 +14,7 @@ from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.snapshots import ExternalSnapshotStore
 from ms_agent_eval.core.storage import FilesystemArtifactStore
 
+
 def _json_blob(store: FilesystemArtifactStore, value: object):  # type: ignore[no-untyped-def]
     return store.put_blob(BytesIO(canonical_json_bytes(value)), "application/json")
 
@@ -111,6 +112,23 @@ def test_gc_protects_recent_unreferenced_blobs(tmp_path: Path) -> None:
     assert path.is_file()
 
 
+def test_gc_ignores_atomic_temporary_entry_that_was_already_renamed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    missing = store.temporary_root / "already-renamed"
+    monkeypatch.setattr(
+        "ms_agent_eval.core.garbage_collection._temporary_entries",
+        lambda _store: [missing],
+    )
+
+    report = collect_artifact_garbage(store, delete=True, minimum_age_seconds=0)
+
+    assert report["temporary"]["total_count"] == 0  # type: ignore[index]
+    assert report["temporary"]["deleted_count"] == 0  # type: ignore[index]
+
+
 def test_gc_fails_closed_when_a_manifest_is_invalid(tmp_path: Path) -> None:
     store = FilesystemArtifactStore(tmp_path / "artifacts")
     garbage = _json_blob(store, {"value": "keep when uncertain"})
@@ -167,11 +185,7 @@ def test_model_call_and_trace_manifests_make_evidence_reachable(tmp_path: Path) 
 
     call_manifest = json.loads(
         (
-            store.manifest_root
-            / "runs"
-            / "run-1"
-            / "model-calls"
-            / f"{record.call_id}.json"
+            store.manifest_root / "runs" / "run-1" / "model-calls" / f"{record.call_id}.json"
         ).read_text(encoding="utf-8")
     )
     assert call_manifest["packet_id"] == f"sha256:{'1' * 64}"
@@ -188,3 +202,48 @@ def test_model_call_and_trace_manifests_make_evidence_reachable(tmp_path: Path) 
     assert report["blobs"]["total_count"] == 3  # type: ignore[index]
     assert report["blobs"]["reachable_count"] == 3  # type: ignore[index]
     assert report["blobs"]["deleted_count"] == 0  # type: ignore[index]
+
+
+def test_gc_retains_recorder_artifacts_until_delivery_has_a_receipt(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    projected = _json_blob(store, {"report": "external projection"})
+    run_root = store.operations_root / "recorders" / "mlflow" / ("a" * 64) / "runs" / "run-1"
+    event = run_root / "events" / "event.json"
+    event.parent.mkdir(parents=True)
+    event.write_text(
+        json.dumps(
+            {
+                "plan": {
+                    "artifacts": [
+                        {
+                            "reference": {
+                                "content_id": projected.content_id,
+                                "media_type": projected.media_type,
+                            }
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pending = collect_artifact_garbage(
+        store,
+        delete=True,
+        minimum_age_seconds=0,
+    )
+    assert pending["blobs"]["reachable_count"] == 1  # type: ignore[index]
+    assert pending["blobs"]["deleted_count"] == 0  # type: ignore[index]
+
+    receipt = run_root / "receipts" / event.name
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text('{"status":"synced"}', encoding="utf-8")
+    delivered = collect_artifact_garbage(
+        store,
+        delete=True,
+        minimum_age_seconds=0,
+    )
+    assert delivered["blobs"]["deleted_count"] == 1  # type: ignore[index]

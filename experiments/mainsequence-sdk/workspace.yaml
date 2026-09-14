@@ -1,8 +1,24 @@
-schema_version: 11
+schema_version: 14
 
 workspace:
   id: mainsequence-sdk-evaluation
   # Optional. When omitted, runtime data lives in ~/ms_agent_eval/<workspace-id>.
+
+recording:
+  enabled: true
+  recorder: local-mlflow
+  mode: live_and_finalize
+  failure_policy: continue
+  artifact_policy: full
+  content_policy: full
+
+recorders:
+  local-mlflow:
+    type: mlflow
+    tracking_uri: http://192.168.1.17:5000
+    experiment_name: ms-agent-eval/{workspace_id}/{experiment_id}
+    authentication:
+      type: none
 
 executors:
   lan-inference:
@@ -12,12 +28,21 @@ executors:
       - id: llama-cpp-17-18081
         base_url: http://192.168.1.17:18081/v1
         max_concurrent_requests: 2
+        routes:
+          - deployment: qwen-27b-local
+            model: qwen3.6:27b-coding
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
         max_concurrent_requests: 2
-      - id: llama-server-10-11436
-        base_url: http://192.168.1.10:11436/v1
+        routes:
+          - deployment: qwen-27b-local
+            model: qwen3.6:27b-coding
+      - id: llama-server-10-11434
+        base_url: http://192.168.1.10:11434/v1
         max_concurrent_requests: 4
+        routes:
+          - deployment: qwen-27b-local
+            model: qwen3.6:27b-coding
   artifact-harness:
     type: harness
     adapter: artifact_exchange
@@ -25,28 +50,42 @@ executors:
     type: process
     adapter: local
 
+deployments:
+  codex-author:
+    executor: artifact-harness
+    model: gpt-5.6-sol
+    revision: gpt-5.6-sol-2026-09-13
+  qwen-27b-local:
+    executor: lan-inference
+    model: qwen3.6:27b-coding
+    revision: qwen3.6-27b-coding-local-2026-09-13
+
 models:
   author:
-    name: gpt-5.6-sol
-    deployment_revision: gpt-5.6-sol-2026-09-13
+    deployment: codex-author
     parameters:
       temperature: 0.0
   solver:
-    name: qwen3.6:27b-coding
-    deployment_revision: qwen3.6-27b-coding-local-2026-09-13
+    deployment: qwen-27b-local
     reasoning_effort: none
     parameters:
       temperature: 0.2
       max_tokens: 4096
       timeout: 600
   judge:
-    name: qwen3.6:27b-coding
-    deployment_revision: qwen3.6-27b-coding-local-2026-09-13
+    deployment: qwen-27b-local
     reasoning_effort: none
     parameters:
       temperature: 0.0
       max_tokens: 2048
       timeout: 300
+  optimizer:
+    deployment: qwen-27b-local
+    reasoning_effort: none
+    parameters:
+      temperature: 0.7
+      max_tokens: 4096
+      timeout: 600
 
 stages:
   author:
@@ -55,18 +94,15 @@ stages:
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 64000, wall_seconds: 1800}
   validate_judge:
-    executor: lan-inference
-    model: judge
     reuse: {policy: exact}
     budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
+  optimize:
+    reuse: {policy: exact}
+    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   solve:
-    executor: lan-inference
-    model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
-    executor: lan-inference
-    model: judge
     reuse: {policy: exact}
     budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
   fit:
@@ -229,6 +265,9 @@ evaluation:
 experiments:
   baseline:
     mode: evaluate
+    roles:
+      solver: solver
+      judge: judge
     solver:
       dspy:
         module: Predict
@@ -243,21 +282,46 @@ experiments:
       type: response_only
       python: "3.12"
     repetitions: 1
-  optimize-few-shot:
+  optimize-solver:
     mode: optimize
     based_on: baseline
+    roles:
+      solver: solver
+      optimizer: optimizer
+      judge: judge
     optimizer:
-      name: LabeledFewShot
+      strategy: copro
+      targets:
+        prompt: true
+        skills: all
       search:
-        k: [1, 2, 4]
+        breadth: 3
+        depth: 2
+        init_temperature: 1.4
+      metric:
+        name: rubric_mean_score
     cross_validation:
       folds: 5
       seed: 0
     budget:
+      optimizer:
+        model_calls: 500
+        tokens: 2000000
       solver:
-        model_calls: 100
-        tokens: 250000
+        model_calls: 30000
+        tokens: 120000000
       judge:
-        model_calls: 300
-        tokens: 500000
-      wall_seconds: 1800
+        model_calls: 100000
+        tokens: 200000000
+      wall_seconds: 14400
+
+comparisons:
+  solver-and-copro-models:
+    baseline_experiments:
+      - baseline
+    optimization_experiments:
+      - optimize-solver
+    primary_metric: score.mean
+    grouping:
+      - solver
+      - optimizer

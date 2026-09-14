@@ -23,6 +23,7 @@ ownership, identity, judging, dataset-governance, runtime, secret, and reporting
 rules.
 
 - [CLI reference](cli.md)
+- [OpenRouter model catalog](openrouter-model-catalog.md)
 - [Workspace schema reference](workspace-schema.md)
 - [Terminology](terminology.md)
 

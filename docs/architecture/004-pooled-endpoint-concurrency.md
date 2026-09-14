@@ -9,6 +9,11 @@
 - Preserves:
   [ADR-003: Content-Addressed Experiment Graph and Stage Reuse](003-content-addressed-experiment-graph.md)
 
+> Schema note: ADR-009 refines this executor-wide equivalence model. In schema
+> 14, endpoint `routes` declare eligible deployments and usable concurrency is
+> calculated for the selected deployment rather than every endpoint in the
+> executor. The historical examples below document ADR-004's original schema.
+
 ## Context
 
 An endpoint executor currently contains one `base_url`. Its mapping key is an
@@ -55,7 +60,7 @@ logical executor capacity.
                                     │
                  ┌────────────────┼────────────────┐
                  │                │                │
-       llama.cpp :18081      llama.cpp :18080      llama server :11436
+       llama.cpp :18081      llama.cpp :18080      llama server :11434
             2 slots               2 slots                 4 slots
 ```
 
@@ -89,8 +94,8 @@ executors:
       - id: llama-cpp-17-18080
         base_url: http://192.168.1.17:18080/v1
         max_concurrent_requests: 2
-      - id: llama-server-10-11436
-        base_url: http://192.168.1.10:11436/v1
+      - id: llama-server-10-11434
+        base_url: http://192.168.1.10:11434/v1
         max_concurrent_requests: 4
 
 models:
@@ -144,7 +149,8 @@ name is versioned, and its value remains outside Git and all identities:
         api_key_env: INFERENCE_A_API_KEY
 ```
 
-The initial implementation uses schema version 11. It replaces singular
+Pooled endpoints were introduced in schema version 11; the current schema is
+version 12. The pool shape replaces singular
 `executors.<id>.base_url` with the non-empty `endpoints` list for endpoint
 executors. There is no legacy compatibility shim: schema-10 workspaces must be
 rewritten explicitly, and old schemas continue to fail closed.
@@ -161,7 +167,7 @@ Configuration validation requires:
 A one-server setup uses a one-item list. Capacity must always be explicit in
 generated templates; the library parser may use `1` only when constructing
 configuration programmatically, not to hide missing capacity in a committed
-schema-11 workspace.
+schema-v13 workspace.
 
 ## Replica-equivalence contract
 
@@ -201,7 +207,7 @@ bounded worker pool (8)
        │
        ├── acquire llama-cpp-17-18081 slots 1..2 ──► requests
        ├── acquire llama-cpp-17-18080 slots 1..2 ──► requests
-       └── acquire llama-server-10-11436 slots 1..4 ──► requests
+       └── acquire llama-server-10-11434 slots 1..4 ──► requests
 ```
 
 The dispatcher uses capacity-aware availability rather than assigning requests
@@ -256,26 +262,43 @@ own global admission limit.
 
 ## Failure, retry, and recovery
 
-Concurrency must not introduce hidden model retries. A request failure produces
-the same durable failed attempt as sequential execution. The coordinator stops
-the batch when it observes that failure; it does not silently replay an
-ambiguous request on another endpoint. An operator may remove an unhealthy
-replica from the workspace before explicitly retrying the failed work.
+Replica pools provide bounded failover for endpoint-level failures. One logical
+DSPy call may try each eligible replica at most once when the previous attempt
+fails with a connection, provider-server, or rate-limit error. A failing replica
+is quarantined from new calls for a short cooldown so concurrent work shifts to
+the remaining compatible replicas. Context preflight rejection uses the same
+bounded routing rule but never makes a generation request to the rejected
+replica.
+
+Every physical attempt remains observable. Provenance records the failed route,
+the successful route, normalized errors, latency, and model-call usage. This is
+transport failover, not semantic retry: parsing failures, invalid model output,
+authentication failures, budget failures, and application errors are not sent
+to another replica. When every eligible replica fails, the stage attempt is
+durably failed.
+
+`stages.<stage>.budget.model_calls` limits completed model outputs. Failed
+physical requests followed by failover are recorded as request attempts but do
+not consume another successful-output allowance. The router still bounds
+physical attempts to at most one per eligible replica for each logical DSPy
+call, so a three-replica pool cannot produce unbounded retries.
 
 The required batch behavior is:
 
-1. stop scheduling new work after the first terminal packet failure;
-2. allow already in-flight requests to finish and persist their model-call and
+1. exhaust the bounded eligible-replica set for the failing model call;
+2. stop scheduling new work after the first terminal packet failure;
+3. allow already in-flight requests to finish and persist their model-call and
    trace evidence;
-3. durably record the failed endpoint id and normalized/redacted error;
-4. return the run as blocked or failed under the existing stage rules; and
-5. on resume or explicit retry, reuse completed work and schedule only unresolved
-   packets, potentially on another healthy endpoint.
+4. durably record every attempted endpoint and normalized/redacted error;
+5. return the run as blocked or failed under the existing stage rules; and
+6. on explicit resume, create a new immutable attempt for failed connection,
+   provider-server, and rate-limit errors while reusing all persisted work.
 
-Connection failures known to occur before request acceptance may support an
-explicit future rerouting policy. It is not part of this decision because many
-network failures cannot prove that the server did not begin inference. Hidden
-replay would distort stochastic sampling, usage, and cost evidence.
+An experiment revision is immutable. Correcting a mutable workspace endpoint
+does not rewrite an old run's frozen definition. A historical run resumes from
+its frozen replica pool and may recover through another eligible frozen replica;
+a newly started run uses the corrected current workspace and forms a new
+experiment revision.
 
 ## Deterministic results and information firewalls
 
@@ -337,7 +360,7 @@ final summary reports replica count, total capacity, and calls:
 ```text
 [37/102] Solved case-037 · llama-cpp-17-18081
 [38/102] Solved case-041 · llama-cpp-17-18080
-[1/15] metatable-graph-partial · vote 2 · llama-server-10-11436
+[1/15] metatable-graph-partial · vote 2 · llama-server-10-11434
 Endpoint pool  3 replicas · 8 slots · 423 calls
 ```
 
@@ -359,8 +382,8 @@ lines or corrupt counters.
    then aggregate them deterministically and persist per-endpoint route evidence.
 7. Give every worker isolated DSPy/session/observer state and keep request
    recording atomic.
-8. Implement fail-stop scheduling, in-flight draining, durable partial success,
-   and resume behavior without hidden retry.
+8. Implement bounded compatible-replica failover, endpoint cooldowns, fail-stop
+   batch scheduling, in-flight draining, and immutable retry attempts on resume.
 9. Make progress reporting thread-safe and add endpoint-level utilization to
    run summaries.
 10. Validate with deterministic instrumented endpoint workers, an end-to-end
@@ -379,9 +402,13 @@ lines or corrupt counters.
   observer state.
 - Aggregate content and case ordering are independent of request completion
   order.
-- A failed request stops new scheduling, drains already in-flight work, retains
-  successful results, and never silently replays an ambiguous call.
-- Resume executes only unresolved packets and reuses already persisted work.
+- Connection, provider-server, and rate-limit failures try each other eligible
+  replica at most once and record every physical attempt.
+- Non-transport failures are never rerouted.
+- A terminal request failure stops new scheduling, drains already in-flight
+  work, and retains successful results.
+- Resume creates a new attempt only for retryable transient endpoint failures,
+  executes unresolved packets, and reuses already persisted work.
 - Adding, removing, renaming, or resizing an equivalent replica does not change
   reusable work ids.
 - Changing the model deployment revision or any output-affecting model parameter

@@ -22,7 +22,7 @@ from ms_agent_eval.core.progress import ProgressEvent
 from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.runner import ExperimentRunner
 from ms_agent_eval.core.stages import StageKind, StageState
-from ms_agent_eval.core.token_preflight import TokenPreflightResult
+from ms_agent_eval.core.token_preflight import ExactTokenMeasurement, TokenPreflightResult
 from ms_agent_eval.core.workspace import ResolvedRoleModel, WorkspaceRepository
 from ms_agent_eval.programs.dspy.budget import BudgetLedger
 
@@ -53,15 +53,61 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
 
 
+def _copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
+    repository = create_workspace(tmp_path / "workspace")
+    payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
+    payload["experiments"]["optimize"]["optimizer"] = {
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search": {"breadth": 2, "depth": 2, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
+    payload["experiments"]["optimize"]["budget"] = {
+        "optimizer": {"model_calls": 20, "tokens": 100000},
+        "solver": {"model_calls": 300, "tokens": 300000},
+        "judge": {"model_calls": 300, "tokens": 300000},
+        "wall_seconds": 300,
+    }
+    repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    repository = WorkspaceRepository.from_file(repository.workspace_file)
+    lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
+    authoring_hash = sha256_file(repository.case_authoring_path)
+    seed_cases_and_judge_validation(
+        repository,
+        authoring_instructions_hash=authoring_hash,
+        source_snapshot_hash=lock.content_hash,
+    )
+    splits = yaml.safe_load(repository.split_file.read_text(encoding="utf-8"))
+    created = 0
+    index = 100
+    while created < 4:
+        group = f"copro-alpha-{index}"
+        index += 1
+        if deterministic_group_split(group, seed="ms-agent-eval", train=0.7, test=0.2) != "train":
+            continue
+        created += 1
+        create_case(
+            repository.cases_root,
+            case_id=f"copro-alpha-train-{created}",
+            skill="alpha",
+            group=group,
+            source_path="skills/alpha/SKILL.md",
+            authoring_instructions_hash=authoring_hash,
+            source_snapshot_hash=lock.content_hash,
+        )
+        splits["groups"][group] = "train"
+    repository.split_file.write_text(yaml.safe_dump(splits, sort_keys=False), encoding="utf-8")
+    return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
+
+
 def _pilot_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     catalog_file = repository.capability_catalog_path
     catalog = yaml.safe_load(catalog_file.read_text(encoding="utf-8"))
     catalog["default_minimum_primary_cases"] = 2
     catalog_file.write_text(yaml.safe_dump(catalog, sort_keys=False), encoding="utf-8")
-    lock, directory = create_snapshot(
-        repository, create_checkout(tmp_path), tmp_path / "external"
-    )
+    lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
     seed_cases_and_judge_validation(
         repository,
         authoring_instructions_hash=sha256_file(repository.case_authoring_path),
@@ -86,23 +132,29 @@ def _pooled_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
             "base_url": "http://localhost:8000/v1",
             "max_concurrent_requests": 2,
             "api_key_env": "TEST_API_KEY",
+            "routes": [
+                {"deployment": "solver-test", "model": "solver"},
+                {"deployment": "optimizer-test", "model": "optimizer"},
+                {"deployment": "judge-test", "model": "judge"},
+            ],
         },
         {
             "id": "secondary",
             "base_url": "http://localhost:8001/v1",
             "max_concurrent_requests": 1,
             "api_key_env": "TEST_API_KEY",
+            "routes": [
+                {"deployment": "solver-test", "model": "solver"},
+                {"deployment": "optimizer-test", "model": "optimizer"},
+                {"deployment": "judge-test", "model": "judge"},
+            ],
         },
     ]
     payload["evaluation"]["judge"]["repetitions"] = 3
     payload["stages"]["validate_judge"]["budget"]["model_calls"] = 20
-    repository.workspace_file.write_text(
-        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
-    )
+    repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(repository.workspace_file)
-    lock, directory = create_snapshot(
-        repository, create_checkout(tmp_path), tmp_path / "external"
-    )
+    lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
     authoring_hash = sha256_file(repository.case_authoring_path)
     seed_cases_and_judge_validation(
         repository,
@@ -116,9 +168,7 @@ def _pooled_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     while created < 4:
         group = f"group-pool-{index}"
         index += 1
-        if deterministic_group_split(
-            group, seed="ms-agent-eval", train=0.7, test=0.2
-        ) != "test":
+        if deterministic_group_split(group, seed="ms-agent-eval", train=0.7, test=0.2) != "test":
             continue
         created += 1
         create_case(
@@ -172,13 +222,12 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
         BytesIO(b"abandoned before the run"),
         "application/octet-stream",
     )
-    garbage_path = (
-        runner.coordinator.artifacts.blob_root
-        / garbage.content_id.removeprefix("sha256:")
+    garbage_path = runner.coordinator.artifacts.blob_root / garbage.content_id.removeprefix(
+        "sha256:"
     )
     os.utime(garbage_path, (0, 0))
     run = runner.run("baseline", environment=_environment())
-    assert run.status == "completed"
+    assert run.status == "completed", run.result
     assert not garbage_path.exists()
     assert run.result is not None
     assert run.result["case_count"] == 1
@@ -193,9 +242,7 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
     report_root = runner.coordinator.artifacts.summary_root / "runs" / run.run_id
     assert run.result["report"]["directory"] == report_root.as_posix()
     assert (report_root / "summary.md").is_file()
-    assert "## Endpoint execution" in (report_root / "summary.md").read_text(
-        encoding="utf-8"
-    )
+    assert "## Endpoint execution" in (report_root / "summary.md").read_text(encoding="utf-8")
     assert (report_root / "results.json").is_file()
     with (report_root / "results.csv").open(encoding="utf-8", newline="") as handle:
         report_rows = list(csv.DictReader(handle))
@@ -204,16 +251,12 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
     assert all(json.loads(row["scores_detail"])["criteria"] for row in report_rows)
     assert all(item["state"] == "persisted" for item in run.packets)
     solve_starts = [
-        event
-        for event in events
-        if event.kind == "packet_started" and event.stage == "solve"
+        event for event in events if event.kind == "packet_started" and event.stage == "solve"
     ]
     assert [event.case_id for event in solve_starts] == ["case-test"]
     assert [(event.position, event.total) for event in solve_starts] == [(1, 1)]
     judge_completions = [
-        event
-        for event in events
-        if event.kind == "packet_completed" and event.stage == "judge"
+        event for event in events if event.kind == "packet_completed" and event.stage == "judge"
     ]
     assert len(judge_completions) == 1
     assert all(event.details["score"] == 1.0 for event in judge_completions)
@@ -223,8 +266,7 @@ def test_fixed_solver_and_judge_run_through_observed_dspy_contract(tmp_path: Pat
     model_statuses = [
         item
         for item in runner.coordinator.ledger.list(run.run_id)
-        if item.packet.stage
-        in {StageKind.VALIDATE_JUDGE, StageKind.SOLVE, StageKind.JUDGE}
+        if item.packet.stage in {StageKind.VALIDATE_JUDGE, StageKind.SOLVE, StageKind.JUDGE}
     ]
     for status in model_statuses:
         assert status.result is not None
@@ -310,14 +352,10 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
                 if is_validation:
                     active["validation"] += 1
                 calls[self.endpoint] += 1
-                maximum[self.endpoint] = max(
-                    maximum[self.endpoint], active[self.endpoint]
-                )
+                maximum[self.endpoint] = max(maximum[self.endpoint], active[self.endpoint])
                 maximum["total"] = max(maximum["total"], active["total"])
                 if is_validation:
-                    maximum["validation"] = max(
-                        maximum["validation"], active["validation"]
-                    )
+                    maximum["validation"] = max(maximum["validation"], active["validation"])
             try:
                 time.sleep(0.03)
                 return super().forward(*args, **kwargs)
@@ -352,7 +390,7 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
     )
     run = runner.run("baseline", environment=_environment())
 
-    assert run.status == "completed"
+    assert run.status == "completed", run.result
     assert maximum["http://localhost:8000/v1"] <= 2
     assert maximum["http://localhost:8001/v1"] <= 1
     assert maximum["total"] == 3
@@ -373,11 +411,7 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
         "primary",
         "secondary",
     }
-    vote_events = [
-        event
-        for event in events
-        if event.kind == "judge_validation_vote_completed"
-    ]
+    vote_events = [event for event in events if event.kind == "judge_validation_vote_completed"]
     assert len(vote_events) == 15
     assert sorted(event.position for event in vote_events) == list(range(1, 16))
     solve_endpoints = {
@@ -388,6 +422,115 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
     assert solve_endpoints == {"primary", "secondary"}
     assert run.result is not None
     assert run.result["endpoint_execution"]["configured_capacity"] == 3
+
+
+def test_transport_failure_uses_another_eligible_endpoint_in_the_same_call(
+    tmp_path: Path,
+) -> None:
+    compiled = _pooled_compiled(tmp_path)
+    calls: Counter[tuple[str, str]] = Counter()
+
+    class PermissivePreflight:
+        def evaluate(self, endpoint, **kwargs):  # type: ignore[no-untyped-def]
+            del endpoint, kwargs
+            return TokenPreflightResult(
+                status="skipped",
+                reason="test_stub",
+                context_window=None,
+                input_tokens=None,
+                maximum_output_tokens=None,
+                required_tokens=None,
+                tokenizer_fingerprint=None,
+                chat_template_fingerprint=None,
+                capability_source=None,
+                capability_checked_at=None,
+                rendered_message_hash=content_hash("request"),
+            )
+
+    class FailoverObservedLM(FixedObservedLM):
+        def __init__(self, *args, endpoint: str, budget: BudgetLedger, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(*args, **kwargs)
+            self.endpoint = endpoint
+            self.budget = budget
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = messages or [{"role": "user", "content": prompt}]
+            self.budget.begin_call(0.0)
+            if self.endpoint.endswith(":8000/v1"):
+                calls[(self.endpoint, "failed")] += 1
+                error = ConnectionError("primary endpoint unavailable")
+                self.observer.failed(
+                    provider_id="fixed",
+                    model=self.model,
+                    parameters={},
+                    messages=rendered,
+                    request={"messages": rendered},
+                    error=error,
+                    latency_seconds=0.0,
+                    configured_cost=0.0,
+                )
+                self.budget.finish_call()
+                raise error
+            calls[(self.endpoint, "completed")] += 1
+            rendered_text = json.dumps(rendered, ensure_ascii=False)
+            if self.model == "solver":
+                response = solver_response()
+            else:
+                score = 1.0
+                for marker, value in {
+                    "strong candidate": 1.0,
+                    "partial candidate": 0.5,
+                    "incorrect candidate": 0.0,
+                    "contradictory candidate": 0.0,
+                    "adversarial candidate": 0.0,
+                }.items():
+                    if marker in rendered_text:
+                        score = value
+                        break
+                response = judge_response(score)
+            self.responses = [response]
+            result = super().forward(prompt=prompt, messages=messages, **kwargs)
+            self.budget.finish_call({"total_tokens": 2})
+            return result
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FailoverObservedLM:
+        assert api_key == "test-secret"
+        assert budget is not None
+        return FailoverObservedLM(
+            observer,
+            (),
+            model=model.role,
+            endpoint=model.base_url,
+            budget=budget,
+        )
+
+    runner = ExperimentRunner(
+        compiled,
+        lm_factory=factory,
+        token_preflight=PermissivePreflight(),  # type: ignore[arg-type]
+    )
+    run = runner.run("baseline", environment=_environment())
+
+    assert run.status == "completed", run.result
+    assert calls[("http://localhost:8000/v1", "failed")] > 0
+    assert calls[("http://localhost:8001/v1", "completed")] > 0
+    validation = next(
+        item
+        for item in runner.coordinator.ledger.list(run.run_id)
+        if item.packet.stage is StageKind.VALIDATE_JUDGE
+    )
+    assert validation.result is not None
+    routes = {
+        route["endpoint_id"]: route
+        for route in validation.result.provenance["endpoint_pool"]["routes"]
+    }
+    assert routes["primary"]["failed_requests"] > 0
+    assert routes["secondary"]["completed_requests"] > 0
 
 
 def test_context_preflight_reroutes_without_calling_a_known_small_endpoint(
@@ -464,8 +607,7 @@ def test_context_preflight_reroutes_without_calling_a_known_small_endpoint(
     assert model_endpoints == Counter({"http://localhost:8001/v1": sum(model_endpoints.values())})
     assert run.result is not None
     endpoints = {
-        item["endpoint_id"]: item
-        for item in run.result["endpoint_execution"]["endpoints"]
+        item["endpoint_id"]: item for item in run.result["endpoint_execution"]["endpoints"]
     }
     assert endpoints["primary"]["model_calls"] == 0
     assert endpoints["primary"]["preflight_rejections"] > 0
@@ -514,11 +656,7 @@ def test_context_preflight_failure_makes_no_model_request(tmp_path: Path) -> Non
     assert run.result is not None
     assert run.result["error_kind"] == "context_window_exceeded"
     assert model_calls == 0
-    validation = next(
-        item
-        for item in run.packets
-        if item["stage"] == "validate_judge"
-    )
+    validation = next(item for item in run.packets if item["stage"] == "validate_judge")
     assert validation["state"] == "failed"
 
 
@@ -576,8 +714,7 @@ def test_second_run_reuses_validated_stage_graph_without_model_calls(
     model_results = [
         item.result
         for item in second_runner.coordinator.ledger.list(second.run_id)
-        if item.packet.stage
-        in {StageKind.VALIDATE_JUDGE, StageKind.SOLVE, StageKind.JUDGE}
+        if item.packet.stage in {StageKind.VALIDATE_JUDGE, StageKind.SOLVE, StageKind.JUDGE}
     ]
     assert all(result is not None and result.provenance["cache_hit"] for result in model_results)
     assert all(result is not None and result.usage["model_calls"] == 0 for result in model_results)
@@ -615,8 +752,7 @@ def test_failed_judge_validation_is_not_reused(tmp_path: Path) -> None:
     assert first.status == second.status == "judge_validation_failed"
     assert calls["judge"] == 2
     assert not any(
-        event.kind == "packet_reused" and event.stage == "validate_judge"
-        for event in events
+        event.kind == "packet_reused" and event.stage == "validate_judge" for event in events
     )
 
 
@@ -692,9 +828,7 @@ def test_rubric_change_reuses_solver_work_and_invalidates_judge_view(
     assert second.status == "completed"
     assert calls["solver"] == calls_after_first["solver"]
     assert calls["judge"] == calls_after_first["judge"] + 2
-    reused = Counter(
-        event.stage for event in events if event.kind == "packet_reused"
-    )
+    reused = Counter(event.stage for event in events if event.kind == "packet_reused")
     assert reused["solve"] == 1
     assert reused["judge"] == 0
 
@@ -752,10 +886,8 @@ def test_resume_rehydrates_the_run_revision_after_workspace_changes(
     assert "experiment_definition_artifact" in run_manifest
     original_revision = run_manifest["experiment_revision_id"]
 
-    workspace_payload = yaml.safe_load(
-        repository.workspace_file.read_text(encoding="utf-8")
-    )
-    workspace_payload["models"]["judge"]["deployment_revision"] = "judge-test-v2"
+    workspace_payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
+    workspace_payload["deployments"]["judge-test"]["revision"] = "judge-test-v2"
     repository.workspace_file.write_text(
         yaml.safe_dump(workspace_payload, sort_keys=False),
         encoding="utf-8",
@@ -885,8 +1017,12 @@ def test_cross_validation_selects_then_refits_before_held_out_test(tmp_path: Pat
 
     runner = ExperimentRunner(compiled, lm_factory=factory)
     run = runner.run("optimize", environment=_environment())
-    assert run.status == "completed"
+    assert run.status == "completed", run.result
     assert run.result is not None
+    assert all(
+        item.packet.stage is not StageKind.OPTIMIZE
+        for item in runner.coordinator.ledger.list(run.run_id)
+    )
     assert [item["split"] for item in run.result["cases"]] == ["test"]
     selection = next(
         item
@@ -920,15 +1056,240 @@ def test_cross_validation_selects_then_refits_before_held_out_test(tmp_path: Pat
         runner.coordinator._input(item.packet, "case")["case_id"]
         for item in runner.coordinator.ledger.list(run.run_id)
         if item.packet.stage is StageKind.SOLVE
-        and runner.coordinator._input(item.packet, "case")["evaluation_phase"]
-        == "cross_validation"
+        and runner.coordinator._input(item.packet, "case")["evaluation_phase"] == "cross_validation"
     }
     assert cv_cases == {"case-train", "case-train-two"}
     report_root = runner.coordinator.artifacts.summary_root / "runs" / run.run_id
     report = json.loads((report_root / "results.json").read_text(encoding="utf-8"))
+    assert report["optimization"]["strategy"] == "labeled_few_shot"
+    assert "optimizer" not in report["usage_by_role"]
     assert report["cross_validation"]["selected_candidate_id"] == "baseline"
     assert report["cross_validation"]["metric"] == "mean_score"
     assert "pass_rate" not in report.get("benchmark_metrics", {})
+
+
+def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
+    tmp_path: Path,
+) -> None:
+    compiled = _copro_compiled(tmp_path)
+
+    class AdaptiveObservedLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                candidate = (
+                    "Alternative second-round instruction."
+                    if "Optimized solver or skill instruction." in rendered
+                    else "Optimized solver or skill instruction."
+                )
+                response = (
+                    "[[ ## candidates ## ]]\n"
+                    f'[{{"instruction":"{candidate}",'
+                    '"output_prefix":"Optimized response:"}]\n\n'
+                    "[[ ## completed ## ]]"
+                )
+            elif self.model == "solver":
+                if "Optimized solver or skill instruction." in rendered:
+                    if "# alpha" not in rendered:
+                        response = solver_response("optimized skill answer")
+                    else:
+                        response = solver_response("optimized prompt answer")
+                else:
+                    response = solver_response("baseline answer")
+            else:
+                if "strong candidate" in rendered:
+                    score = 1.0
+                elif "partial candidate" in rendered:
+                    score = 0.5
+                elif "optimized skill answer" in rendered:
+                    score = 1.0
+                elif "optimized prompt answer" in rendered:
+                    score = 0.8
+                else:
+                    score = 0.0
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return AdaptiveObservedLM(observer, role=model.role)
+
+    class ExactReportingPreflight:
+        def evaluate(self, endpoint, **kwargs):  # type: ignore[no-untyped-def]
+            del endpoint, kwargs
+            return TokenPreflightResult(
+                "skipped",
+                "test_stub",
+                None,
+                None,
+                100,
+                None,
+                None,
+                None,
+                None,
+                None,
+                content_hash("messages"),
+            )
+
+        def measure_text(self, endpoint, *, model, deployment_revision, content, api_key):  # type: ignore[no-untyped-def]
+            del api_key
+            return ExactTokenMeasurement(
+                "exact",
+                "exact_endpoint_tokenization",
+                content_hash(content),
+                173,
+                model,
+                deployment_revision,
+                endpoint.id,
+                endpoint.configuration_hash,
+                content_hash("test-tokenizer"),
+            )
+
+    source_skill = compiled.context.skill("alpha")
+    runner = ExperimentRunner(
+        compiled,
+        lm_factory=factory,
+        token_preflight=ExactReportingPreflight(),  # type: ignore[arg-type]
+    )
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    statuses = runner.coordinator.ledger.list(run.run_id)
+    optimizer_packets = [status for status in statuses if status.packet.stage is StageKind.OPTIMIZE]
+    assert len(optimizer_packets) == 12
+    assert all(status.state is StageState.PERSISTED for status in optimizer_packets)
+    proposal_outputs = [
+        runner.coordinator.ledger.read_output(status.result)
+        for status in optimizer_packets
+        if status.result is not None
+    ]
+    assert all(output["proposal_accounting"]["accepted_count"] == 1 for output in proposal_outputs)
+    assert all(output["proposal_accounting"]["degraded"] is False for output in proposal_outputs)
+    assert all(
+        not ({"expected_response", "rubric", "judge_feedback", "test_score"} & set(context))
+        for status in optimizer_packets
+        for context in [runner.coordinator._input(status.packet, "optimizer_context")]
+    )
+    second_round_contexts = [
+        runner.coordinator._input(status.packet, "optimizer_context")
+        for status in optimizer_packets
+        if status.packet.work_spec["round"] == 2
+    ]
+    assert all(context["scored_attempts"] for context in second_round_contexts)
+    assert all(
+        all("text" in attempt and "mean_score" in attempt for attempt in context["scored_attempts"])
+        for context in second_round_contexts
+    )
+    assert all("current_target_hash" in status.packet.work_spec for status in optimizer_packets)
+    final_fit = next(
+        status
+        for status in statuses
+        if status.packet.stage is StageKind.FIT
+        and status.result is not None
+        and runner.coordinator.ledger.read_output(status.result)["phase"] == "final_fit"
+    )
+    assert final_fit.result is not None
+    fitted = runner.coordinator.ledger.read_output(final_fit.result)
+    assert fitted["strategy"] == "copro"
+    assert fitted["demonstration_count"] == 0
+    assert fitted["solver_instruction"] == "Optimized solver or skill instruction."
+    assert fitted["skill_overlays"]["alpha"] == "Optimized solver or skill instruction."
+    assert compiled.context.skill("alpha") == source_skill
+    assert fitted["compiled_manifest_artifact"]["content_id"].startswith("sha256:")
+    assert fitted["candidate_lineage_artifact"]["content_id"].startswith("sha256:")
+    assert fitted["search_summary_artifact"]["content_id"].startswith("sha256:")
+    assert all(
+        "expected_response"
+        not in json.dumps(runner.coordinator._input(status.packet, "training_set"))
+        for status in statuses
+        if status.packet.stage is StageKind.FIT
+    )
+    manifest_path = (
+        runner.coordinator.artifacts.data_root
+        / fitted["compiled_manifest_artifact"]["relative_path"]
+    )
+    compiled_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert compiled_manifest["demonstration_count"] == 0
+    assert compiled_manifest["candidate_lineage_artifact"] == fitted["candidate_lineage_artifact"]
+    assert compiled_manifest["search_summary_artifact"] == fitted["search_summary_artifact"]
+    assert (
+        compiled_manifest["selected_candidate_evidence"]["selected_candidate_id"]
+        == fitted["candidate_id"]
+    )
+
+    report_root = runner.coordinator.artifacts.summary_root / "runs" / run.run_id
+    report = json.loads((report_root / "results.json").read_text(encoding="utf-8"))
+    assert report["optimization"]["strategy"] == "copro"
+    assert report["optimization"]["final_program"]["demonstration_count"] == 0
+    assert (
+        report["optimization"]["final_program"]["candidate_lineage_artifact"]
+        == fitted["candidate_lineage_artifact"]
+    )
+    assert len(report["optimization"]["rounds"]) == 12
+    assert all(
+        round_result["proposal_accounting"]["accepted_count"] == 1
+        for round_result in report["optimization"]["rounds"]
+    )
+    assert report["usage_by_role"]["optimizer"]["model_calls"] == 12
+    final_test_solves = [
+        runner.coordinator._input(status.packet, "case")
+        for status in statuses
+        if status.packet.stage is StageKind.SOLVE
+        and runner.coordinator._input(status.packet, "case")["evaluation_phase"] == "test"
+    ]
+    assert {item["strategy"] for item in final_test_solves} == {"baseline", "copro"}
+    assert len(final_test_solves) == 2
+    comparison = report["test_comparison"]
+    assert comparison["paired_case_count"] == 1
+    assert comparison["baseline_mean_score"] == 0.0
+    assert comparison["optimized_mean_score"] == 1.0
+    assert comparison["micro_case_delta"] == 1.0
+    assert comparison["skills"][0]["skill_name"] == "gamma"
+    assert comparison["cases"][0]["expected_response_tokens"] == 173
+    assert comparison["cases"][0]["expected_response_length_band"] == "129-256"
+    assert (report_root / "tables" / "copro-case-comparison.csv").is_file()
+    from ms_agent_eval.core.recording_projection import RecorderProjector
+
+    workspace_configuration = compiled.repository.workspace
+    projection = RecorderProjector(
+        runner.coordinator.artifacts,
+        recorder=workspace_configuration.recorders[workspace_configuration.recording.recorder],
+        recording=workspace_configuration.recording,
+    ).build(run.run_id)
+    artifact_paths = {item.path for item in projection.artifacts}
+    assert {
+        "graphs/copro-overall-paired-score.svg",
+        "graphs/copro-overall-paired-score.html",
+        "graphs/copro-skill-lift.svg",
+        "graphs/copro-skill-lift.html",
+        "graphs/copro-case-delta-distribution.svg",
+        "graphs/copro-case-delta-distribution.html",
+        "graphs/copro-delta-by-expected-tokens.svg",
+        "graphs/copro-delta-by-expected-tokens.html",
+        "graphs/copro-score-by-token-band.svg",
+        "graphs/copro-score-by-token-band.html",
+        "graphs/copro-criterion-lift.svg",
+        "graphs/copro-criterion-lift.html",
+        "tables/index.html",
+        "index.html",
+    } <= artifact_paths
+    assert {
+        "copro-case-comparison",
+        "copro-skill-comparison",
+        "copro-token-band-comparison",
+        "copro-criterion-comparison",
+        "expected-response-token-counts",
+    } <= {item.name for item in projection.tables}
 
 
 def test_optimization_rejects_judge_validation_on_held_out_case_before_lm_creation(
@@ -991,19 +1352,37 @@ def test_endpoint_failure_is_durable_and_redacts_credentials(tmp_path: Path) -> 
     assert judge_validation.result.error is not None
     assert judge_validation.result.error.message == "endpoint rejected credential [REDACTED]"
     evidence = "".join(
-        path.read_text(encoding="utf-8")
-        for path in compiled.repository.data_root.rglob("*.json")
+        path.read_text(encoding="utf-8") for path in compiled.repository.data_root.rglob("*.json")
     )
     assert "test-secret" not in evidence
 
 
 def test_dspy_connection_failure_is_actionable(tmp_path: Path) -> None:
     compiled = _compiled(tmp_path)
+    available = False
 
     class ConnectionFailureLM(FixedObservedLM):
         def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
-            del prompt, messages, kwargs
-            raise RuntimeError("OpenAIException - Connection error")
+            if not available:
+                raise RuntimeError("OpenAIException - Connection error")
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "solver":
+                response = solver_response()
+            else:
+                score = 1.0
+                for marker, value in {
+                    "strong candidate": 1.0,
+                    "partial candidate": 0.5,
+                    "incorrect candidate": 0.0,
+                    "contradictory candidate": 0.0,
+                    "adversarial candidate": 0.0,
+                }.items():
+                    if marker in rendered:
+                        score = value
+                        break
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
 
     def factory(
         model: ResolvedRoleModel,
@@ -1014,7 +1393,8 @@ def test_dspy_connection_failure_is_actionable(tmp_path: Path) -> None:
         del budget, api_key
         return ConnectionFailureLM(observer, [], model=model.role)
 
-    runner = ExperimentRunner(compiled, lm_factory=factory)
+    events: list[ProgressEvent] = []
+    runner = ExperimentRunner(compiled, lm_factory=factory, progress_sink=events.append)
     run = runner.run("baseline", environment=_environment())
 
     assert run.status == "execution_failed"
@@ -1024,20 +1404,34 @@ def test_dspy_connection_failure_is_actionable(tmp_path: Path) -> None:
         "judge DSPy call failed (connection_error): OpenAIException - Connection error"
     )
 
+    available = True
+    resumed = runner.resume(run.run_id, environment=_environment())
+
+    assert resumed.status == "completed", resumed.result
+    validation_attempts = [
+        item
+        for item in runner.coordinator.ledger.list(run.run_id)
+        if item.packet.stage is StageKind.VALIDATE_JUDGE
+    ]
+    assert [(item.packet.attempt, item.state) for item in validation_attempts] == [
+        (1, StageState.FAILED),
+        (2, StageState.PERSISTED),
+    ]
+    assert any(event.kind == "packet_retrying" for event in events)
+
 
 def test_remote_solver_can_pause_before_a_local_harness_judge(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     repository = create_workspace(workspace_root)
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
-    payload["stages"]["validate_judge"]["executor"] = "authoring-harness"
-    payload["stages"]["judge"]["executor"] = "authoring-harness"
-    repository.workspace_file.write_text(
-        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
-    )
+    payload["deployments"]["judge-test"]["executor"] = "authoring-harness"
+    routes = payload["executors"]["remote-models"]["endpoints"][0]["routes"]
+    payload["executors"]["remote-models"]["endpoints"][0]["routes"] = [
+        route for route in routes if route["deployment"] != "judge-test"
+    ]
+    repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(repository.workspace_file)
-    lock, directory = create_snapshot(
-        repository, create_checkout(tmp_path), tmp_path / "external"
-    )
+    lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
     seed_cases_and_judge_validation(
         repository,
         authoring_instructions_hash=sha256_file(repository.case_authoring_path),

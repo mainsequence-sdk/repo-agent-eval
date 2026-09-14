@@ -19,7 +19,6 @@ from .hashing import content_hash, sha256_file
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _CONTENT_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CASE_ARCHETYPES = {"construction", "review", "diagnosis", "migration", "evidence"}
-_CASE_DIFFICULTIES = {"easy", "complex"}
 
 
 def _identifier(value: object, field: str, *, path: Path) -> str:
@@ -133,11 +132,7 @@ class CapabilityCatalog:
                 "capability catalog.status must be draft or complete", path=path
             )
         raw_default = payload.get("default_minimum_primary_cases", 3)
-        if (
-            not isinstance(raw_default, int)
-            or isinstance(raw_default, bool)
-            or raw_default < 1
-        ):
+        if not isinstance(raw_default, int) or isinstance(raw_default, bool) or raw_default < 1:
             raise ConfigurationError(
                 "capability catalog.default_minimum_primary_cases must be a positive integer",
                 path=path,
@@ -146,9 +141,7 @@ class CapabilityCatalog:
         skills: list[SkillCapabilityCatalog] = []
         for raw_skill, raw_entry in sorted(raw_skills.items()):
             skill = _skill_id(raw_skill, "capability catalog skill", path=path)
-            entry = _mapping(
-                raw_entry, f"capability catalog.skills.{skill}", path=path
-            )
+            entry = _mapping(raw_entry, f"capability catalog.skills.{skill}", path=path)
             _reject_unknown(
                 entry,
                 {"capabilities"},
@@ -169,11 +162,7 @@ class CapabilityCatalog:
                     path=path,
                 )
                 minimum = item.get("minimum_primary_cases", raw_default)
-                if (
-                    not isinstance(minimum, int)
-                    or isinstance(minimum, bool)
-                    or minimum < 1
-                ):
+                if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
                     raise ConfigurationError(
                         "capability.minimum_primary_cases must be a positive integer",
                         path=path,
@@ -215,22 +204,19 @@ class CaseCoverage:
     primary: str
     supporting: tuple[str, ...]
     archetype: str
-    difficulty: str
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object], *, path: Path) -> CaseCoverage:
         _reject_unknown(
             payload,
-            {"primary", "supporting", "archetype", "difficulty"},
+            {"primary", "supporting", "archetype"},
             "case.coverage",
             path=path,
         )
         primary = _identifier(payload.get("primary"), "coverage.primary", path=path)
         supporting = tuple(
             _identifier(item, "coverage.supporting[]", path=path)
-            for item in _sequence(
-                payload.get("supporting", []), "coverage.supporting", path=path
-            )
+            for item in _sequence(payload.get("supporting", []), "coverage.supporting", path=path)
         )
         if len(supporting) > 2:
             raise ConfigurationError(
@@ -246,12 +232,7 @@ class CaseCoverage:
             raise ConfigurationError(
                 f"coverage.archetype must be one of {sorted(_CASE_ARCHETYPES)}", path=path
             )
-        difficulty = _identifier(payload.get("difficulty"), "coverage.difficulty", path=path)
-        if difficulty not in _CASE_DIFFICULTIES:
-            raise ConfigurationError(
-                f"coverage.difficulty must be one of {sorted(_CASE_DIFFICULTIES)}", path=path
-            )
-        return cls(primary, supporting, archetype, difficulty)
+        return cls(primary, supporting, archetype)
 
 
 @dataclass(frozen=True)
@@ -375,9 +356,7 @@ class CaseProvenance:
             payload.get("authoring_agent"), "provenance.authoring_agent", path=path
         )
         if authoring_agent != "codex":
-            raise ConfigurationError(
-                "provenance.authoring_agent must be codex", path=path
-            )
+            raise ConfigurationError("provenance.authoring_agent must be codex", path=path)
         instructions_hash = _content_hash_value(
             payload.get("authoring_instructions_hash"),
             "provenance.authoring_instructions_hash",
@@ -451,9 +430,9 @@ class CaseDefinition:
             "case",
             path=case_file,
         )
-        if payload.get("schema_version") != 5:
+        if payload.get("schema_version") != 6:
             raise ConfigurationError(
-                "case schema_version must be 5; legacy cases are not supported", path=case_file
+                "case schema_version must be 6; legacy cases are not supported", path=case_file
             )
         solver = _mapping(payload.get("solver"), "case.solver", path=case_file)
         _reject_unknown(
@@ -533,7 +512,7 @@ class CaseDefinition:
             path=case_file,
         )
         identity = {
-            "schema_version": 5,
+            "schema_version": 6,
             "id": _identifier(payload.get("id"), "case.id", path=case_file),
             "title": _string(payload.get("title"), "case.title", path=case_file),
             "skill": _skill_id(payload.get("skill"), "case.skill", path=case_file),
@@ -667,9 +646,7 @@ def _text_artifacts(root: Path | None) -> Mapping[str, str]:
         try:
             result[artifact.relative_to(root).as_posix()] = artifact.read_text(encoding="utf-8")
         except UnicodeDecodeError as error:
-            raise ConfigurationError(
-                f"case text artifact must be UTF-8: {artifact}"
-            ) from error
+            raise ConfigurationError(f"case text artifact must be UTF-8: {artifact}") from error
     return result
 
 
@@ -784,9 +761,7 @@ class SplitManifest:
         )
         allowed = {"train", "test", "challenge"}
         if any(item.split not in allowed for item in assignments):
-            raise ConfigurationError(
-                "split names must be train/test/challenge", path=path
-            )
+            raise ConfigurationError("split names must be train/test/challenge", path=path)
         owners = {item.group: item.split for item in assignments}
         groups = {case.group for case in case_bank.cases}
         missing = sorted(groups - owners.keys())
@@ -1050,8 +1025,7 @@ def aggregate_judge_votes(
     hard_failures = tuple(
         item.id
         for item in case.rubric.hard_failures
-        if sum(item.id in vote.hard_failures for vote in locked_votes)
-        > len(locked_votes) / 2
+        if sum(item.id in vote.hard_failures for vote in locked_votes) > len(locked_votes) / 2
     )
     score = sum(
         item.weight * next(value.score for value in scores if value.id == item.id)
@@ -1096,9 +1070,7 @@ class JudgeValidationCorpus:
     ) -> JudgeValidationCorpus:
         manifest = root / "manifest.yaml"
         payload = _yaml(manifest)
-        _reject_unknown(
-            payload, {"schema_version", "fixtures"}, "judge validation", path=manifest
-        )
+        _reject_unknown(payload, {"schema_version", "fixtures"}, "judge validation", path=manifest)
         if payload.get("schema_version") != 3:
             raise ConfigurationError("judge validation schema_version must be 3", path=manifest)
         fixtures: list[JudgeValidationFixture] = []
@@ -1130,9 +1102,7 @@ class JudgeValidationCorpus:
         labels = {item.label for item in fixtures}
         fixture_ids = [item.id for item in fixtures]
         if len(fixture_ids) != len(set(fixture_ids)):
-            raise ConfigurationError(
-                "judge-validation fixture ids must be unique", path=manifest
-            )
+            raise ConfigurationError("judge-validation fixture ids must be unique", path=manifest)
         unknown_labels = sorted(labels - required)
         if unknown_labels:
             raise ConfigurationError(
@@ -1334,8 +1304,7 @@ def validate_case_bank(
         "missing_catalog_skills": missing_catalog_skills,
         "capability_count": sum(len(item.capabilities) for item in capability_catalog.skills),
         "satisfied_capability_count": (
-            sum(len(item.capabilities) for item in capability_catalog.skills)
-            - len(capability_gaps)
+            sum(len(item.capabilities) for item in capability_catalog.skills) - len(capability_gaps)
         ),
         "missing_primary_case_count": sum(
             int(item["missing_primary_cases"]) for item in capability_gaps
@@ -1360,9 +1329,7 @@ def validate_case_authoring_provenance(
 
     for case in case_bank.cases:
         if case.provenance.authoring_instructions_hash != authoring_instructions_hash:
-            raise IntegrityError(
-                f"case {case.id!r} was not authored under the active instructions"
-            )
+            raise IntegrityError(f"case {case.id!r} was not authored under the active instructions")
         if case.provenance.capability_catalog_hash != capability_catalog_hash:
             raise IntegrityError(
                 f"case {case.id!r} was not classified under the active capability catalog"

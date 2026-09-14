@@ -1,6 +1,6 @@
 # Workspace Schema Reference
 
-The current manifest schema is version 11. Unknown fields, legacy schemas,
+The current manifest schema is version 14. Unknown fields, legacy schemas,
 ambiguous instruction selection, unsafe paths, and invalid cross-references fail
 closed.
 
@@ -15,10 +15,14 @@ without adopting later workspace edits. See
 | --- | --- |
 | `workspace.id` | Stable workspace identifier. |
 | `workspace.data_root` | Optional external storage root. |
+| `recording` | Boolean enablement, recorder id, `live_and_finalize` or `finalize_only` mode, `continue` failure policy, artifact policy, and content policy. |
+| `recorders.<id>` | MLflow HTTP(S) tracking URI, experiment-name template, and non-secret authentication references. |
 | `executors.<id>` | Executor `type`, `adapter`, and adapter-specific options; endpoint executors require a non-empty `endpoints` list. |
-| `executors.<id>.endpoints[]` | Unique endpoint `id`, HTTP(S) `base_url`, positive `max_concurrent_requests`, and optional `api_key_env`. |
-| `models.<id>` | Model `name`, required `deployment_revision`, optional `reasoning_effort`, parameters, and cost metadata. |
-| `stages.<stage>` | Executor id, model id where model-driven, required reuse policy, and budget. |
+| `executors.<id>.endpoints[]` | Unique endpoint `id`, HTTP(S) `base_url`, positive physical `max_concurrent_requests`, optional `api_key_env`, and non-empty deployment `routes`. |
+| `executors.<id>.endpoints[].routes[]` | Deployment id eligible on this endpoint and exact request `model` sent to its API. |
+| `deployments.<id>` | Serving executor, canonical model identity, and immutable output-affecting revision. |
+| `models.<id>` | Deployment reference, optional `reasoning_effort`, role-specific parameters, and cost metadata. |
+| `stages.<stage>` | Required reuse policy and budget. `author` and deterministic stages bind executors globally; experiment-driven model stages derive them from roles. |
 | `evaluation.repository` | HTTPS URL and tag/full commit. |
 | `evaluation.instructions.global` | Explicit global instruction files. |
 | `evaluation.instructions.skills` | Exactly one directory or exact file list. |
@@ -26,13 +30,21 @@ without adopting later workspace edits. See
 | `evaluation.cases` | Case directory, capability catalog, and readiness floors. |
 | `evaluation.splits` | Split manifest plus deterministic group policy. |
 | `evaluation.judge` | Typed DSPy judge, judge validation directory, and repetitions. |
-| `experiments.<id>` | `evaluate` baseline or `optimize` configuration. |
+| `experiments.<id>.roles` | Solver and judge profile ids, plus an optimizer profile for COPRO. |
+| `experiments.<id>` | `evaluate` baseline or `optimize` arm with exactly one `labeled_few_shot` or `copro` strategy. |
+| `comparisons.<id>` | Explicit baseline and optimization experiment ids, primary metric, and solver/optimizer grouping dimensions. |
 
 Author stages may use a harness because case packages require review and direct
-workspace edits. Solver and judge stages use configured model executors.
+workspace edits. Optimizer, solver, and judge executors resolve through the
+profile → deployment → executor → eligible endpoint route chain. `optimize` is
+called only by COPRO; labeled-few-shot fitting has no optimizer-model calls.
 Fit, model selection, and aggregation can use a local process because they
 coordinate already locked artifacts rather than make semantic decisions.
+Recording settings have their own operational configuration hash and do not
+participate in experiment revision, stage work, result, or cache identities.
+`benchmark_revision_id`, `comparison_group_id`, and `arm_id` independently
+identify the protocol, fixed-judge comparison population, and model treatment.
 
 See [Workspace configuration](../experiments/workspace-configuration.md) for an
-annotated skeleton and the example manifests under `experiments/` for complete
-instances.
+annotated skeleton, [Experiment recording](../execution/experiment-recording.md),
+and the example manifests under `experiments/` for complete instances.

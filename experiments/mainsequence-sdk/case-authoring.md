@@ -64,7 +64,7 @@ the target instructions, the selected skill, or immutable source evidence.
 - Record exact immutable source labels and one leakage group. Apply the
   configured deterministic group-to-split policy only after the package exists;
   never select or alter a split to obtain a preferred dataset placement.
-- Write exactly the schema-v5 package described below; do not create external
+- Write exactly the schema-v6 package described below; do not create external
   model-call drafts or authoring-call evidence.
 
 ## Authoring inputs
@@ -137,7 +137,6 @@ Primary source: <source id or target>
 Capability: <one behavior>
 Case archetype: <construction | review | diagnosis | migration | evidence>
 Behavior boundary: <the distinction that should separate strong and weak answers>
-Difficulty: <easy | complex>
 Diagnostic defect: <specific suspected defect, or none>
 Required deliverable: <one bounded textual result>
 ```
@@ -175,7 +174,7 @@ a retired MCP skill, or substitute a similarly named skill.
 ## Authoring procedure
 
 1. Confirm the exact selected skill and its owned behavior.
-2. Parse the request; choose one difficulty and one archetype.
+2. Parse the request and choose one archetype.
 3. Select one unmet primary capability from the catalog; then select the target
    skill, relevant target evidence, normally one primary
    project, and at most two references needed for a contract comparison.
@@ -196,14 +195,15 @@ Prefer the smallest sufficient set of source paths. The selected skill is
 always required; other paths must materially support the case. More citations
 do not make a case better.
 
-## Difficulty and archetypes
+## Case archetypes
 
-An easy case uses target documentation and optionally the tutorial to test one
-foundational distinction. It requires application, not trivia. A complex case
-anchors in one real project and includes the exact excerpts needed for a
-response-only architecture review, design, migration, or diagnosis. Complexity
-comes from interacting evidence—not missing facts, irrelevant files, or obscure
-wording. Never request checkout inspection, edits, tests, or execution evidence.
+Classify cases only by the required work shape below. Do not assign a subjective
+difficulty level. A documentation/tutorial-grounded case can test one
+foundational distinction, while a project-backed case can require reasoning
+across interacting evidence. Neither source choice is a difficulty label.
+Never create difficulty by withholding facts, adding irrelevant files, or using
+obscure wording. Never request checkout inspection, edits, tests, or execution
+evidence.
 
 | Archetype | Required shape |
 | --- | --- |
@@ -279,7 +279,7 @@ before repeating a family for robustness variants.
 
 Do not turn the table into trivia questions. Each case still needs a
 realistic scenario, a meaningful decision boundary, supplied evidence, and a
-bounded deliverable. A family may yield an easy tutorial case, a complex
+bounded deliverable. A family may yield a tutorial-grounded case, a
 project-backed case, and a diagnostic robustness variant, but semantically
 related variants remain in the same leakage group.
 
@@ -290,7 +290,7 @@ verified in the supplied source files.
 
 | Source id | Appropriate use | Important boundary |
 | --- | --- | --- |
-| `tutorial` | Easy connected scenarios across repositories, MetaTables, updaters, APIs, Jobs, releases, sharing, and environments | Illustrative only; verify SDK compatibility against target evidence. |
+| `tutorial` | Foundational connected scenarios across repositories, MetaTables, updaters, APIs, Jobs, releases, sharing, and environments | Illustrative only; verify SDK compatibility against target evidence. |
 | `mainsequence-markets` | Shared model graph, package ownership, relationships, migrations, row APIs, services, tests, API architecture | Domain implementation, not SDK or current frontend-contract authority. |
 | `alpaca-connectors` | Provider-native identity, Secret-name configuration, universes, category replacement, bars, holdings, durable Jobs, thin APIs | Its absence of a local agent entrypoint must not be "fixed" by invention. |
 | `binance-connectors` | Storage-first bars, asset categories, signal/portfolio Jobs, partial migration diagnosis | Use only portions that conform to the current pinned target; its generic example agent proves no connector-agent capability. |
@@ -367,7 +367,7 @@ The prompt must:
 - avoid evaluation vocabulary, source hashes, source paths used only for
   provenance, hidden answers, rubric criteria, leakage groups, and splits.
 
-Never make difficulty depend on missing information, trick wording, arbitrary
+Never manufacture complexity through missing information, trick wording, arbitrary
 formatting, credentials, private identifiers, destructive actions, or
 unavailable services. Do not disguise the rubric as a checklist in the prompt.
 
@@ -556,7 +556,7 @@ cases/<skill-id>/<case-id>/
 leakage group, owned local file references, exact source paths, and coverage:
 
 ```yaml
-schema_version: 5
+schema_version: 6
 solver:
   prompt: solver/prompt.md
   # attachments: solver/attachments
@@ -568,13 +568,14 @@ coverage:
   primary: one-capability-id
   supporting: [optional-capability-id]
   archetype: construction
-  difficulty: easy
 ```
 
 The primary and supporting ids must exist under the exact case skill in
 `cases/coverage.yaml`. Use one primary and no more than two supporting ids.
 Allowed archetypes are `construction`, `review`, `diagnosis`, `migration`, and
-`evidence`; difficulty is `easy` or `complex`. Record provenance:
+`evidence`. Do not add a subjective difficulty field or a manually estimated
+token count. The framework measures the hidden expected response with the exact
+configured tokenizer after evaluation. Record provenance:
 
 ```yaml
 provenance:
@@ -606,7 +607,7 @@ Create a case package only after every answer is yes:
 - Is the selected skill exact and responsible for the central behavior?
 - Does the case have one valid primary capability, no more than two valid
   supporting capabilities, and does it reduce a real catalog gap?
-- Does the case test one coherent boundary at the requested difficulty?
+- Does the case test one coherent, evidence-backed boundary?
 - Does every material expectation have an exact supplied evidence path?
 - Is the solver prompt self-contained without authoring-only facts?
 - Does the prompt provide diagnostic evidence without revealing the answer?

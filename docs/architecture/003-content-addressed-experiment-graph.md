@@ -83,7 +83,7 @@ independent replicate. Only misses, refreshes, and replicates are executed.
 ## Terminology and identities
 
 - **Experiment family**: a stable configured name such as `baseline` or
-  `optimize-few-shot`.
+  `optimize-solver`.
 - **Experiment revision**: one immutable effective graph rooted at an
   `experiment_revision_id`.
 - **Work node**: a canonical description of one stage computation independent

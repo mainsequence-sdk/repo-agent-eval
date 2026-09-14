@@ -59,9 +59,7 @@ def render_harness_prompt(packet: StagePacket, ledger: StageLedger) -> str:
             elif item.media_type.startswith("text/"):
                 inputs[item.id] = handle.read().decode("utf-8")
             else:
-                raise IntegrityError(
-                    f"harness cannot render input media type {item.media_type!r}"
-                )
+                raise IntegrityError(f"harness cannot render input media type {item.media_type!r}")
     instruction_reference = ledger.store.reference(
         packet.instructions.content_id, packet.instructions.media_type
     )

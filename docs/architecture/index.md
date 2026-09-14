@@ -28,11 +28,13 @@ flowchart TB
         Packets[Portable stage packets]
         Views[Stage-specific read-only views]
         Results[Validated stage results]
-        Lock --> Packets --> Views --> Results
+        Recording[Recorder-neutral projection]
+        Lock --> Packets --> Views --> Results --> Recording
     end
 
     subgraph Models[Model roles]
         Author[Author]
+        Optimizer[Optimizer]
         Solver[Solver]
         Judge[Judge]
     end
@@ -42,16 +44,20 @@ flowchart TB
     Snapshots --> Author
     Policy --> Author
     Author --> Cases
+    Views --> Optimizer
     Views --> Solver
     Views --> Judge
     Solver --> Results
     Judge --> Results
+    Recording --> MLflow[MLflow comparison and traces]
 ```
 
 The author receives locked authoring evidence and writes reviewable experiment
 inputs. During a run, the coordinator projects each canonical case into a
 solver view or judge view so hidden correctness evidence never reaches the
-solver.
+solver. In COPRO experiments the optimizer receives only the current target,
+permitted training-corpus identity, and numeric candidate history; it never
+receives judge-only evidence or held-out data.
 
 ## Storage ownership
 
@@ -69,6 +75,7 @@ flowchart LR
             SnapshotStore[snapshots/]
             BlobStore[blobs/sha256/]
             Manifests[manifests/]
+            Recorders[recorders/]
             Temporary[tmp/]
         end
         Summary[summary/runs/&lt;run-id&gt;/ readable reports]
@@ -79,6 +86,7 @@ flowchart LR
     SnapshotStore --> BlobStore
     BlobStore --> Manifests
     Temporary --> BlobStore
+    Manifests --> Recorders
 ```
 
 | Versioned in Git | Stored externally |
@@ -112,6 +120,20 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
 - [ADR-005](005-optional-token-preflight.md) defines optional endpoint-native
   chat-template rendering and token preflight, context-aware pooled admission,
   and graceful execution when tokenizer extensions are unavailable.
+- [ADR-006](006-experiment-recorder-projection.md) defines recorder-neutral,
+  retryable projection of canonical experiment evidence, durable delivery and
+  recovery, and the first MLflow adapter.
+- [ADR-007](007-configurable-dspy-optimization-strategies.md) defines a
+  mutually exclusive workspace choice between labeled few-shot fitting and
+  COPRO prompt-and-skill search, including leakage, budget, identity, artifact,
+  and reporting requirements.
+- [ADR-008](008-paired-copro-evaluation-and-formal-reporting.md) defines the
+  paired original-versus-optimized COPRO test, exact expected-response token
+  measurement, formal summaries, and MLflow chart contract.
+- [ADR-009](009-factorial-model-arms-and-deployment-aware-tracking.md) defines
+  independently selectable solver, optimizer, and judge experiment arms,
+  deployment-aware endpoint routing, comparable benchmark identities, and
+  workspace-global MLflow model tracking.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

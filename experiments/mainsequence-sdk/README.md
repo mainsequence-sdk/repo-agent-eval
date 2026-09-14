@@ -4,6 +4,9 @@ This is the complete version-controlled template for evaluating the public
 MainSequence SDK at tag `v8.1.12`. It contains configuration and authored
 evaluation inputs only. Repository snapshots, DSPy calls, runs, and
 compiled programs go to `~/ms_agent_eval/mainsequence-sdk-evaluation`.
+Completed and in-progress runs are also projected to the configured local
+MLflow server at `http://192.168.1.17:5000`; the external filesystem remains the
+source of truth.
 
 ## Part A — evaluation target
 
@@ -22,7 +25,7 @@ Codex authoring also uses six independently resolved reference
 repositories:
 
 - the illustrative beginner tutorial at `v0.1.67`;
-- MainSequenceMarkets at `v1.0.14`, used for complex MetaTable architecture,
+- MainSequenceMarkets at `v1.0.14`, used for MetaTable architecture,
   relationship, migration, service, and FastAPI cases;
 - Alpaca Connectors at `v0.1.32`, used for concrete provider identity,
   universes, holdings, storage-first bars, Jobs, workflows, and thin APIs;
@@ -75,8 +78,10 @@ from SDK tests or older snapshots.
 `case-authoring.md` is the long-lived
 policy that tells Codex how to ground cases, construct solver-facing
 prompts and reference answers, design LLM-judge rubrics, and prevent split
-leakage. It separates easy documentation/tutorial-grounded work from complex
-cases grounded in the project portfolio. It also records where the projects
+leakage. It distinguishes documentation/tutorial-grounded work from cases
+grounded in the project portfolio without assigning subjective difficulty
+labels. Completed reports classify exact expected-response token length. It
+also records where the projects
 meaningfully differ: Alpaca has no local agent entrypoint, Binance and Markets
 Analytics contain only generic time-agent examples, and project documentation
 can lag the evaluated SDK. Only current API evidence from the pinned target may
@@ -92,7 +97,7 @@ premise. A user request defines one campaign slice and the desired number of
 atomic, independently reviewable cases per skill. That count is a lower bound:
 Codex writes at least 20 cases in at least 10 groups per selected skill and
 continues until every capability in `cases/coverage.yaml` has two primary
-examples. Schema-v5 cases
+examples. Schema-v6 cases
 separate the public `solver/` surface from private `judge/` evidence and record
 the authoring-policy, capability-catalog, source-set, and package hashes.
 
@@ -106,14 +111,16 @@ responses, and judge feedback are never training material.
 The same manifest defines:
 
 - `baseline`, which evaluates the typed DSPy solver on the untouched test split;
-- `optimize-few-shot`, which compares the baseline and configured
-  `LabeledFewShot` candidates by grouped K-fold cross-validation, refits the
-  selected configuration on all training cases, and scores the untouched test
-  split once.
+- `optimize-solver`, which selects `strategy: copro`, keeps the solver
+  zero-shot, and searches the solver instruction, response prefix, and all
+  configured source/imported skill overlays. Each proposal is evaluated by the
+  solver and separate LLM judge inside grouped cross-validation before the
+  selected bundle is compiled from train. The frozen original and optimized
+  programs are then scored on the same untouched test cases for a paired report.
 
 Executor definitions, model names, and stage assignments are stored directly in
-`workspace.yaml`. Solver and judge are separate roles and may intentionally use
-the same provider/model pair.
+`workspace.yaml`. Optimizer, solver, and judge are separately budgeted roles
+and may intentionally use the same provider/model pair.
 
 Every model also declares a `deployment_revision`, and every stage declares an
 explicit reuse policy. This workspace uses `exact`: an unchanged validated
@@ -127,17 +134,22 @@ run report separates executed and reused work. See
 ## Bootstrap and run
 
 The included `workspace.yaml` uses `gpt-5.6-sol` for case authoring and
-`qwen3.6:27b-coding` for both the solver and judge stages. No environment
+`qwen3.6:27b-coding` for the optimizer, solver, and judge stages. No environment
 variables are required by its unauthenticated local API configuration. The
 solver uses the model's default reasoning level; the judge sets the first-class
 `reasoning_effort: none` so structured rubric output is not consumed by a hidden
-thinking trace. Its `lan-inference` executor combines four request slots on each
-of the two `192.168.1.17` llama.cpp servers and eight slots on the
-`192.168.1.10` llama server, for sixteen requests total. All three endpoints must
+thinking trace. Its `lan-inference` executor combines two request slots on each
+of the two `192.168.1.17` llama.cpp servers and four slots on the
+`192.168.1.10` llama server, for eight requests total. All three endpoints must
 serve the deployment named by the shared Qwen deployment revision. For an
 authenticated provider, configure
 `api_key_env` on the applicable endpoint item and keep only the credential
 value in `.env`.
+The workspace enables `live_and_finalize` MLflow recording with full evidence.
+Install it with `uv sync --extra mlflow`, start the tracking server outside Git,
+and run `ms-agent-eval recorder doctor` before inference. An unavailable MLflow
+server leaves retryable pending delivery and does not fail the benchmark. See
+[experiment recording](../../docs/execution/experiment-recording.md).
 The author stage is intentionally `artifact_exchange`: the active Codex session
 authors and reviews files in Git. To automate it or any other model-driven stage
 with subscription-backed Codex, configure the isolated `codex_cli` executor in
@@ -181,9 +193,16 @@ uv run ms-agent-eval run baseline --pilot \
 # Scored execution after the readiness gate passes:
 uv run ms-agent-eval run baseline \
   --workspace experiments/mainsequence-sdk/workspace.yaml
-uv run ms-agent-eval run optimize-few-shot \
+uv run ms-agent-eval run optimize-solver \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
+
+The optimization command validates the judge, runs bounded COPRO search inside
+each train-only outer fold, records out-of-fold diagnostics, repeats search on
+all train cases, freezes the selected instruction/prefix/skill overlays as a
+zero-demonstration compiled artifact, and only then loads test cases. Optimizer
+packets never contain rubrics, expected responses, judge feedback, or held-out
+inputs.
 
 `validate` and `inspect` make no LLM requests. The five-fixture judge validation
 corpus is configured and uses the train-split

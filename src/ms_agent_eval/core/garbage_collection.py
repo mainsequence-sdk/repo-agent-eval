@@ -91,19 +91,30 @@ def _collect_locked(
             deleted_blob_bytes += size
 
     temporary_entries = _temporary_entries(store)
+    # Atomic writers create and rename files under operations/tmp.  A path may
+    # legitimately disappear between iterdir() and stat(); omit that transient
+    # entry from this GC snapshot instead of failing the experiment finalizer.
+    temporary_metadata: list[tuple[Path, int, float]] = []
+    for path in temporary_entries:
+        try:
+            temporary_metadata.append((path, _entry_size(path), _latest_mtime(path)))
+        except FileNotFoundError:
+            continue
     eligible_temporary = [
-        path
-        for path in temporary_entries
-        if now - _latest_mtime(path) >= minimum_age_seconds
+        (path, size)
+        for path, size, modified_at in temporary_metadata
+        if now - modified_at >= minimum_age_seconds
     ]
-    temporary_bytes = sum(_entry_size(path) for path in temporary_entries)
-    eligible_temporary_bytes = sum(_entry_size(path) for path in eligible_temporary)
+    temporary_bytes = sum(size for _, size, _ in temporary_metadata)
+    eligible_temporary_bytes = sum(size for _, size in eligible_temporary)
     deleted_temporary_count = 0
     deleted_temporary_bytes = 0
     if delete:
-        for path in eligible_temporary:
-            size = _entry_size(path)
-            _remove_entry(path)
+        for path, size in eligible_temporary:
+            try:
+                _remove_entry(path)
+            except FileNotFoundError:
+                continue
             deleted_temporary_count += 1
             deleted_temporary_bytes += size
 
@@ -129,7 +140,7 @@ def _collect_locked(
             "unmanaged_entries": unmanaged,
         },
         "temporary": {
-            "total_count": len(temporary_entries),
+            "total_count": len(temporary_metadata),
             "total_bytes": temporary_bytes,
             "eligible_count": len(eligible_temporary),
             "eligible_bytes": eligible_temporary_bytes,
@@ -147,8 +158,29 @@ def _reachable_blob_ids(store: FilesystemArtifactStore, managed: set[str]) -> se
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise IntegrityError(f"cannot garbage-collect with an invalid manifest: {path}") from error
+            raise IntegrityError(
+                f"cannot garbage-collect with an invalid manifest: {path}"
+            ) from error
         roots.update(_content_ids(payload))
+
+    # Recorder plans live in an operational outbox rather than the immutable
+    # experiment manifest tree. Pending plans are roots until a matching
+    # delivery receipt proves that their external projection completed.
+    recorder_root = store.operations_root / "recorders"
+    if recorder_root.is_dir():
+        for path in sorted(recorder_root.glob("*/*/runs/*/events/*.json")):
+            receipt = path.parent.parent / "receipts" / path.name
+            if receipt.is_file():
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise IntegrityError(f"recorder outbox event is not a regular file: {path}")
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise IntegrityError(
+                    f"cannot garbage-collect with an invalid recorder event: {path}"
+                ) from error
+            roots.update(_content_ids(payload))
 
     reachable: set[str] = set()
     pending = [digest for digest in roots if digest in managed]
@@ -186,9 +218,7 @@ def _content_ids(value: object) -> set[str]:
 def _temporary_entries(store: FilesystemArtifactStore) -> list[Path]:
     entries = list(store.temporary_root.iterdir())
     entries.extend(
-        path
-        for path in store.manifest_root.rglob(".*.tmp")
-        if path.is_file() or path.is_symlink()
+        path for path in store.manifest_root.rglob(".*.tmp") if path.is_file() or path.is_symlink()
     )
     return sorted(entries)
 
@@ -197,9 +227,7 @@ def _entry_size(path: Path) -> int:
     if path.is_symlink() or path.is_file():
         return path.lstat().st_size
     return sum(
-        item.lstat().st_size
-        for item in path.rglob("*")
-        if item.is_symlink() or item.is_file()
+        item.lstat().st_size for item in path.rglob("*") if item.is_symlink() or item.is_file()
     )
 
 

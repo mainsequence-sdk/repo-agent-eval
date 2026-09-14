@@ -21,7 +21,7 @@ define a numerical acceptance rule.
 | --- | --- | --- |
 | Diagnostic pilot | Training cases only | Per-case diagnostics with `benchmark_valid: false`; no benchmark mean. |
 | Baseline benchmark | Untouched test cases | Continuous held-out scores for the unfitted solver. |
-| Optimization benchmark | Grouped K-fold selection within train, refit on all train, then test once | Continuous held-out scores plus the complete selection record. |
+| Optimization benchmark | Grouped K-fold selection within train, refit on all train, then untouched test | Continuous held-out scores plus the complete selection record. COPRO compares frozen original and optimized programs on identical test cases. |
 
 The solver receives only its task, attachments, global instructions, and skill
 context. The judge separately receives the candidate, rubric, expected
@@ -36,4 +36,5 @@ rate.
 See [Capability coverage](capability-coverage.md),
 [judging and judge validation](judging-and-validation.md),
 [pilot versus scored runs](pilot-vs-scored-runs.md), and
-[interpreting results](interpreting-results.md).
+[interpreting results](interpreting-results.md). COPRO output details and the
+complete asset contract are in [Formal COPRO summary](formal-copro-summary.md).

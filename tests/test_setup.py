@@ -69,15 +69,11 @@ def _checkout(root: Path) -> Path:
     (checkout / "skills" / "nested" / "beta").mkdir(parents=True)
     (checkout / "AGENTS.md").write_text("global", encoding="utf-8")
     (checkout / "skills" / "alpha" / "SKILL.md").write_text("alpha", encoding="utf-8")
-    (checkout / "skills" / "nested" / "beta" / "SKILL.md").write_text(
-        "beta", encoding="utf-8"
-    )
+    (checkout / "skills" / "nested" / "beta" / "SKILL.md").write_text("beta", encoding="utf-8")
     return checkout
 
 
-def _dependencies(
-    checkout: Path, *, expected_api_key: str | None = None
-) -> SetupDependencies:
+def _dependencies(checkout: Path, *, expected_api_key: str | None = None) -> SetupDependencies:
     resolved = ResolvedSource(
         "https://github.com/example/project",
         "https://github.com/example/project.git",
@@ -115,6 +111,7 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
             "3.12",
             "cases",
             "Cover every selected skill",
+            "http://127.0.0.1:5000",
         ),
         selects=(
             "v1.0.0",
@@ -125,9 +122,11 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
             "medium",
             "none",
             "response_only",
+            "labeled_few_shot",
+            "full",
         ),
         checkboxes=(("AGENTS.md",),),
-        confirms=(False, True, True, True),
+        confirms=(False, True, True, True, True),
     )
 
     result = run_guided_setup(
@@ -138,7 +137,7 @@ def test_guided_setup_selects_complete_skill_directory(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 11
+    assert repository.workspace.schema_version == 14
     assert repository.workspace.models["solver"].reasoning_effort == "medium"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert repository.workspace.executors["remote-models"].total_concurrency == 4
@@ -197,10 +196,18 @@ def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
             "3.12",
             "cases",
             "Cover the selected skill",
+            "http://127.0.0.1:5000",
         ),
-        selects=("v1.0.0", "files", "__default__", "__default__", "response_only"),
+        selects=(
+            "v1.0.0",
+            "files",
+            "__default__",
+            "__default__",
+            "response_only",
+            "full",
+        ),
         checkboxes=(("AGENTS.md",), ("skills/alpha/SKILL.md",)),
-        confirms=(False, False, False, True),
+        confirms=(False, False, False, True, True),
     )
 
     result = run_guided_setup(
@@ -211,9 +218,7 @@ def test_guided_setup_records_only_explicit_skill_files(tmp_path: Path) -> None:
 
     assert result["status"] == "configured"
     payload = yaml.safe_load(workspace.read_text(encoding="utf-8"))
-    assert payload["evaluation"]["instructions"]["skills"] == {
-        "files": ["skills/alpha/SKILL.md"]
-    }
+    assert payload["evaluation"]["instructions"]["skills"] == {"files": ["skills/alpha/SKILL.md"]}
     assert result["skill_count"] == 1
 
 
@@ -232,6 +237,7 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
             "3.12",
             "cases",
             "Cover every selected skill",
+            "http://127.0.0.1:5000",
         ),
         selects=(
             "v1.0.0",
@@ -242,9 +248,11 @@ def test_guided_setup_cancellation_writes_no_workspace_files(tmp_path: Path) -> 
             "__default__",
             "__default__",
             "response_only",
+            "labeled_few_shot",
+            "full",
         ),
         checkboxes=(("AGENTS.md",),),
-        confirms=(False, True, True, False),
+        confirms=(False, True, True, True, False),
     )
 
     result = run_guided_setup(
@@ -277,6 +285,7 @@ def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) 
             "3.12",
             "cases",
             "Cover every selected skill",
+            "http://127.0.0.1:5000",
         ),
         selects=(
             "v1.0.0",
@@ -287,9 +296,11 @@ def test_authenticated_setup_keeps_only_the_secret_outside_yaml(tmp_path: Path) 
             "__default__",
             "__default__",
             "response_only",
+            "labeled_few_shot",
+            "full",
         ),
         checkboxes=(("AGENTS.md",),),
-        confirms=(True, True, True, True),
+        confirms=(True, True, True, True, True),
         secrets=(api_key,),
     )
 
@@ -315,9 +326,7 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
     checkout = _checkout(tmp_path)
     (checkout / "skills" / "SKILL.md").write_text("root skill", encoding="utf-8")
     (checkout / "skills" / "skills").mkdir()
-    (checkout / "skills" / "skills" / "SKILL.md").write_text(
-        "colliding skill", encoding="utf-8"
-    )
+    (checkout / "skills" / "skills" / "SKILL.md").write_text("colliding skill", encoding="utf-8")
     workspace = tmp_path / "collision" / "workspace.yaml"
     prompt = ScriptedPrompt(
         texts=(
@@ -331,6 +340,7 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
             "3.12",
             "cases",
             "Cover every selected skill",
+            "http://127.0.0.1:5000",
         ),
         selects=(
             "v1.0.0",
@@ -341,9 +351,11 @@ def test_skill_id_collision_fails_before_workspace_write(tmp_path: Path) -> None
             "__default__",
             "__default__",
             "response_only",
+            "labeled_few_shot",
+            "full",
         ),
         checkboxes=(("AGENTS.md",),),
-        confirms=(False, True, True),
+        confirms=(False, True, True, True),
     )
 
     with pytest.raises(ResolutionError, match="instruction unit collision"):

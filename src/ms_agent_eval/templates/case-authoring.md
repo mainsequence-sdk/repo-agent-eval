@@ -115,12 +115,12 @@ context to act without hidden information, meaningful room for partial quality,
 and failure modes that the judge can identify from the submitted response and
 artifacts.
 
-Choose difficulty from the work itself: interacting constraints, edge cases,
-ambiguous-but-resolvable requirements, validation obligations, or trade-offs
-documented by the snapshot. Do not create difficulty through missing facts,
-invented contradictions, trick wording, arbitrary formatting, or undocumented
-behavior. A diagnostic case may contain a flawed test, premise, configuration,
-or implementation when that defect is deliberately presented as evidence the
+Use interacting constraints, edge cases, ambiguous-but-resolvable requirements,
+validation obligations, or trade-offs only when documented by the snapshot. Do
+not manufacture complexity through missing facts, invented contradictions,
+trick wording, arbitrary formatting, or undocumented behavior. A diagnostic
+case may contain a flawed test, premise, configuration, or implementation when
+that defect is deliberately presented as evidence the
 solver can inspect.
 Do not ask for secrets, live credentials, destructive actions, unavailable
 services, or network access unless the supplied instructions explicitly define
@@ -310,7 +310,7 @@ execution records only under the external data root.
 
 ## Versioned package contract
 
-Write one schema-version-5 package beneath `cases/<skill-id>/<case-id>/`:
+Write one schema-version-6 package beneath `cases/<skill-id>/<case-id>/`:
 
 ```text
 case.yaml
@@ -325,7 +325,7 @@ judge/expected/artifacts/       optional judge-only evidence
 references, exact source paths, and this explicit coverage classification:
 
 ```yaml
-schema_version: 5
+schema_version: 6
 solver:
   prompt: solver/prompt.md
   # attachments: solver/attachments
@@ -337,11 +337,12 @@ coverage:
   primary: one-capability-id
   supporting: [optional-capability-id]
   archetype: construction
-  difficulty: easy
 ```
 
 Allowed archetypes are `construction`, `review`, `diagnosis`, `migration`, and
-`evidence`; difficulty is `easy` or `complex`. Record this provenance:
+`evidence`. Do not add a subjective difficulty field or a manually estimated
+token count. Reporting measures the hidden expected response with the exact
+configured tokenizer after model execution. Record this provenance:
 
 ```yaml
 provenance:

@@ -35,7 +35,7 @@ that time was:
 | --- | --- | --- | ---: |
 | `llama-cpp-17-18081` | available | available | 8192 |
 | `llama-cpp-17-18080` | available | available | 8192 |
-| `llama-server-10-11436` | available | available | 8192 |
+| `llama-server-10-11434` | available | available | 8192 |
 
 The restarted servers advertise a larger context dynamically. That deployment
 value is deliberately not copied into `workspace.yaml` or treated as permanent

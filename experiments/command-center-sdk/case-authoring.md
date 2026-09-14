@@ -23,7 +23,7 @@ commit: d9e3f99496daf92c49da362605030bec70e1917d
 package: "@dev-mainsequence/command-center-sdk@0.1.21"
 ```
 
-The beginner application used as illustrative easy-case material is:
+The beginner application used as illustrative foundational material is:
 
 ```yaml
 source: command-center-sdk-tutorial
@@ -74,7 +74,7 @@ The SDK is bundler-independent and does not require Vite. The pinned tutorial
 is a repository-root React/Vite consumer application. A case may test correct
 Vite integration, but it must not present Vite as an SDK requirement.
 
-Easy cases normally use a response-only evaluation runtime. Project-backed
+Documentation/tutorial cases normally use a response-only evaluation runtime. Project-backed
 implementation cases require an isolated Node environment. For the pinned
 tutorial toolchain, use Node `22.12` or newer, `npm ci`, TypeScript, Vitest, and
 Vite. Add Playwright only when browser geometry or browser behavior is part of
@@ -149,15 +149,15 @@ tutorial or project are different evidence.
 
 Every requested case belongs to exactly one lane.
 
-### Lane A: easy documentation/tutorial cases
+### Lane A: documentation/tutorial-grounded cases
 
-Easy cases use the pinned SDK documentation and, when supplied, the pinned
+These cases use the pinned SDK documentation and, when supplied, the pinned
 React/Vite tutorial. They cover one primary concept through a bounded user
 request, explanation, diagnosis, code review, implementation plan, or small
 textual artifact. They must not require live credentials, private identifiers,
 current deployment state, destructive cleanup, or undocumented services.
 
-Easy does not mean trivia. The solver should have to select the correct SDK
+The solver should have to select the correct SDK
 surface, respect an ownership boundary, preserve a contract, or diagnose one
 plausible mistake.
 
@@ -178,7 +178,7 @@ repository-root React/Vite application
 
 Use this as coherent context, not as a checklist one case must reproduce.
 
-Good initial easy-case areas include:
+Good initial documentation/tutorial case areas include:
 
 - choosing the correct public SDK subpath and rejecting imports from repository
   source or `dist`;
@@ -214,14 +214,14 @@ Good initial easy-case areas include:
 - keeping backend metadata descriptive rather than treating it as executable
   frontend code.
 
-The tutorial can also ground easy diagnostic cases about discovery, branch
+The tutorial can also ground diagnostic cases about discovery, branch
 safety, delegated authentication, refresh state, Vite public configuration,
 static deployment, and live-proof boundaries. These should remain
 response-only unless a separately authorized runtime is configured.
 
-### Lane B: complex project-backed cases
+### Lane B: project-backed implementation cases
 
-Complex cases must come from an actual separately pinned TypeScript/React
+Project-backed implementation cases must come from an actual separately pinned TypeScript/React
 project. Do not create artificial complexity by expanding tutorial prose,
 removing necessary facts, or combining unrelated skills.
 
@@ -426,7 +426,7 @@ The solver-facing prompt must:
   leakage group, or dataset split; and
 - avoid revealing the rubric as a checklist.
 
-Do not make difficulty through missing facts, trick wording, arbitrary
+Do not manufacture complexity through missing facts, trick wording, arbitrary
 contradictions, or undocumented behavior. If the requested coverage lacks
 supporting evidence, narrow it to the closest defensible SDK behavior. Never
 fill a source gap with memory.
@@ -518,7 +518,7 @@ boundaries. Do not choose or name a split.
 DSPy optimization may load training cases only during fitting and selection.
 Model selection uses grouped K-fold cross-validation within the training split.
 After selecting the highest-mean out-of-fold candidate, refit it on all training
-cases and evaluate the untouched test set once. Test and challenge results must
+cases and evaluate the untouched test set. Test and challenge results must
 never influence authoring instructions, case wording,
 reference answers, rubrics, demonstrations, or optimizer settings.
 
@@ -587,7 +587,7 @@ judge-validation execution records stay under the external data root.
 
 ## Versioned case package
 
-Write schema-version-5 packages beneath `cases/<skill-id>/<case-id>/` using
+Write schema-version-6 packages beneath `cases/<skill-id>/<case-id>/` using
 `solver/prompt.md`, optional `solver/attachments/`, `judge/rubric.yaml`,
 `judge/expected/response.md`, and optional `judge/expected/artifacts/`. Every requested count
 is a lower bound; create at least three materially different cases per selected

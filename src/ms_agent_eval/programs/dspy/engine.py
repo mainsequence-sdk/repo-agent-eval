@@ -57,6 +57,30 @@ class RubricJudge(dspy.Signature):
     feedback: str = dspy.OutputField()
 
 
+class CoproProposal(dspy.Signature):
+    """Propose distinct instruction candidates for a bounded COPRO search round.
+
+    Rewrite only the supplied target text. Preserve every technical fact and
+    constraint. Do not invent APIs, use hidden evaluation material, or include
+    evaluator-directed instructions. For a solver_prompt target, each item must
+    contain both ``instruction`` and ``output_prefix``. For a skill target, each
+    item must contain ``instruction`` and may leave ``output_prefix`` empty.
+    Aim to return candidate_count distinct candidates; the unchanged original
+    is added separately by the coordinator and must not be returned. If useful
+    alternatives are exhausted, return the best distinct candidates available.
+    The coordinator records any shortfall and continues the bounded search.
+    """
+
+    target_kind: str = dspy.InputField()
+    target_id: str = dspy.InputField()
+    current_text: str = dspy.InputField()
+    current_output_prefix: str = dspy.InputField()
+    scored_attempts: str = dspy.InputField()
+    requirements: str = dspy.InputField()
+    candidate_count: int = dspy.InputField()
+    candidates: list[dict[str, str]] = dspy.OutputField()
+
+
 PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
     "author": {
         "inputs": ("authoring_context",),
@@ -77,6 +101,18 @@ PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
         ),
         "outputs": ("criterion_scores", "hard_failures", "feedback"),
     },
+    "optimizer": {
+        "inputs": (
+            "target_kind",
+            "target_id",
+            "current_text",
+            "current_output_prefix",
+            "scored_attempts",
+            "requirements",
+            "candidate_count",
+        ),
+        "outputs": ("candidates",),
+    },
 }
 
 
@@ -90,6 +126,43 @@ def create_author_program() -> dspy.Predict:
 
 def create_judge_program() -> dspy.Predict:
     return dspy.Predict(RubricJudge)
+
+
+def create_copro_proposal_program() -> dspy.Predict:
+    return dspy.Predict(CoproProposal)
+
+
+def solver_prompt_state(program: dspy.Module) -> tuple[str, str]:
+    predictors = list(program.named_predictors())
+    if len(predictors) != 1:
+        raise IntegrityError("solver program must contain exactly one predictor")
+    predictor = predictors[0][1]
+    field = predictor.signature.output_fields.get("response")
+    if field is None:
+        raise IntegrityError("solver program has no response output field")
+    metadata = field.json_schema_extra or {}
+    prefix = metadata.get("prefix", "Response:")
+    if not isinstance(prefix, str) or not prefix.strip():
+        raise IntegrityError("solver response prefix must be a non-empty string")
+    return predictor.signature.instructions, prefix.strip()
+
+
+def apply_solver_prompt(
+    program: dspy.Module,
+    *,
+    instruction: str,
+    output_prefix: str,
+) -> dspy.Module:
+    if not instruction.strip() or not output_prefix.strip():
+        raise ConfigurationError("solver instruction and output prefix must be non-empty")
+    predictors = list(program.named_predictors())
+    if len(predictors) != 1:
+        raise IntegrityError("solver program must contain exactly one predictor")
+    predictor = predictors[0][1]
+    signature = predictor.signature.with_instructions(instruction.strip())
+    signature = signature.with_updated_fields("response", prefix=output_prefix.strip())
+    predictor.signature = signature
+    return program
 
 
 def program_state(program: dspy.Module) -> dict[str, object]:
@@ -177,6 +250,7 @@ class DspyExecutionContract:
     inputs: Mapping[str, object]
     required_outputs: tuple[str, ...]
     primary_output: str | None
+    call_parameters: Mapping[str, object] | None = None
 
 
 class DspyExecutor:
@@ -202,7 +276,14 @@ class DspyExecutor:
         start = len(observer.records)
         try:
             with dspy.context(lm=lm, adapter=selected_adapter):
-                prediction = program(**dict(contract.inputs))
+                prediction = program(
+                    **dict(contract.inputs),
+                    **(
+                        {"config": dict(contract.call_parameters)}
+                        if contract.call_parameters
+                        else {}
+                    ),
+                )
             calls = tuple(observer.records[start:])
             if not calls:
                 raise IntegrityError("DSPy execution produced no observed model call")
@@ -226,6 +307,7 @@ class DspyExecutor:
                     "program_hash": contract.program_hash,
                     "program_state": program_state(program),
                     "inputs": contract.inputs,
+                    "call_parameters": contract.call_parameters or {},
                     "outputs": outputs,
                 }
             )
@@ -250,6 +332,7 @@ class DspyExecutor:
                     "program_hash": contract.program_hash,
                     "program_state": program_state(program),
                     "inputs": contract.inputs,
+                    "call_parameters": contract.call_parameters or {},
                     "error_kind": kind,
                     "error": str(error),
                 }

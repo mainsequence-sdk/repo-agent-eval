@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
 from typing import Any
 
 import dspy
@@ -108,21 +107,20 @@ class ObservedDspyLM(dspy.LM):
         return response
 
 
-RouteFactory = Callable[
-    [Sequence[Mapping[str, object]], Mapping[str, object]],
-    AbstractContextManager[dspy.BaseLM],
+RouteCall = Callable[
+    [object, object, Sequence[Mapping[str, object]], Mapping[str, object]],
+    object,
 ]
 
 
 class RoutedDspyLM(dspy.LM):
-    """DSPy LM that resolves and holds one endpoint permit per model call."""
+    """DSPy LM that delegates one call through the coordinator's endpoint router."""
 
-    def __init__(self, *, model: str, route_factory: RouteFactory) -> None:
+    def __init__(self, *, model: str, route_call: RouteCall) -> None:
         super().__init__(model=model, cache=False, num_retries=0)
-        self.route_factory = route_factory
+        self.route_call = route_call
 
     def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
         rendered = messages or [{"role": "user", "content": prompt}]
         parameters = {str(key): value for key, value in kwargs.items()}
-        with self.route_factory(rendered, parameters) as delegate:
-            return delegate.forward(prompt=prompt, messages=messages, **kwargs)
+        return self.route_call(prompt, messages, rendered, parameters)

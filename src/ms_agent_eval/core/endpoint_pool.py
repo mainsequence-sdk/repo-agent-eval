@@ -56,6 +56,38 @@ class EndpointPool:
         self._metrics_lock = Lock()
         self._active_by_endpoint = {endpoint.id: 0 for endpoint in executor.endpoints}
         self._pool_active = 0
+        self._quarantined_until: dict[str, float] = {}
+
+    def quarantine(self, endpoint_id: str, *, seconds: float = 30.0) -> None:
+        """Temporarily remove an endpoint after an endpoint-specific failure."""
+
+        if endpoint_id not in self._active_by_endpoint:
+            raise ValueError(f"unknown endpoint: {endpoint_id}")
+        with self._metrics_lock:
+            self._quarantined_until[endpoint_id] = max(
+                self._quarantined_until.get(endpoint_id, 0.0),
+                time.monotonic() + seconds,
+            )
+
+    def restore(self, endpoint_id: str) -> None:
+        """Clear an endpoint quarantine after a successful request."""
+
+        with self._metrics_lock:
+            self._quarantined_until.pop(endpoint_id, None)
+
+    def quarantined_endpoint_ids(self) -> frozenset[str]:
+        """Return endpoint IDs whose transport-failure cooldown is still active."""
+
+        now = time.monotonic()
+        with self._metrics_lock:
+            expired = [
+                endpoint_id
+                for endpoint_id, unavailable_until in self._quarantined_until.items()
+                if unavailable_until <= now
+            ]
+            for endpoint_id in expired:
+                self._quarantined_until.pop(endpoint_id, None)
+            return frozenset(self._quarantined_until)
 
     @property
     def capacity(self) -> int:
@@ -124,9 +156,7 @@ def endpoint_provenance_routes(
     """Normalize single-lease and internally fanned-out packet provenance."""
 
     raw_routes = provenance.get("routes")
-    if isinstance(raw_routes, Sequence) and not isinstance(
-        raw_routes, (str, bytes, bytearray)
-    ):
+    if isinstance(raw_routes, Sequence) and not isinstance(raw_routes, (str, bytes, bytearray)):
         return tuple(dict(route) for route in raw_routes if isinstance(route, Mapping))
     if not isinstance(provenance.get("endpoint_id"), str):
         return ()
@@ -140,12 +170,8 @@ def endpoint_provenance_routes(
         "latency_seconds",
     ):
         route[key] = packet_usage.get(key, 0)
-    route["peak_observed_endpoint_concurrency"] = provenance.get(
-        "endpoint_active_at_start", 0
-    )
-    route["peak_observed_pool_concurrency"] = provenance.get(
-        "pool_active_at_start", 0
-    )
+    route["peak_observed_endpoint_concurrency"] = provenance.get("endpoint_active_at_start", 0)
+    route["peak_observed_pool_concurrency"] = provenance.get("pool_active_at_start", 0)
     return (route,)
 
 

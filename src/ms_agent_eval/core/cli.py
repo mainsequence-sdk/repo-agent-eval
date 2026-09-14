@@ -50,7 +50,51 @@ def _parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
     setup.add_argument("--workspace", type=Path)
 
-    init = commands.add_parser("init", help="Create a schema-v11 incremental DSPy workspace.")
+    models = commands.add_parser(
+        "models",
+        help="Refresh and query the static OpenRouter model catalog.",
+    )
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+    models_refresh = model_commands.add_parser(
+        "refresh",
+        help="Upsert the current OpenRouter model list without deleting existing rows.",
+    )
+    models_refresh.add_argument(
+        "--catalog",
+        type=Path,
+        default=Path("models/openrouter.json"),
+        help="Static catalog JSON file (default: models/openrouter.json).",
+    )
+    models_refresh.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=30.0,
+        help="OpenRouter request timeout in seconds (default: 30).",
+    )
+    models_match = model_commands.add_parser(
+        "match",
+        help="Rank OpenRouter catalog models for a local model name.",
+    )
+    models_match.add_argument("query", help="Local or deployment model name to match.")
+    models_match.add_argument(
+        "--catalog",
+        type=Path,
+        default=Path("models/openrouter.json"),
+        help="Static catalog JSON file (default: models/openrouter.json).",
+    )
+    models_match.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum ranked matches to return (default: 5).",
+    )
+    models_match.add_argument(
+        "--include-custom",
+        action="store_true",
+        help="Include non-OpenRouter rows in the candidate set.",
+    )
+
+    init = commands.add_parser("init", help="Create a schema-v13 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -82,8 +126,32 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--judge-deployment-revision")
     init.add_argument("--solver-reasoning-effort", choices=REASONING_EFFORTS)
     init.add_argument("--judge-reasoning-effort", choices=REASONING_EFFORTS)
+    init.add_argument(
+        "--optimization-strategy",
+        choices=("labeled_few_shot", "copro"),
+        default="labeled_few_shot",
+        help="DSPy strategy for the generated optimization experiment.",
+    )
+    init.add_argument("--optimizer-model")
+    init.add_argument("--optimizer-deployment-revision")
+    init.add_argument("--optimizer-reasoning-effort", choices=REASONING_EFFORTS)
     init.add_argument("--author-model", default="gpt-5.6-sol")
     init.add_argument("--author-deployment-revision")
+    init.add_argument(
+        "--mlflow-tracking-uri",
+        default="http://127.0.0.1:5000",
+        help="MLflow tracking-server URL stored in workspace configuration.",
+    )
+    init.add_argument(
+        "--no-recording",
+        action="store_true",
+        help="Configure MLflow but disable automatic recording.",
+    )
+    init.add_argument(
+        "--recording-content-policy",
+        choices=("hashes_only", "summary", "full"),
+        default="full",
+    )
 
     codex = commands.add_parser(
         "codex", help="Manage subscription-backed Codex harness authentication."
@@ -118,7 +186,7 @@ def _parser() -> argparse.ArgumentParser:
     preflight.add_argument(
         "--stage",
         action="append",
-        choices=("all", "validate_judge", "solve", "judge"),
+        choices=("all", "validate_judge", "optimize", "solve", "judge"),
         help="Stage to inspect; repeat as needed (default: all model request stages).",
     )
     preflight.add_argument(
@@ -139,6 +207,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             "author",
             "validate_judge",
+            "optimize",
             "solve",
             "judge",
             "fit",
@@ -162,6 +231,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             "author",
             "validate_judge",
+            "optimize",
             "solve",
             "judge",
             "fit",
@@ -216,6 +286,34 @@ def _parser() -> argparse.ArgumentParser:
         help="Replace a derived report when its bytes differ from current evidence.",
     )
     _workspace_argument(report_build)
+
+    recorder = commands.add_parser(
+        "recorder", help="Inspect, validate, or backfill experiment recording."
+    )
+    recorder_commands = recorder.add_subparsers(dest="recorder_command", required=True)
+    recorder_doctor = recorder_commands.add_parser(
+        "doctor", help="Verify the configured recorder and its write capabilities."
+    )
+    recorder_doctor.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Check connectivity without creating a temporary recorder probe.",
+    )
+    _workspace_argument(recorder_doctor)
+    recorder_status = recorder_commands.add_parser(
+        "status", help="Show durable delivery state for one run."
+    )
+    recorder_status.add_argument("--run", required=True)
+    _workspace_argument(recorder_status)
+    recorder_sync = recorder_commands.add_parser(
+        "sync", help="Retry or backfill recorder projection without model calls."
+    )
+    recorder_selection = recorder_sync.add_mutually_exclusive_group(required=True)
+    recorder_selection.add_argument("--run", help="Run id to synchronize.")
+    recorder_selection.add_argument(
+        "--all", action="store_true", help="Synchronize every retained run."
+    )
+    _workspace_argument(recorder_sync)
 
     return parser
 
@@ -276,8 +374,15 @@ def _init(arguments: argparse.Namespace) -> Mapping[str, object]:
         judge_deployment_revision=arguments.judge_deployment_revision,
         solver_reasoning_effort=arguments.solver_reasoning_effort,
         judge_reasoning_effort=arguments.judge_reasoning_effort,
+        optimizer_model=arguments.optimizer_model,
+        optimizer_deployment_revision=arguments.optimizer_deployment_revision,
+        optimizer_reasoning_effort=arguments.optimizer_reasoning_effort,
+        optimization_strategy=arguments.optimization_strategy,
         author_model=arguments.author_model,
         author_deployment_revision=arguments.author_deployment_revision,
+        recording_enabled=not arguments.no_recording,
+        mlflow_tracking_uri=arguments.mlflow_tracking_uri,
+        recording_content_policy=arguments.recording_content_policy,
     )
     WorkspaceConfiguration.from_mapping(template.payload)
     paths = write_workspace_template(workspace_file, template)
@@ -295,11 +400,65 @@ def _run(
     progress_sink: ProgressSink | None = None,
 ) -> object:
     if arguments.command == "setup":
-        return run_guided_setup(
-            QuestionaryPromptBackend(), workspace_file=arguments.workspace
-        )
+        return run_guided_setup(QuestionaryPromptBackend(), workspace_file=arguments.workspace)
     if arguments.command == "init":
         return _init(arguments)
+    if arguments.command == "models":
+        from .model_catalog import (
+            load_openrouter_catalog,
+            rank_model_matches,
+            refresh_openrouter_catalog,
+        )
+
+        if arguments.models_command == "refresh":
+            if arguments.timeout_seconds <= 0:
+                raise ConfigurationError("--timeout-seconds must be greater than zero")
+            catalog = refresh_openrouter_catalog(
+                arguments.catalog,
+                timeout_seconds=arguments.timeout_seconds,
+            )
+            openrouter_count = sum(model.get("source") == "openrouter" for model in catalog.models)
+            return {
+                "status": "refreshed",
+                "catalog": catalog.path.as_posix(),
+                "model_count": len(catalog.models),
+                "openrouter_model_count": openrouter_count,
+                "custom_model_count": len(catalog.models) - openrouter_count,
+            }
+        catalog = load_openrouter_catalog(arguments.catalog)
+        matches = rank_model_matches(
+            arguments.query,
+            catalog,
+            limit=arguments.limit,
+            source=None if arguments.include_custom else "openrouter",
+        )
+        if not matches:
+            scope = "catalog" if arguments.include_custom else "OpenRouter catalog"
+            raise ConfigurationError(
+                f"the {scope} contains no models; run 'ms-agent-eval models refresh' first"
+            )
+        return {
+            "query": arguments.query,
+            "catalog": catalog.path.as_posix(),
+            "matches": [
+                {
+                    "model": match.model,
+                    "similarity": match.score,
+                    "provider": match.record.get("provider"),
+                    "name": match.record.get("name"),
+                    "context_length": match.record.get("context_length"),
+                    "input_price_per_million": match.record.get("input_price_per_million"),
+                    "output_price_per_million": match.record.get("output_price_per_million"),
+                    "cache_read_price_per_million": match.record.get(
+                        "cache_read_price_per_million"
+                    ),
+                    "cache_write_price_per_million": match.record.get(
+                        "cache_write_price_per_million"
+                    ),
+                }
+                for match in matches
+            ],
+        }
     if arguments.command == "codex":
         from .codex_auth import CodexSubscriptionAuthStore
 
@@ -315,9 +474,7 @@ def _run(
             try:
                 executor = repository.workspace.executors[arguments.executor]
             except KeyError as error:
-                raise ConfigurationError(
-                    f"unknown Codex executor: {arguments.executor}"
-                ) from error
+                raise ConfigurationError(f"unknown Codex executor: {arguments.executor}") from error
             if executor.adapter != "codex_cli" or executor.codex_cli is None:
                 raise ConfigurationError(
                     f"executor {arguments.executor!r} is not a codex_cli executor"
@@ -357,6 +514,38 @@ def _run(
         }
     repository = WorkspaceRepository.from_file(arguments.workspace)
     environment = repository.environment()
+    if arguments.command == "recorder":
+        from .recorder import recorder_service
+        from .reporting import list_run_ids
+        from .stages import StageLedger
+        from .storage import FilesystemArtifactStore
+
+        store = FilesystemArtifactStore(
+            repository.data_root,
+            workspace_root=repository.root,
+        )
+        service = recorder_service(
+            store,
+            recording=repository.workspace.recording,
+            recorders=repository.workspace.recorders,
+            environment=environment,
+        )
+        if arguments.recorder_command == "doctor":
+            return service.doctor(write_test=not arguments.read_only)
+        if arguments.recorder_command == "status":
+            StageLedger(store).load_run(arguments.run)
+            return service.status(arguments.run)
+        ledger = StageLedger(store)
+        run_ids = list_run_ids(ledger) if arguments.all else (arguments.run,)
+        if not run_ids:
+            raise ConfigurationError("the workspace has no retained runs")
+        statuses = [service.sync_run(run_id, raise_on_error=True) for run_id in run_ids]
+        return {
+            "schema_version": 1,
+            "status": "synced",
+            "count": len(statuses),
+            "runs": statuses,
+        }
     if arguments.command in {"validate", "inspect"}:
         from .planning import inspect_workspace
 
@@ -366,9 +555,7 @@ def _run(
         from .reporting import list_run_ids
 
         coordinator = StageCoordinator(repository)
-        run_ids = (
-            list_run_ids(coordinator.ledger) if arguments.all else (arguments.run,)
-        )
+        run_ids = list_run_ids(coordinator.ledger) if arguments.all else (arguments.run,)
         if not run_ids:
             raise ConfigurationError("the workspace has no retained runs")
         publications = [

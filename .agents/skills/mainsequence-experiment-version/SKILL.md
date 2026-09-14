@@ -50,5 +50,6 @@ independent from the evaluated SDK.
 
 Optimization derives grouped K-fold cross-validation inside `train`, selects
 the highest mean out-of-fold candidate, refits it on all training cases, and
-evaluates the untouched test set once. Never use test or challenge content or
+evaluates the untouched test set only after selection. COPRO then compares the
+frozen original and optimized programs on identical test cases. Never use test or challenge content or
 results to revise cases, demonstrations, or hyperparameters.

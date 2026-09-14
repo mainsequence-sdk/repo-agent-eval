@@ -42,7 +42,7 @@ skills:
         # minimum_primary_cases: 4  # optional override
 ```
 
-Every schema-v5 case has exactly one cataloged primary capability and at most
+Every schema-v6 case has exactly one cataloged primary capability and at most
 two supporting capabilities:
 
 ```yaml
@@ -50,13 +50,15 @@ coverage:
   primary: stable-capability-id
   supporting: []
   archetype: construction
-  difficulty: easy
 ```
 
 Only primary cases count toward capability depth. Supporting tags record
 context only. A skill is ready only when every capability reaches its required
 primary-case depth and the per-skill case and distinct-leakage-group floors in
 `workspace.yaml` are also met.
+
+Do not author subjective difficulty labels. Completed reports classify response
+length from the exact hidden expected-response token count.
 
 Requested case counts are lower bounds. Do not satisfy the catalog with
 paraphrases: variants that share a source example, fixture, defect, solution,

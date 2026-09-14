@@ -71,10 +71,7 @@ class StageViewMaterializer:
             raise ConfigurationError("stage-view destination must be empty")
         root.mkdir(parents=True, exist_ok=True)
 
-        inputs = {
-            artifact.id: self._read_artifact(artifact, ledger)
-            for artifact in packet.inputs
-        }
+        inputs = {artifact.id: self._read_artifact(artifact, ledger) for artifact in packet.inputs}
         instructions = self._read_artifact(packet.instructions, ledger)
         files: dict[str, bytes] = {}
         if instruction_policy == "controlled":
@@ -138,9 +135,7 @@ class StageViewMaterializer:
                 return payload.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise IntegrityError(f"non-UTF-8 stage artifact {artifact.id!r}") from error
-        raise IntegrityError(
-            f"Codex stage views do not support media type {artifact.media_type!r}"
-        )
+        raise IntegrityError(f"Codex stage views do not support media type {artifact.media_type!r}")
 
     @staticmethod
     def _author_files(inputs: Mapping[str, object], files: dict[str, bytes]) -> None:
@@ -160,6 +155,7 @@ class StageViewMaterializer:
             "fold",
             "candidate_id",
             "candidate_k",
+            "strategy",
             "global_context",
             "skill_context",
             "task",
@@ -170,12 +166,8 @@ class StageViewMaterializer:
         if forbidden:
             raise IntegrityError(f"solve stage view contains forbidden fields: {forbidden}")
         files["input/task.md"] = _required_text(case, "task").encode("utf-8")
-        files["input/context/global.md"] = _required_text(
-            case, "global_context"
-        ).encode("utf-8")
-        files["input/context/skill.md"] = _required_text(
-            case, "skill_context"
-        ).encode("utf-8")
+        files["input/context/global.md"] = _required_text(case, "global_context").encode("utf-8")
+        files["input/context/skill.md"] = _required_text(case, "skill_context").encode("utf-8")
         metadata = {
             key: case[key]
             for key in (
@@ -188,6 +180,7 @@ class StageViewMaterializer:
                 "fold",
                 "candidate_id",
                 "candidate_k",
+                "strategy",
                 "program_hash",
             )
         }
@@ -213,6 +206,11 @@ class StageViewMaterializer:
             "candidate_response",
             "split",
             "repetition",
+            "evaluation_phase",
+            "fold",
+            "candidate_id",
+            "candidate_k",
+            "strategy",
             "solver_work_id",
             "solver_packet_id",
         }
@@ -220,9 +218,9 @@ class StageViewMaterializer:
         if forbidden:
             raise IntegrityError(f"judge stage view contains forbidden fields: {forbidden}")
         _add_judge_case(files, evaluation)
-        files["input/candidate.md"] = _required_text(
-            evaluation, "candidate_response"
-        ).encode("utf-8")
+        files["input/candidate.md"] = _required_text(evaluation, "candidate_response").encode(
+            "utf-8"
+        )
         files["input/metadata.json"] = canonical_json_bytes(
             {
                 key: evaluation[key]
@@ -231,6 +229,11 @@ class StageViewMaterializer:
                     "case_hash",
                     "split",
                     "repetition",
+                    "evaluation_phase",
+                    "fold",
+                    "candidate_id",
+                    "candidate_k",
+                    "strategy",
                     "solver_work_id",
                     "solver_packet_id",
                 )
@@ -250,26 +253,18 @@ class StageViewMaterializer:
         if not isinstance(fixtures, list):
             raise IntegrityError("judge-validation fixtures must be a list")
         selected = [
-            item
-            for item in fixtures
-            if isinstance(item, Mapping) and item.get("id") == fixture_id
+            item for item in fixtures if isinstance(item, Mapping) and item.get("id") == fixture_id
         ]
         if fixture_id is None or len(selected) != 1:
-            raise IntegrityError(
-                "judge-validation stage view requires exactly one known fixture"
-            )
+            raise IntegrityError("judge-validation stage view requires exactly one known fixture")
         fixture = {str(key): value for key, value in selected[0].items()}
         if set(fixture) != {"id", "candidate_response", "case"}:
-            raise IntegrityError(
-                "judge-validation fixture exposes coordinator-only fields"
-            )
+            raise IntegrityError("judge-validation fixture exposes coordinator-only fields")
         case = fixture.get("case")
         if not isinstance(case, Mapping):
             raise IntegrityError("judge-validation fixture case must be a mapping")
         _add_judge_case(files, {str(key): value for key, value in case.items()})
-        files["input/candidate.md"] = _required_text(
-            fixture, "candidate_response"
-        ).encode("utf-8")
+        files["input/candidate.md"] = _required_text(fixture, "candidate_response").encode("utf-8")
         files["input/metadata.json"] = canonical_json_bytes(
             {"fixture_id": fixture["id"], "corpus_hash": judge_validation["corpus_hash"]}
         )
@@ -330,6 +325,28 @@ def model_output_schema(stage: StageKind) -> Mapping[str, object]:
                 "type": "object",
                 "properties": {"response": {"type": "string", "minLength": 1}},
                 "required": ["response"],
+                "additionalProperties": False,
+            }
+        )
+    if stage is StageKind.OPTIMIZE:
+        return MappingProxyType(
+            {
+                "type": "object",
+                "properties": {
+                    "candidates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "instruction": {"type": "string", "minLength": 1},
+                                "output_prefix": {"type": "string"},
+                            },
+                            "required": ["instruction", "output_prefix"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["candidates"],
                 "additionalProperties": False,
             }
         )
@@ -404,9 +421,9 @@ def _add_judge_case(files: dict[str, bytes], case: Mapping[str, object]) -> None
     except json.JSONDecodeError as error:
         raise IntegrityError("judge rubric must be valid JSON") from error
     files["input/judge/rubric.json"] = canonical_json_bytes(rubric_payload)
-    files["input/judge/expected-response.md"] = _required_text(
-        case, "expected_response"
-    ).encode("utf-8")
+    files["input/judge/expected-response.md"] = _required_text(case, "expected_response").encode(
+        "utf-8"
+    )
     raw_artifacts = case.get("expected_artifacts", "{}")
     if not isinstance(raw_artifacts, str):
         raise IntegrityError("expected artifacts must be serialized JSON")

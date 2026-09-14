@@ -294,7 +294,7 @@ class ArtifactReference:
 @dataclass(frozen=True)
 class ModelCallRecord:
     call_id: str
-    role: Literal["author", "solver", "judge"]
+    role: Literal["author", "optimizer", "solver", "judge"]
     provider_id: str
     model: str
     parameters: Mapping[str, object]

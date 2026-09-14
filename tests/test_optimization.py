@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from ms_agent_eval.core.coordinator import StageCoordinator
+from ms_agent_eval.core.errors import IntegrityError
+from ms_agent_eval.core.optimization import (
+    normalize_copro_proposals,
+    validate_copro_proposal_accounting,
+)
+from ms_agent_eval.core.stages import StageError, StageState
+
+
+def test_duplicate_copro_proposals_create_an_audited_shortfall() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [
+            {"instruction": "A useful rewrite", "output_prefix": "ignored"},
+            {"instruction": " A useful rewrite ", "output_prefix": "also ignored"},
+        ],
+        requested_count=2,
+        target_kind="skill",
+        current_text="Current skill",
+        current_output_prefix="",
+    )
+
+    assert candidates == [{"instruction": "A useful rewrite", "output_prefix": ""}]
+    assert accounting == {
+        "requested_count": 2,
+        "received_count": 2,
+        "accepted_count": 1,
+        "unchanged_dropped_count": 0,
+        "duplicate_dropped_count": 1,
+        "excess_dropped_count": 0,
+        "shortfall_count": 1,
+        "degraded": True,
+    }
+    assert (
+        validate_copro_proposal_accounting(
+            accounting,
+            expected_count=2,
+            accepted_count=1,
+        )
+        == accounting
+    )
+
+
+def test_copro_proposal_normalization_drops_unchanged_and_excess_candidates() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [
+            {"instruction": " Current prompt ", "output_prefix": " Answer: "},
+            {"instruction": "Rewrite A", "output_prefix": "Response A:"},
+            {"instruction": "Rewrite B", "output_prefix": "Response B:"},
+            {"instruction": "Rewrite C", "output_prefix": "Response C:"},
+        ],
+        requested_count=2,
+        target_kind="solver_prompt",
+        current_text="Current prompt",
+        current_output_prefix="Answer:",
+    )
+
+    assert candidates == [
+        {"instruction": "Rewrite A", "output_prefix": "Response A:"},
+        {"instruction": "Rewrite B", "output_prefix": "Response B:"},
+    ]
+    assert accounting["unchanged_dropped_count"] == 1
+    assert accounting["excess_dropped_count"] == 1
+    assert accounting["shortfall_count"] == 0
+    assert accounting["degraded"] is False
+
+
+def test_copro_proposal_normalization_keeps_structural_errors_fatal() -> None:
+    with pytest.raises(IntegrityError, match="non-empty string"):
+        normalize_copro_proposals(
+            [{"instruction": " ", "output_prefix": "Answer:"}],
+            requested_count=1,
+            target_kind="solver_prompt",
+            current_text="Current prompt",
+            current_output_prefix="Answer:",
+        )
+
+
+def test_copro_proposal_accounting_rejects_inconsistent_counts() -> None:
+    with pytest.raises(IntegrityError, match="received_count is inconsistent"):
+        validate_copro_proposal_accounting(
+            {
+                "requested_count": 2,
+                "received_count": 2,
+                "accepted_count": 1,
+                "unchanged_dropped_count": 0,
+                "duplicate_dropped_count": 0,
+                "excess_dropped_count": 0,
+                "shortfall_count": 1,
+                "degraded": True,
+            },
+            expected_count=2,
+            accepted_count=1,
+        )
+
+
+def test_historical_duplicate_failure_gets_an_append_only_retry() -> None:
+    proposal = SimpleNamespace(packet_id="sha256:" + "a" * 64)
+    retry = object()
+
+    class FailedResult:
+        error = StageError("integrityerror", "optimizer candidates must be distinct")
+
+    class FailedStatus:
+        state = StageState.FAILED
+        result = FailedResult()
+
+    class FakeLedger:
+        retried = False
+
+        def status(self, packet_id):  # type: ignore[no-untyped-def]
+            assert packet_id == proposal.packet_id
+            return FailedStatus()
+
+        def retry(self, packet_id):  # type: ignore[no-untyped-def]
+            assert packet_id == proposal.packet_id
+            self.retried = True
+            return retry
+
+    coordinator = object.__new__(StageCoordinator)
+    ledger = FakeLedger()
+    coordinator.ledger = ledger
+
+    assert coordinator._retry_legacy_copro_exhaustion(proposal) is retry  # type: ignore[arg-type]
+    assert ledger.retried is True

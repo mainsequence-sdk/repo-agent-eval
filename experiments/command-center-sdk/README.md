@@ -4,6 +4,8 @@ This workspace evaluates the public TypeScript/React Command Center SDK at tag
 `v0.1.21`. It contains only versioned experiment configuration and authoring
 policy. Repository snapshots, DSPy calls, runs, compiled programs, and
 reports belong under `~/ms_agent_eval/command-center-sdk-evaluation`.
+The workspace also enables a retryable projection to MLflow at
+`http://127.0.0.1:5000`; generated MLflow state remains outside this repository.
 
 ## Part A — evaluation target and authoring sources
 
@@ -18,7 +20,7 @@ The normative target configured in `workspace.yaml` is:
 - durable Codex authoring instructions: `case-authoring.md`; and
 - draft capability catalog: `cases/coverage.yaml`.
 
-The easy-case scenario source is the React/Vite tutorial:
+The foundational scenario source is the React/Vite tutorial:
 
 - repository:
   `https://github.com/mainsequence-projects/command-center-sdk-tutorial`;
@@ -37,14 +39,16 @@ The SDK itself is an ESM TypeScript/React library and is bundler-independent.
 The tutorial is a React 19 and Vite 8 consumer application. Cases must not
 confuse the tutorial's build system with an SDK requirement.
 
-The case bank intentionally starts empty. Easy cases will be grounded in the
-SDK documentation and tutorial. Complex cases will instead be grounded in
-separately pinned real projects and executed only in a digest-pinned Node
-container, with browser automation added only when visible behavior matters.
+The case bank intentionally starts empty. Documentation/tutorial cases will be
+grounded in the SDK documentation and tutorial. Project-backed implementation
+cases will instead be grounded in separately pinned real projects and executed
+only in a digest-pinned Node container, with browser automation added only when
+visible behavior matters. Neither lane is a subjective difficulty class;
+completed reports measure exact expected-response token length.
 
 ## Part B — evaluation experiments
 
-The schema-v11 workspace requires a deployment revision for every model and an
+The schema-v13 workspace requires a deployment revision for every model and an
 explicit reuse policy for every stage. Replace the `*-configured-v1`
 deployment placeholders when real model servers are selected, and bump them
 whenever weights or serving behavior changes. Exact validated stage results
@@ -55,13 +59,18 @@ The same manifest defines:
 
 - `baseline`, which asks the DSPy solver to answer each reviewed case and has a
   separate DSPy judge stage score the result semantically; and
-- `optimize-few-shot`, which compares the baseline and configured few-shot
-  candidates by grouped K-fold cross-validation on train, refits the selected
-  configuration on all training cases, and evaluates the untouched test once.
+- `optimize-solver`, which selects `strategy: labeled_few_shot`, compares the
+  baseline and configured demonstration counts by grouped K-fold
+  cross-validation on train, refits the selected configuration on all training
+  cases, and evaluates the untouched test once. It performs no optimizer-model
+  proposal calls.
 
 Solver and judge are distinct roles but may use the same configured model.
 Executor addresses, model names, and stage assignments are durable workspace
 configuration. Only an optional secret belongs in `.env`.
+Install the recorder with `uv sync --extra mlflow`, start its server outside
+Git, and use `ms-agent-eval recorder doctor` before a real run. See
+[experiment recording](../../docs/execution/experiment-recording.md).
 
 ## Prepare the workspace
 
@@ -85,13 +94,13 @@ across 6 semantic leakage groups; one package is only the atomic review unit:
 
 ```text
 Use the case-authoring skill with experiments/command-center-sdk/workspace.yaml.
-Create three easy diagnostic cases for general/use-command-center-sdk covering
+Create three diagnostic cases for general/use-command-center-sdk covering
 materially distinct React package-boundary failures.
 ```
 
 Repeat the campaign with different capabilities, sources, archetypes, and
-difficulty levels until `validate` reports no capability or per-skill coverage
-gaps. The three-primary-case capability depth and 12-case/6-group requirements
+behavior boundaries until `validate` reports no capability or per-skill
+coverage gaps. The three-primary-case capability depth and 12-case/6-group requirements
 are minimums, not a production fine-tuning target.
 
 The same Codex case-authoring campaign must also create or update the controlled

@@ -30,9 +30,7 @@ def _packet(ledger: StageLedger) -> StagePacket:
         inputs=(ledger.put_json("case", {"task": "answer"}),),
         instructions=ledger.put_json("instructions", {"task": "solve"}),
         output_schema="solver-response-v1",
-        executor=StageExecutorIdentity(
-            "remote", "openai_compatible", f"sha256:{'1' * 64}"
-        ),
+        executor=StageExecutorIdentity("remote", "openai_compatible", f"sha256:{'1' * 64}"),
         model=StageModelIdentity("shared-model", f"sha256:{'2' * 64}"),
         budget=StageBudget(1, 1000, 60),
     )
@@ -84,13 +82,9 @@ def test_conflicting_submission_is_rejected(tmp_path: Path) -> None:
 
 def test_expired_claim_can_be_reclaimed(tmp_path: Path) -> None:
     now = [100.0]
-    ledger = StageLedger(
-        FilesystemArtifactStore(tmp_path / "external"), clock=lambda: now[0]
-    )
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"), clock=lambda: now[0])
     packet = ledger.prepare(_packet(ledger))
-    first = ledger.claim(
-        packet.packet_id, executor_id="remote", worker_id="first", lease_seconds=5
-    )
+    first = ledger.claim(packet.packet_id, executor_id="remote", worker_id="first", lease_seconds=5)
     now[0] = 106.0
     second = ledger.claim(
         packet.packet_id, executor_id="remote", worker_id="second", lease_seconds=5

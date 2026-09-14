@@ -92,9 +92,7 @@ class SnapshotContext:
             if score or source_path in self.source_paths:
                 candidates.append((score, source_path, value))
                 if len(candidates) > 400:
-                    candidates = sorted(
-                        candidates, key=lambda item: (-item[0], item[1])
-                    )[:200]
+                    candidates = sorted(candidates, key=lambda item: (-item[0], item[1]))[:200]
         source_manifest = "# Immutable authoring sources\n\n" + "\n".join(
             "- "
             f"{source.id}: role={source.role}; repository={source.repository_url}; "
@@ -104,9 +102,7 @@ class SnapshotContext:
         )
         parts: list[str] = [source_manifest]
         size = len(source_manifest)
-        for _, source_path, value in sorted(
-            candidates, key=lambda item: (-item[0], item[1])
-        ):
+        for _, source_path, value in sorted(candidates, key=lambda item: (-item[0], item[1])):
             section = f"# Source: {source_path}\n\n{value}\n"
             if size + len(section) > maximum_characters:
                 remaining = maximum_characters - size
@@ -216,7 +212,10 @@ def _load_instruction_import(
             "instruction import manifest schema_version must be 1",
             path=manifest_path,
         )
-    if _text(manifest.get("id"), "instruction import manifest id", path=manifest_path) != configuration.id:
+    if (
+        _text(manifest.get("id"), "instruction import manifest id", path=manifest_path)
+        != configuration.id
+    ):
         raise ConfigurationError(
             "instruction import manifest id differs from workspace configuration",
             path=manifest_path,
@@ -226,7 +225,10 @@ def _load_instruction_import(
         "instruction import manifest source",
         path=manifest_path,
     )
-    if _text(source.get("type"), "instruction import source type", path=manifest_path) != configuration.source:
+    if (
+        _text(source.get("type"), "instruction import source type", path=manifest_path)
+        != configuration.source
+    ):
         raise ConfigurationError(
             "instruction import manifest source type differs from workspace configuration",
             path=manifest_path,
@@ -334,7 +336,9 @@ def _load_instruction_import(
             f"unlisted={missing}, missing={extra}"
         )
     if not units:
-        raise ConfigurationError("instruction import must contain at least one skill", path=manifest_path)
+        raise ConfigurationError(
+            "instruction import must contain at least one skill", path=manifest_path
+        )
     identity = InstructionImportIdentity(
         id=configuration.id,
         source=configuration.source,
@@ -352,9 +356,7 @@ def load_snapshot_context(
     snapshot_directory: Path,
     *,
     global_paths: Sequence[str] | None = None,
-    authoring_snapshots: Sequence[
-        tuple[AuthoringSourceConfiguration, SnapshotLock, Path]
-    ] = (),
+    authoring_snapshots: Sequence[tuple[AuthoringSourceConfiguration, SnapshotLock, Path]] = (),
     workspace_root: Path | None = None,
     instruction_imports: Sequence[SkillImportConfiguration] = (),
 ) -> SnapshotContext:
@@ -386,8 +388,7 @@ def load_snapshot_context(
         for item in lock.units
     ]
     source_files = {
-        source_path: snapshot_directory / item.snapshot_path
-        for source_path, item in files.items()
+        source_path: snapshot_directory / item.snapshot_path for source_path, item in files.items()
     }
     identities = [
         SnapshotSourceIdentity(

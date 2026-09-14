@@ -160,7 +160,9 @@ class CodexSubscriptionAuthStore:
         if self.root.stat().st_mode & 0o077:
             raise PreflightError("Codex subscription auth root must not be group/world accessible")
         if self.marker_file.stat().st_mode & 0o077:
-            raise PreflightError("Codex subscription auth marker must not be group/world accessible")
+            raise PreflightError(
+                "Codex subscription auth marker must not be group/world accessible"
+            )
 
     def _validate_auth_file(self) -> None:
         if self.auth_file.is_symlink() or not self.auth_file.is_file():
@@ -214,11 +216,7 @@ def _codex_version(codex_binary: str, environment: Mapping[str, str]) -> str:
 
 def _secret_strings(value: object) -> set[str]:
     if isinstance(value, Mapping):
-        return {
-            secret
-            for item in value.values()
-            for secret in _secret_strings(item)
-        }
+        return {secret for item in value.values() for secret in _secret_strings(item)}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return {secret for item in value for secret in _secret_strings(item)}
     if isinstance(value, str) and len(value) >= 8:

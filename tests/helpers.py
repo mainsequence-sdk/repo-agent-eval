@@ -20,14 +20,30 @@ from ms_agent_eval.core.workspace import WorkspaceRepository
 CASE_AUTHORING_INSTRUCTIONS = """# Test case-authoring policy
 
 Author grounded cases from immutable instruction and source context.
-Write schema-v5 packages and design rubrics for semantic evaluation by the LLM judge.
+Write schema-v6 packages and design rubrics for semantic evaluation by the LLM judge.
 """
 
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 11,
+        "schema_version": 14,
         "workspace": {"id": "synthetic-evaluation"},
+        "recording": {
+            "enabled": False,
+            "recorder": "local-mlflow",
+            "mode": "live_and_finalize",
+            "failure_policy": "continue",
+            "artifact_policy": "full",
+            "content_policy": "full",
+        },
+        "recorders": {
+            "local-mlflow": {
+                "type": "mlflow",
+                "tracking_uri": "http://127.0.0.1:5000",
+                "experiment_name": "ms-agent-eval/{workspace_id}",
+                "authentication": {"type": "none"},
+            }
+        },
         "executors": {
             "remote-models": {
                 "type": "endpoint",
@@ -38,6 +54,11 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                         "base_url": "http://localhost:8000/v1",
                         "max_concurrent_requests": 1,
                         "api_key_env": "TEST_API_KEY",
+                        "routes": [
+                            {"deployment": "solver-test", "model": "solver"},
+                            {"deployment": "optimizer-test", "model": "optimizer"},
+                            {"deployment": "judge-test", "model": "judge"},
+                        ],
                     }
                 ],
             },
@@ -47,20 +68,43 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
             },
             "local-process": {"type": "process", "adapter": "local"},
         },
+        "deployments": {
+            "author-test": {
+                "executor": "authoring-harness",
+                "model": "author",
+                "revision": "author-test-v1",
+            },
+            "solver-test": {
+                "executor": "remote-models",
+                "model": "solver",
+                "revision": "solver-test-v1",
+            },
+            "optimizer-test": {
+                "executor": "remote-models",
+                "model": "optimizer",
+                "revision": "optimizer-test-v1",
+            },
+            "judge-test": {
+                "executor": "remote-models",
+                "model": "judge",
+                "revision": "judge-test-v1",
+            },
+        },
         "models": {
             "author": {
-                "name": "author",
-                "deployment_revision": "author-test-v1",
+                "deployment": "author-test",
                 "parameters": {"temperature": 0.0},
             },
             "solver": {
-                "name": "solver",
-                "deployment_revision": "solver-test-v1",
+                "deployment": "solver-test",
+                "parameters": {"temperature": 0.0},
+            },
+            "optimizer": {
+                "deployment": "optimizer-test",
                 "parameters": {"temperature": 0.0},
             },
             "judge": {
-                "name": "judge",
-                "deployment_revision": "judge-test-v1",
+                "deployment": "judge-test",
                 "parameters": {"temperature": 0.0},
             },
         },
@@ -72,20 +116,18 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
             },
             "validate_judge": {
-                "executor": "remote-models",
-                "model": "judge",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
             },
+            "optimize": {
+                "reuse": {"policy": "exact"},
+                "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
+            },
             "solve": {
-                "executor": "remote-models",
-                "model": "solver",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
             },
             "judge": {
-                "executor": "remote-models",
-                "model": "judge",
                 "reuse": {"policy": "exact"},
                 "budget": {"model_calls": 30, "tokens": 10000, "wall_seconds": 300},
             },
@@ -152,6 +194,7 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
         "experiments": {
             "baseline": {
                 "mode": "evaluate",
+                "roles": {"solver": "solver", "judge": "judge"},
                 "solver": {
                     "dspy": {
                         "module": "Predict",
@@ -170,9 +213,10 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
             },
             "optimize": {
                 "mode": "optimize",
+                "roles": {"solver": "solver", "judge": "judge"},
                 "based_on": "baseline",
                 "optimizer": {
-                    "name": "LabeledFewShot",
+                    "strategy": "labeled_few_shot",
                     "search": {"k": [1]},
                 },
                 "cross_validation": {"folds": 2, "seed": 0},
@@ -191,9 +235,7 @@ def create_workspace(root: Path) -> WorkspaceRepository:
     payload = workspace_payload()
     payload["workspace"]["data_root"] = (root.parent / "runtime").as_posix()  # type: ignore[index]
     (root / "workspace.yaml").write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-    (root / "case-authoring.md").write_text(
-        CASE_AUTHORING_INSTRUCTIONS, encoding="utf-8"
-    )
+    (root / "case-authoring.md").write_text(CASE_AUTHORING_INSTRUCTIONS, encoding="utf-8")
     (root / "cases").mkdir()
     (root / "cases" / "coverage.yaml").write_text(
         yaml.safe_dump(
@@ -284,7 +326,7 @@ def create_case(
         encoding="utf-8",
     )
     payload = {
-        "schema_version": 5,
+        "schema_version": 6,
         "id": case_id,
         "title": f"Case {case_id}",
         "skill": skill,
@@ -293,7 +335,6 @@ def create_case(
             "primary": "correctness",
             "supporting": [],
             "archetype": "construction",
-            "difficulty": "easy",
         },
         "solver": {"prompt": "solver/prompt.md"},
         "judge": {
@@ -305,8 +346,7 @@ def create_case(
             "authoring_agent": "codex",
             "authoring_instructions_hash": authoring_instructions_hash,
             "capability_catalog_hash": (
-                capability_catalog_hash
-                or sha256_file(cases_root / "coverage.yaml")
+                capability_catalog_hash or sha256_file(cases_root / "coverage.yaml")
             ),
             "source_snapshot_hash": source_snapshot_hash,
             "case_content_hash": "pending",

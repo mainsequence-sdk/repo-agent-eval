@@ -7,10 +7,12 @@ them with a separate LLM judge.
 ## 1. Install Python 3.12+
 
 ```bash
-uv sync --python 3.12
+uv sync --python 3.12 --extra mlflow
 ```
 
-DSPy is installed with the base library.
+DSPy is installed with the base library. The optional MLflow extra supports the
+default experiment recorder; pass `--no-recording` to `init` if that projection
+is not wanted.
 
 ## 2. Create a workspace
 
@@ -40,13 +42,14 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
   --solver-model solver-model \
   --solver-reasoning-effort high \
   --judge-model judge-model \
-  --judge-reasoning-effort none
+  --judge-reasoning-effort none \
+  --mlflow-tracking-uri http://127.0.0.1:5000
 ```
 
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v11 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v14 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-validation manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -83,7 +86,7 @@ it is GPT-5.6 Sol through the artifact-exchange harness. Ask it to use the repos
 `case-authoring` skill, specify the
 workspace, and state the campaign objective and number of cases per skill.
 Codex first decomposes each complete selected skill into independently testable
-capabilities in `cases/coverage.yaml`, then writes schema-v5 packages directly
+capabilities in `cases/coverage.yaml`, then writes schema-v6 packages directly
 under `cases/<skill>/<case>/`. A requested number is a lower bound. The campaign
 must create at least three distinct cases per selected skill and expand until
 every catalog capability has its configured number of primary cases. Before it
@@ -105,11 +108,11 @@ Codex CLI container, provision and configure the separate
 [Codex CLI harness](../execution/codex-cli.md). That adapter accepts no OpenAI API
 key and never falls back to API-billed inference.
 
-## 4. Configure stage executors and models
+## 4. Configure deployments, role profiles, and experiment arms
 
-Model names, OpenAI-compatible API locations, and stage bindings are durable
-workspace configuration. Solver and judge remain separate roles even when they
-use the same configured model:
+API locations, semantic deployments, and role profiles are separate durable
+configuration. Optimizer, solver, and judge are selected by each experiment arm
+even when they share one deployment:
 
 ```yaml
 executors:
@@ -120,13 +123,34 @@ executors:
       - id: primary
         base_url: http://127.0.0.1:8000/v1
         max_concurrent_requests: 4
+        routes:
+          - {deployment: qwen-local, model: qwen3.6:27b-coding}
+deployments:
+  qwen-local:
+    executor: inference-pool
+    model: qwen3.6:27b-coding
+    revision: qwen3.6-27b-coding-local-v1
 models:
+  optimizer:
+    deployment: qwen-local
+    reasoning_effort: none
+    parameters: {temperature: 0.7, max_tokens: 4096}
   shared-runtime:
-    name: qwen3.6:27b-coding
+    deployment: qwen-local
     reasoning_effort: medium
-stages:
-  solve: {executor: inference-pool, model: shared-runtime, budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}}
-  judge: {executor: inference-pool, model: shared-runtime, budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}}
+experiments:
+  baseline:
+    mode: evaluate
+    roles: {solver: shared-runtime, judge: shared-runtime}
+    # solver/runtime/repetitions omitted
+  optimize-solver:
+    mode: optimize
+    based_on: baseline
+    roles:
+      solver: shared-runtime
+      optimizer: optimizer
+      judge: shared-runtime
+    # optimizer/cross_validation/budget omitted
 ```
 
 If the API requires a credential, set `api_key_env: OPENAI_API_KEY` on the
@@ -144,7 +168,23 @@ setup wizard or set it to `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 `max`, or `ultra` when supported by that model and executor. Omit it to use the
 provider/model default. Do not place it inside `parameters`.
 
-## 5. Review the authored judge validation
+## 5. Configure and verify experiment recording
+
+`init` enables MLflow recording at `http://127.0.0.1:5000` by default. Keep its
+database and artifact directory outside Git, start the server, then run the
+write/read probe:
+
+```bash
+uv run --extra mlflow ms-agent-eval recorder doctor \
+  --workspace workspace.yaml
+```
+
+The experiment still runs when MLflow is unavailable; recorder state remains
+pending for a later `recorder sync`. Read
+[Experiment recording](../execution/experiment-recording.md) for server setup,
+privacy policies, authentication, status, and backfill.
+
+## 6. Review the authored judge validation
 
 As part of case authoring, Codex must populate
 `judge-validation/manifest.yaml` and its candidate files with controlled,
@@ -164,7 +204,7 @@ fixtures:
     label: strong
 ```
 
-## 6. Validate and inspect
+## 7. Validate and inspect
 
 ```bash
 uv run --project /path/to/ms-agent-eval ms-agent-eval validate \
@@ -198,19 +238,41 @@ per-case diagnostics under the external data root, records `benchmark_valid:
 false`, and emits no aggregate benchmark metrics. Use `--pilot` again when
 resuming or operating a pilot's stage packets.
 
-## 7. Evaluate, then optimize separately
+## 8. Evaluate, then optimize separately
 
 ```bash
 uv run --project /path/to/ms-agent-eval ms-agent-eval run baseline \
   --workspace workspace.yaml
 
-uv run --project /path/to/ms-agent-eval ms-agent-eval run optimize-few-shot \
+uv run --project /path/to/ms-agent-eval ms-agent-eval run optimize-solver \
   --workspace workspace.yaml
 ```
 
 The baseline sends each case only to the solver, then sends the candidate plus
-the hidden rubric/reference material to the judge. Optimization compares the
-baseline and configured few-shot candidates by grouped K-fold cross-validation
-within train, refits the highest-mean configuration on all training cases, and
-then evaluates the untouched test set once. All generated outputs stay under
-the external data root.
+the hidden rubric/reference material to the judge. `optimize-solver` is a named
+experiment, not a fixed algorithm. It must select exactly one strategy:
+
+```yaml
+# Demonstration search: fixed prompt and skills, no optimizer-model calls.
+optimizer:
+  strategy: labeled_few_shot
+  search: {k: [1, 2, 4]}
+```
+
+or:
+
+```yaml
+# Prompt/skill search: zero demonstrations and explicit optimizer proposals.
+optimizer:
+  strategy: copro
+  targets: {prompt: true, skills: all}
+  search: {breadth: 3, depth: 2, init_temperature: 1.4}
+  metric: {name: rubric_mean_score}
+```
+
+Both strategies use grouped K-fold cross-validation only within train, compile
+the selected configuration on all training cases, and then evaluate the
+untouched test set. COPRO evaluates both frozen original and optimized programs
+on identical test cases and creates explicit, reusable optimizer, candidate
+fit, solve, judge, and selection packets. All generated outputs stay under the
+external data root.

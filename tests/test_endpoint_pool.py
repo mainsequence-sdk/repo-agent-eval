@@ -21,11 +21,13 @@ def _executor(*, first: int = 8, second: int = 4) -> ExecutorConfiguration:
                     "id": "lan-10",
                     "base_url": "http://192.168.1.10:11434/v1",
                     "max_concurrent_requests": first,
+                    "routes": [{"deployment": "test-model", "model": "test-model"}],
                 },
                 {
                     "id": "lan-17",
                     "base_url": "http://192.168.1.17:11434/v1",
                     "max_concurrent_requests": second,
+                    "routes": [{"deployment": "test-model", "model": "test-model"}],
                 },
             ],
         },
@@ -78,7 +80,8 @@ def test_independent_pool_instances_share_filesystem_slots(tmp_path) -> None:  #
                 {
                     "id": "only",
                     "base_url": "http://localhost:8000/v1",
-                    "max_concurrent_requests": 1,
+                        "max_concurrent_requests": 1,
+                        "routes": [{"deployment": "test-model", "model": "test-model"}],
                 }
             ],
         },
@@ -112,6 +115,19 @@ def test_pool_never_leases_an_excluded_endpoint(tmp_path) -> None:  # type: igno
             selected.append(lease.endpoint.id)
 
     assert selected == ["lan-17"] * 6
+
+
+def test_pool_quarantine_is_temporary_and_can_be_restored(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pool = EndpointPool(_executor(first=3, second=2), tmp_path / "locks")
+
+    pool.quarantine("lan-10", seconds=10)
+    assert pool.quarantined_endpoint_ids() == frozenset({"lan-10"})
+
+    pool.restore("lan-10")
+    assert pool.quarantined_endpoint_ids() == frozenset()
+
+    pool.quarantine("lan-17", seconds=0)
+    assert pool.quarantined_endpoint_ids() == frozenset()
 
 
 def test_coordinator_executes_only_a_bounded_ready_window() -> None:

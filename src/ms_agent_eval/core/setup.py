@@ -174,9 +174,7 @@ def _checklist(repository: WorkspaceRepository) -> Mapping[str, object]:
         "authored_cases": cases,
         "judge_validation": "configured" if judge_validation else "missing",
         "baseline": "validate" if inputs_ready else "blocked",
-        "optimization": (
-            "validate" if inputs_ready else "blocked"
-        )
+        "optimization": ("validate" if inputs_ready else "blocked")
         if has_optimization
         else "not_configured",
         "next": next_command,
@@ -215,9 +213,7 @@ def run_guided_setup(
         _show_checklist(prompt, checklist)
         return {"status": "existing", "workspace": workspace_file.as_posix(), **checklist}
 
-    workspace_id = prompt.text(
-        "Workspace id", default=_slug(workspace_file.parent.name)
-    )
+    workspace_id = prompt.text("Workspace id", default=_slug(workspace_file.parent.name))
     default_data_root = Path.home() / "ms_agent_eval" / workspace_id
     data_root = validate_external_data_root(
         Path(prompt.text("External data root", default=default_data_root.as_posix())),
@@ -299,9 +295,7 @@ def run_guided_setup(
                 raise ConfigurationError("at least one SKILL.md file must be selected")
             skills = {"files": list(selected_skills)}
 
-        api_base_url = validate_api_base_url(
-            prompt.text("OpenAI-compatible API base URL")
-        )
+        api_base_url = validate_api_base_url(prompt.text("OpenAI-compatible API base URL"))
         api_max_concurrent_requests = _positive_integer(
             prompt.text("Maximum concurrent requests for this endpoint", default="1"),
             "endpoint maximum concurrent requests",
@@ -346,7 +340,30 @@ def run_guided_setup(
             default="Create distinct foundational application cases for every selected skill",
         )
         include_optimization = prompt.confirm(
-            "Create a separate LabeledFewShot optimization experiment?", default=True
+            "Create a separate DSPy optimization experiment?", default=True
+        )
+        optimization_strategy = (
+            prompt.select(
+                "DSPy optimization strategy",
+                (
+                    Choice("Labeled few-shot demonstrations", "labeled_few_shot"),
+                    Choice("COPRO prompt and skill search", "copro"),
+                ),
+            )
+            if include_optimization
+            else "labeled_few_shot"
+        )
+        recording_enabled = prompt.confirm("Record runs in MLflow?", default=True)
+        mlflow_tracking_uri = prompt.text(
+            "MLflow tracking-server URL", default="http://127.0.0.1:5000"
+        )
+        recording_content_policy = prompt.select(
+            "MLflow content policy",
+            (
+                Choice("Full prompts, responses, reports, and evidence", "full"),
+                Choice("Aggregate reports and non-sensitive tables", "summary"),
+                Choice("Hashes and scalar metadata only", "hashes_only"),
+            ),
         )
         explicit_data_root = (
             None if data_root == default_data_root.resolve() else data_root.as_posix()
@@ -374,6 +391,10 @@ def run_guided_setup(
             baseline_repetitions=baseline_repetitions,
             judge_repetitions=judge_repetitions,
             include_optimization=include_optimization,
+            optimization_strategy=optimization_strategy,
+            recording_enabled=recording_enabled,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+            recording_content_policy=recording_content_policy,
         )
         configuration = WorkspaceConfiguration.from_mapping(template.payload)
         preview_repository = WorkspaceRepository(
@@ -389,9 +410,7 @@ def run_guided_setup(
         )
         conflicts = tuple(path for path in planned_paths if path.exists())
         if conflicts:
-            raise IntegrityError(
-                f"setup refuses to overwrite existing file: {conflicts[0]}"
-            )
+            raise IntegrityError(f"setup refuses to overwrite existing file: {conflicts[0]}")
         prompt.write("\nConfiguration review")
         prompt.write(f"Repository: {repository_url}")
         prompt.write(f"Requested ref: {repository_ref}")
@@ -404,8 +423,7 @@ def run_guided_setup(
         prompt.write(f"API base URL: {api_base_url}")
         prompt.write(f"Endpoint capacity: {api_max_concurrent_requests}")
         prompt.write(
-            "Stage models: "
-            f"author=gpt-5.6-sol, solver={solver_model}, judge={judge_model}"
+            f"Stage models: author=gpt-5.6-sol, solver={solver_model}, judge={judge_model}"
         )
         prompt.write(
             "Reasoning effort: "
@@ -413,20 +431,21 @@ def run_guided_setup(
             f"judge={judge_reasoning_effort or 'provider default'}"
         )
         prompt.write("Case authoring executor: artifact-exchange harness")
+        prompt.write(
+            "Experiment recording: "
+            f"{'enabled' if recording_enabled else 'disabled'}, "
+            f"MLflow={mlflow_tracking_uri}, content={recording_content_policy}"
+        )
         runtime_detail = runtime_type
         if runtime_image is not None:
             runtime_detail += f", image={runtime_image}, network={runtime_network}"
         prompt.write(f"Runtime: {runtime_detail}, Python {runtime_python}")
-        prompt.write(
-            f"Repetitions: baseline={baseline_repetitions}, judge={judge_repetitions}"
-        )
+        prompt.write(f"Repetitions: baseline={baseline_repetitions}, judge={judge_repetitions}")
         prompt.write("Configured call ceilings: optimizer solver=100, judge=300")
         prompt.write(f"Initial coverage: {coverage_request}")
         prompt.write(f"Workspace: {workspace_file}")
         prompt.write(f"External data: {data_root}")
-        prompt.write(
-            f"External snapshot destination: {data_root / 'operations' / 'snapshots'}"
-        )
+        prompt.write(f"External snapshot destination: {data_root / 'operations' / 'snapshots'}")
         prompt.write("Files to create:")
         for path in planned_paths:
             prompt.write(f"  - {path}")
@@ -436,9 +455,7 @@ def run_guided_setup(
         if not prompt.confirm("Write this workspace?", default=False):
             return {"status": "cancelled", "workspace": workspace_file.as_posix()}
 
-        snapshot_store = ExternalSnapshotStore(
-            data_root, workspace_root=workspace_file.parent
-        )
+        snapshot_store = ExternalSnapshotStore(data_root, workspace_root=workspace_file.parent)
         snapshot = SnapshotBuilder(GitHubSourceProvider(), snapshot_store).create_from_checkout(
             preview_repository.target_specification(), inspected.resolved, inspected.checkout
         )

@@ -5,7 +5,7 @@ new run does not imply rerunning every model call. The coordinator reuses an
 existing result only when it can prove that the requested computation is
 semantically identical and that the earlier result was validated and persisted.
 
-This guide describes the implemented schema-v11 behavior. The design rationale
+This guide describes the implemented schema-v14 behavior. The design rationale
 and complete identity rules are in
 [ADR-003](../architecture/003-content-addressed-experiment-graph.md).
 
@@ -107,14 +107,18 @@ to another run; they do not leak hidden judge material into the solver key.
 
 ## Configuring trustworthy deployment identities
 
-Model names are often mutable aliases. Every model therefore requires an
-operator-controlled `deployment_revision`:
+Model names are often mutable aliases. Every semantic deployment therefore
+requires an operator-controlled revision, while role profiles reference it:
 
 ```yaml
+deployments:
+  qwen-local:
+    executor: lan-inference
+    model: qwen3.6:27b-coding
+    revision: qwen3.6-27b-coding-local-2026-09-14
 models:
-  solver:
-    name: qwen3.6:27b-coding
-    deployment_revision: qwen3.6-27b-coding-local-2026-09-13
+  qwen-solver:
+    deployment: qwen-local
     reasoning_effort: high
     parameters:
       temperature: 0.2
@@ -132,8 +136,9 @@ Credentials never enter the hash.
 Equivalent endpoint replica ids, URLs, and capacities are also excluded from
 the semantic work id. They remain frozen in the experiment revision and are
 recorded on each executed attempt. This is safe only because
-`deployment_revision` attests that every replica in the selected pool serves
-the same output-affecting model deployment.
+`deployments.<id>.revision` attests that every eligible route serves the same
+output-affecting model deployment. An endpoint without that deployment in its
+`routes` is never considered, regardless of unused capacity.
 
 ## Reuse policies
 
@@ -144,8 +149,6 @@ Normal exact reuse:
 ```yaml
 stages:
   solve:
-    executor: lan-inference
-    model: solver
     reuse: {policy: exact}
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
 ```
@@ -278,7 +281,7 @@ instead of `run resume <old-id>` when the intention is to start the newly edited
 revision. Unchanged work can still be shared between the old and new revisions.
 
 The stored definition contains only effective revision inputs: the selected
-experiment (and its base for optimization), stage/executor/model configuration,
+experiment (and its base for optimization), stage/executor/deployment/profile configuration,
 case-authoring policy, capability catalog, case packages, split assignment,
 judge validation, resolved source context, and readiness result. Files such
 as a cases-directory README are not frozen because they do not participate in
@@ -298,6 +301,6 @@ uv run ms-agent-eval stage list --run <run-id> --workspace workspace.yaml
 uv run ms-agent-eval report build --run <run-id> --workspace workspace.yaml
 ```
 
-When a server deployment changes, update `deployment_revision` before running.
+When a server deployment changes, update `deployments.<id>.revision` before running.
 When you explicitly need new observations, select `refresh` or a solver
 `replicate` campaign instead of deleting stored evidence.

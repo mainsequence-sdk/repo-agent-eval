@@ -10,8 +10,12 @@ import pytest
 import yaml
 
 from ms_agent_eval.core.authoring import load_snapshot_context
+from ms_agent_eval.core.coordinator import (
+    _rehydrate_historical_experiment_lock,
+    _upgrade_frozen_workspace_payload,
+)
 from ms_agent_eval.core.errors import ConfigurationError, IntegrityError, ResolutionError
-from ms_agent_eval.core.hashing import sha256_file
+from ms_agent_eval.core.hashing import json_value, sha256_file
 from ms_agent_eval.core.workspace import (
     WorkspaceConfiguration,
     WorkspaceRepository,
@@ -50,10 +54,119 @@ def _compiled_workspace_with_cases(tmp_path: Path):  # type: ignore[no-untyped-d
     )
 
 
-def test_schema_v11_rejects_case_authoring_model_configuration() -> None:
+def test_schema_v12_rejects_case_authoring_model_configuration() -> None:
     payload = workspace_payload()
     payload["evaluation"]["case_authoring"]["model"] = {"name": "builder"}  # type: ignore[index]
     with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
+    legacy = workspace_payload()
+    legacy["schema_version"] = 13
+    deployments = legacy.pop("deployments")
+    legacy.pop("recording")
+    legacy.pop("recorders")
+    legacy.pop("comparisons", None)
+    models = legacy["models"]
+    assert isinstance(models, dict)
+    for model_id, raw_model in models.items():
+        assert isinstance(raw_model, dict)
+        deployment = deployments[raw_model.pop("deployment")]
+        raw_model["name"] = deployment["model"]
+        raw_model["deployment_revision"] = deployment["revision"]
+    stages = legacy["stages"]
+    assert isinstance(stages, dict)
+    for stage_id, model_id in {
+        "validate_judge": "judge",
+        "optimize": "optimizer",
+        "solve": "solver",
+        "judge": "judge",
+    }.items():
+        stages[stage_id]["executor"] = "remote-models"
+        stages[stage_id]["model"] = model_id
+    executors = legacy["executors"]
+    assert isinstance(executors, dict)
+    for endpoint in executors["remote-models"]["endpoints"]:
+        endpoint.pop("routes")
+    experiments = legacy["experiments"]
+    assert isinstance(experiments, dict)
+    for experiment in experiments.values():
+        experiment.pop("roles")
+
+    with pytest.raises(ConfigurationError, match="schema_version must be 14"):
+        WorkspaceConfiguration.from_mapping(legacy)
+
+    upgraded = _upgrade_frozen_workspace_payload(legacy)
+    current = workspace_payload()
+    upgraded["recording"] = current["recording"]
+    upgraded["recorders"] = current["recorders"]
+    parsed = WorkspaceConfiguration.from_mapping(upgraded)
+
+    assert parsed.schema_version == 14
+    assert parsed.experiments["baseline"].roles.solver == "solver"
+    assert parsed.models["solver"].deployment == "frozen-solver"
+    assert {
+        route.deployment
+        for route in parsed.executors["remote-models"].endpoints[0].routes
+    } == {"frozen-judge", "frozen-optimizer", "frozen-solver"}
+
+
+def test_schema_v7_lock_rehydration_preserves_historical_model_and_run_identity(
+    tmp_path: Path,
+) -> None:
+    compiled = _compiled_workspace_with_cases(tmp_path)
+    generated = compiled.experiment_lock("optimize")
+    stored = dict(json_value(generated))
+    stored["schema_version"] = 7
+    revision = "sha256:" + "a" * 64
+    stored["content_hash"] = revision
+    configuration = dict(stored["configuration"])
+    configuration.pop("roles")
+    stored["configuration"] = configuration
+    historical_hashes = {}
+    raw_models = {}
+    for index, (role, raw_model) in enumerate(stored["models"].items(), start=1):
+        model = dict(raw_model)
+        model.pop("profile_id")
+        model.pop("deployment_id")
+        model["content_hash"] = "sha256:" + str(index) * 64
+        historical_hashes[role] = model["content_hash"]
+        raw_models[role] = model
+    stored["models"] = raw_models
+
+    historical = _rehydrate_historical_experiment_lock(
+        stored,
+        generated,
+        expected_revision=revision,
+        judge_repetitions=compiled.repository.workspace.evaluation.judge.repetitions,
+    )
+
+    assert historical.schema_version == 7
+    assert historical.content_hash == revision
+    assert {
+        role: model.content_hash for role, model in historical.models.items()
+    } == historical_hashes
+
+
+def test_recorder_configuration_rejects_secrets_and_unsafe_templates() -> None:
+    payload = workspace_payload()
+    payload["recorders"]["local-mlflow"]["authentication"] = {
+        "type": "basic",
+        "username_env": "MLFLOW_USER",
+        "password": "must-not-be-versioned",
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload = workspace_payload()
+    payload["recorders"]["local-mlflow"]["experiment_name"] = "{workspace_id}/{unsupported}"
+    with pytest.raises(ConfigurationError, match="supports only"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload = workspace_payload()
+    payload["recorders"]["local-mlflow"]["tracking_uri"] = "file:///tmp/mlruns"
+    with pytest.raises(ConfigurationError, match="HTTP"):
         WorkspaceConfiguration.from_mapping(payload)
 
 
@@ -98,6 +211,7 @@ def test_endpoint_topology_is_attempt_identity_not_semantic_model_identity() -> 
             "id": "secondary",
             "base_url": "http://localhost:8001/v1",
             "max_concurrent_requests": 4,
+            "routes": list(endpoints[0]["routes"]),
         }
     )
     changed = WorkspaceConfiguration.from_mapping(changed_payload)
@@ -111,6 +225,113 @@ def test_endpoint_topology_is_attempt_identity_not_semantic_model_identity() -> 
         resolve_role_models(original, "baseline")["solver"].content_hash
         == resolve_role_models(changed, "baseline")["solver"].content_hash
     )
+
+
+def test_model_uses_only_endpoints_that_route_its_deployment() -> None:
+    payload = workspace_payload()
+    endpoints = payload["executors"]["remote-models"]["endpoints"]  # type: ignore[index]
+    endpoints.append(
+        {
+            "id": "glm-only",
+            "base_url": "http://localhost:8001/v1",
+            "max_concurrent_requests": 7,
+            "routes": [{"deployment": "glm-test", "model": "glm-coding"}],
+        }
+    )
+    payload["deployments"]["glm-test"] = {  # type: ignore[index]
+        "executor": "remote-models",
+        "model": "glm-coding",
+        "revision": "glm-test-v1",
+    }
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+    executor = workspace.executors["remote-models"]
+    solver = resolve_role_models(workspace, "baseline")["solver"]
+
+    assert [endpoint.id for endpoint in solver.eligible_endpoints(executor)] == ["primary"]
+    assert solver.bind_endpoint(executor.endpoints[0]).model == "solver"
+    with pytest.raises(ResolutionError, match="does not serve deployment"):
+        solver.bind_endpoint(executor.endpoints[1])
+
+
+def test_endpoint_route_requires_a_known_deployment_on_the_same_executor() -> None:
+    unknown = workspace_payload()
+    unknown["executors"]["remote-models"]["endpoints"][0]["routes"] = [  # type: ignore[index]
+        {"deployment": "missing", "model": "solver"}
+    ]
+    with pytest.raises(ConfigurationError, match="unknown deployment"):
+        WorkspaceConfiguration.from_mapping(unknown)
+
+    wrong_executor = workspace_payload()
+    wrong_executor["executors"]["remote-models"]["endpoints"][0]["routes"] = [  # type: ignore[index]
+        {"deployment": "author-test", "model": "author"}
+    ]
+    with pytest.raises(ConfigurationError, match="belongs to executor"):
+        WorkspaceConfiguration.from_mapping(wrong_executor)
+
+
+def test_experiment_can_belong_to_only_one_named_comparison() -> None:
+    payload = workspace_payload()
+    payload["comparisons"] = {
+        "first": {
+            "baseline_experiments": ["baseline"],
+            "optimization_experiments": ["optimize"],
+        },
+        "second": {
+            "baseline_experiments": ["baseline"],
+            "optimization_experiments": ["optimize"],
+        },
+    }
+
+    with pytest.raises(ConfigurationError, match="only one comparison"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_comparison_requires_supported_metric_unique_grouping_and_its_own_baseline() -> None:
+    payload = workspace_payload()
+    payload["comparisons"] = {
+        "model-arms": {
+            "baseline_experiments": ["baseline"],
+            "optimization_experiments": ["optimize"],
+            "primary_metric": "score.median",
+            "grouping": ["solver", "optimizer"],
+        }
+    }
+    with pytest.raises(ConfigurationError, match="supports only score.mean"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload["comparisons"]["model-arms"]["primary_metric"] = "score.mean"
+    payload["comparisons"]["model-arms"]["grouping"] = ["solver", "solver"]
+    with pytest.raises(ConfigurationError, match="grouping values must be unique"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload["comparisons"]["model-arms"]["grouping"] = ["solver", "optimizer"]
+    payload["experiments"]["second-baseline"] = dict(payload["experiments"]["baseline"])
+    payload["comparisons"]["model-arms"]["baseline_experiments"] = ["second-baseline"]
+    with pytest.raises(ConfigurationError, match="not one of its baseline experiments"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_comparison_requires_one_fixed_judge_profile() -> None:
+    payload = workspace_payload()
+    payload["models"]["other-judge"] = dict(payload["models"]["judge"])
+    payload["experiments"]["optimize"]["roles"]["judge"] = "other-judge"
+    payload["experiments"]["baseline"]["roles"]["judge"] = "other-judge"
+    payload["experiments"]["second-baseline"] = dict(payload["experiments"]["baseline"])
+    payload["experiments"]["second-baseline"]["roles"] = {
+        "solver": "solver",
+        "judge": "judge",
+    }
+    payload["comparisons"] = {
+        "model-arms": {
+            "baseline_experiments": ["baseline", "second-baseline"],
+            "optimization_experiments": ["optimize"],
+            "primary_metric": "score.mean",
+            "grouping": ["solver", "optimizer"],
+        }
+    }
+
+    with pytest.raises(ConfigurationError, match="one fixed judge profile"):
+        WorkspaceConfiguration.from_mapping(payload)
 
 
 def test_skills_require_exactly_one_selection_form() -> None:
@@ -316,7 +537,7 @@ def test_configured_llm_roles_may_share_a_model_but_keep_distinct_stage_roles() 
         "judge": "judge",
     }
     payload = workspace_payload()
-    payload["models"]["judge"]["name"] = "solver"  # type: ignore[index]
+    payload["models"]["judge"]["deployment"] = "solver-test"  # type: ignore[index]
     workspace = WorkspaceConfiguration.from_mapping(payload)
     shared = resolve_role_models(workspace, "baseline")
     assert shared["solver"].model == shared["judge"].model == "solver"
@@ -341,18 +562,18 @@ def test_reasoning_effort_is_a_first_class_hashed_model_field() -> None:
 
 def test_deployment_revision_is_required_and_invalidates_model_identity() -> None:
     missing = workspace_payload()
-    del missing["models"]["solver"]["deployment_revision"]  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="deployment_revision"):
+    del missing["deployments"]["solver-test"]["revision"]  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="revision"):
         WorkspaceConfiguration.from_mapping(missing)
 
     changed = workspace_payload()
-    changed["models"]["solver"]["deployment_revision"] = "solver-test-v2"  # type: ignore[index]
+    changed["deployments"]["solver-test"]["revision"] = "solver-test-v2"  # type: ignore[index]
     original_hash = resolve_role_models(
         WorkspaceConfiguration.from_mapping(workspace_payload()), "baseline"
     )["solver"].content_hash
-    changed_hash = resolve_role_models(
-        WorkspaceConfiguration.from_mapping(changed), "baseline"
-    )["solver"].content_hash
+    changed_hash = resolve_role_models(WorkspaceConfiguration.from_mapping(changed), "baseline")[
+        "solver"
+    ].content_hash
     assert changed_hash != original_hash
 
 
@@ -393,6 +614,35 @@ def test_unrelated_experiment_change_does_not_change_baseline_revision(
     assert changed.content_hash == original.content_hash
 
 
+def test_comparison_membership_does_not_invalidate_experiment_work(
+    tmp_path: Path,
+) -> None:
+    compiled = _compiled_workspace_with_cases(tmp_path)
+    original = compiled.experiment_lock("baseline")
+    workspace_file = compiled.repository.workspace_file
+    payload = yaml.safe_load(workspace_file.read_text(encoding="utf-8"))
+    payload["comparisons"] = {
+        "model-arms": {
+            "baseline_experiments": ["baseline"],
+            "optimization_experiments": ["optimize"],
+            "primary_metric": "score.mean",
+            "grouping": ["solver", "optimizer"],
+        }
+    }
+    workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    repository = WorkspaceRepository.from_file(workspace_file)
+    changed = compile_workspace(
+        repository,
+        snapshot=compiled.snapshot,
+        snapshot_directory=compiled.snapshot_directory,
+    ).experiment_lock("baseline")
+
+    assert original.comparison_id == "all-compatible-arms"
+    assert changed.comparison_id == "model-arms"
+    assert changed.content_hash == original.content_hash
+    assert changed.arm_id == original.arm_id
+
+
 @pytest.mark.parametrize("effort", ("off", "extreme", 3))
 def test_reasoning_effort_rejects_invalid_values(effort: object) -> None:
     payload = workspace_payload()
@@ -422,11 +672,62 @@ def test_configured_api_key_reference_is_required_only_at_request_time() -> None
     assert endpoint.api_key({"OPENAI_API_KEY": "secret"}) == "secret"
 
 
-def test_judge_validation_must_use_the_exact_judge_executor_and_model() -> None:
+def test_judge_validation_resolves_only_from_the_experiment_judge_role() -> None:
     payload = workspace_payload()
     payload["stages"]["validate_judge"]["model"] = "solver"  # type: ignore[index]
-    with pytest.raises(ConfigurationError, match="exact executor and model"):
+    with pytest.raises(ConfigurationError, match="experiment.roles"):
         WorkspaceConfiguration.from_mapping(payload)
+
+
+def test_optimizer_is_a_strict_discriminated_strategy_union() -> None:
+    labeled = WorkspaceConfiguration.from_mapping(workspace_payload()).experiments["optimize"]
+    assert labeled.optimizer is not None
+    assert labeled.optimizer.strategy == "labeled_few_shot"
+    assert labeled.optimizer.k_values == (1,)
+
+    legacy = workspace_payload()
+    legacy["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "name": "LabeledFewShot",
+        "search": {"k": [1]},
+    }
+    with pytest.raises(ConfigurationError, match="optimizer.name was removed"):
+        WorkspaceConfiguration.from_mapping(legacy)
+
+    mixed = workspace_payload()
+    mixed["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0, "k": [1]},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    mixed["experiments"]["optimize"]["budget"]["optimizer"] = {  # type: ignore[index]
+        "model_calls": 10,
+        "tokens": 10000,
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(mixed)
+
+
+def test_copro_resolves_a_distinct_optimizer_role_and_requires_its_budget() -> None:
+    payload = workspace_payload()
+    payload["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"  # type: ignore[index]
+    with pytest.raises(ConfigurationError, match="requires budget.optimizer"):
+        WorkspaceConfiguration.from_mapping(payload)
+
+    payload["experiments"]["optimize"]["budget"]["optimizer"] = {  # type: ignore[index]
+        "model_calls": 10,
+        "tokens": 10000,
+    }
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+    models = resolve_role_models(workspace, "optimize")
+    assert set(models) == {"optimizer", "solver", "judge"}
+    assert models["optimizer"].model == "optimizer"
 
 
 def test_noncanonical_solver_signature_is_rejected() -> None:
@@ -445,10 +746,10 @@ def test_unknown_legacy_workspace_surface_is_rejected() -> None:
         WorkspaceConfiguration.from_mapping(payload)
 
 
-def test_model_name_must_be_stored_directly() -> None:
+def test_model_deployment_must_be_stored_directly() -> None:
     payload = workspace_payload()
     model = payload["models"]["solver"]  # type: ignore[index]
-    del model["name"]  # type: ignore[index]
+    del model["deployment"]  # type: ignore[index]
     model["name_env"] = "LEGACY_MODEL_SETTING"  # type: ignore[index]
 
     with pytest.raises(ConfigurationError, match="unknown fields"):

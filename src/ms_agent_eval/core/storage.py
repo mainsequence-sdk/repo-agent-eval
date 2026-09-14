@@ -100,8 +100,10 @@ class FilesystemArtifactStore:
 
         prefix = "sha256:"
         digest = content_id.removeprefix(prefix)
-        if not content_id.startswith(prefix) or len(digest) != 64 or any(
-            character not in "0123456789abcdef" for character in digest
+        if (
+            not content_id.startswith(prefix)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ConfigurationError("artifact content id must be a sha256 digest")
         path = self.blob_root / digest

@@ -7,6 +7,31 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .errors import ConfigurationError, ResolutionError
+from .openrouter_catalog import (
+    OPENROUTER_MODELS_URL,
+    ModelMatch,
+    OpenRouterCatalog,
+    load_openrouter_catalog,
+    match_model,
+    rank_model_matches,
+    refresh_openrouter_catalog,
+    upsert_openrouter_models,
+)
+
+
+__all__ = [
+    "OPENROUTER_MODELS_URL",
+    "ModelCatalog",
+    "ModelMatch",
+    "OpenRouterCatalog",
+    "list_models",
+    "load_openrouter_catalog",
+    "match_model",
+    "rank_model_matches",
+    "refresh_openrouter_catalog",
+    "upsert_openrouter_models",
+    "validate_api_base_url",
+]
 
 
 @dataclass(frozen=True)
@@ -53,9 +78,7 @@ def list_models(
         {
             item["id"].strip()
             for item in payload["data"]
-            if isinstance(item, dict)
-            and isinstance(item.get("id"), str)
-            and item["id"].strip()
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
         }
     )
     if not models:

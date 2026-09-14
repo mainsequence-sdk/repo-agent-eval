@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: platform-operations-orchestration-and-releases-workflow-definition-and-validation-review
 title: 'Define and validate workflows: review'
 skill: platform_operations/orchestration_and_releases
@@ -9,15 +9,14 @@ coverage:
   - exact-job-image
   - manual-and-automatic-jobs
   archetype: review
-  difficulty: complex
 source_paths:
 - agent_scaffold/skills/platform_operations/orchestration_and_releases/SKILL.md
 provenance:
   authoring_agent: codex
-  authoring_instructions_hash: sha256:a711dca72456066d62b3ea88e4cdf21111b8b1d05ed079d70078554cbc45771b
+  authoring_instructions_hash: sha256:1b2144d1dd7253a13746b696053b346b695507d3c29963f3583c0ebf0d381f49
   capability_catalog_hash: sha256:b40947503d2dc2ae6135e4549f361746f55f2e2a765acc2a616a9460e4a3f62b
   source_snapshot_hash: sha256:c644f6f23bc2a84d0227feac570a5a30a60012d231ee8254f22c4267a4a9aae7
-  case_content_hash: sha256:cf57f01ad071819d9777b2ebca1d3733495990368fc19aa0507fa3d03f30aacb
+  case_content_hash: sha256:2dac0d6a8d9d6ee525993858d700da266a508237ed9f33547b417f98a8ceb1d9
 solver:
   prompt: solver/prompt.md
 judge:

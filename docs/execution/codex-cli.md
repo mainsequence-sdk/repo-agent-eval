@@ -66,24 +66,35 @@ executors:
         pids: 256
         maximum_output_bytes: 8388608
 
-stages:
-  judge:
+deployments:
+  codex-judge:
     executor: isolated-codex
-    model: judge
-    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+    model: gpt-5.6-sol
+    revision: gpt-5.6-sol-subscription-2026-09-14
+
+models:
+  codex-judge:
+    deployment: codex-judge
+    reasoning_effort: high
+
+experiments:
+  baseline:
+    mode: evaluate
+    roles: {solver: solver, judge: codex-judge}
+    # solver/runtime/repetitions omitted
 ```
 
 The image must be digest-pinned, and `version` must match `codex --version`
 inside it. `authentication` has exactly one supported value:
 `chatgpt_subscription`. There is no API-key fallback.
-For a model assigned to this executor, set `reasoning_effort` as a first-class
-field beside `name`. Generic endpoint parameters such as `temperature` fail
+For a model profile backed by this harness deployment, set `reasoning_effort`
+as a first-class field beside `deployment`. Generic endpoint parameters such as `temperature` fail
 closed:
 
 ```yaml
 models:
   judge:
-    name: gpt-5.6-sol
+    deployment: codex-judge
     reasoning_effort: high
 ```
 
