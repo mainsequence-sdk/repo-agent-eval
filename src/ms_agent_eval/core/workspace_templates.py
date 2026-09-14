@@ -112,7 +112,7 @@ def build_workspace_template(
     runtime_image: str | None = None,
     runtime_network: str = "none",
     baseline_repetitions: int = 1,
-    judge_repetitions: int = 3,
+    judge_repetitions: int = 1,
     include_optimization: bool = True,
     optimization_strategy: str = "labeled_few_shot",
     recording_enabled: bool = True,

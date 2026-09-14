@@ -315,7 +315,7 @@ def run_guided_setup(
             prompt.text("Baseline repetitions", default="1"), "baseline repetitions"
         )
         judge_repetitions = _positive_integer(
-            prompt.text("Judge repetitions", default="3"), "judge repetitions"
+            prompt.text("Judge repetitions", default="1"), "judge repetitions"
         )
 
         runtime_type = prompt.select(

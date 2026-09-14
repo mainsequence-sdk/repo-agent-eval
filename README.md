@@ -271,7 +271,7 @@ stages:
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
     reuse: {policy: exact}
-    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+    budget: {model_calls: 1, tokens: 64000, wall_seconds: 600}
 
 experiments:
   qwen-baseline:
@@ -295,11 +295,11 @@ the two GLM-only slots. `deployments.<id>.revision` is the explicit semantic
 cache boundary for weights, quantization, tokenizer, template, and serving
 behavior.
 
-Judge validation uses that same pool at request granularity. Each fixture and
-judge repetition is an independent request; five fixtures with three repetitions
-produce 15 concurrent-ready votes, bounded by the fixed judge deployment's
-eligible capacity, followed by deterministic median/majority aggregation. The
-terminal reports every completed vote and its selected endpoint.
+Judge validation uses that same pool at request granularity. One judge vote is
+the default: five fixtures produce five concurrent-ready votes, bounded by the
+fixed judge deployment's eligible capacity. Additional repetitions are an
+explicit robustness option and are followed by deterministic median/majority
+aggregation. The terminal reports every completed vote and its selected endpoint.
 
 Only credentials remain process-local. When a provider requires a key, add
 `api_key_env: OPENAI_API_KEY` to that endpoint item and define that secret in

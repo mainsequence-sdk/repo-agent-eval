@@ -29,7 +29,7 @@ without adopting later workspace edits. See
 | `evaluation.case_authoring` | Policy file and optional pinned reference sources. |
 | `evaluation.cases` | Case directory, capability catalog, and readiness floors. |
 | `evaluation.splits` | Split manifest plus deterministic group policy. |
-| `evaluation.judge` | Typed DSPy judge, judge validation directory, and repetitions. |
+| `evaluation.judge` | Typed DSPy judge, judge validation directory, and repetitions. Repetitions default to one; values above one are explicit consensus experiments. |
 | `experiments.<id>.roles` | Solver and judge profile ids, plus an optimizer profile for COPRO. |
 | `experiments.<id>` | `evaluate` baseline or `optimize` arm with exactly one `labeled_few_shot` or `copro` strategy. |
 | `comparisons.<id>` | Explicit baseline and optimization experiment ids, primary metric, and solver/optimizer grouping dimensions. |

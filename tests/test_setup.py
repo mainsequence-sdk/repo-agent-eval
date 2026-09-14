@@ -14,6 +14,7 @@ from ms_agent_eval.core.model_catalog import ModelCatalog
 from ms_agent_eval.core.models import SourceRef, SourceRefKind
 from ms_agent_eval.core.setup import SetupDependencies, _checklist, run_guided_setup
 from ms_agent_eval.core.sources import ResolvedSource
+from ms_agent_eval.core.workspace_templates import build_workspace_template
 from ms_agent_eval.core.workspace import WorkspaceRepository
 from ms_agent_eval.ui import Choice
 
@@ -61,6 +62,28 @@ class ScriptedPrompt:
 
     def write(self, message: str) -> None:
         self.output.append(message)
+
+
+def test_workspace_template_defaults_to_one_judge_vote() -> None:
+    template = build_workspace_template(
+        workspace_id="default-judge-vote",
+        repository_url="https://github.com/example/project",
+        repository_ref="v1.0.0",
+        global_instructions=("AGENTS.md",),
+        skills={"directory": "skills"},
+        cases_directory="cases",
+        api_base_url="http://127.0.0.1:8000/v1",
+        solver_model="solver",
+        judge_model="judge",
+        include_optimization=False,
+    )
+
+    evaluation = template.payload["evaluation"]
+    stages = template.payload["stages"]
+    assert isinstance(evaluation, dict)
+    assert isinstance(stages, dict)
+    assert evaluation["judge"]["repetitions"] == 1
+    assert stages["judge"]["budget"]["model_calls"] == 1
 
 
 def _checkout(root: Path) -> Path:

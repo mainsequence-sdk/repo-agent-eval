@@ -242,7 +242,10 @@ stages:
 
 Replicates share one semantic `work_id` but receive separate attempt identities
 and are never collapsed into a cache hit. Judge consensus repetitions remain a
-different setting under `evaluation.judge.repetitions`.
+different setting under `evaluation.judge.repetitions`. The default is one judge
+vote. A value greater than one is opt-in because every additional repetition is
+another model request for every candidate response, including optimization-search
+responses.
 
 ## Optimization strategy
 

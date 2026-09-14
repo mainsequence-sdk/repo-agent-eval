@@ -209,9 +209,11 @@ corpus is configured and uses the train-split
 `metatable-related-model-graph` case. The 452-case bank passes source,
 authoring-provenance, capability-depth, per-skill case/group, grouped-split,
 runtime-stage, and judge-validation readiness checks. A normal `run` is scored.
-For a normal run, the five fixtures and three judge repetitions form 15
+For a normal run, the five fixtures and default single judge repetition form five
 independent validation votes. They are dispatched across the configured
-16-request endpoint pool and then aggregated in stable fixture/repetition order.
+8-request endpoint pool and then aggregated in stable fixture/repetition order.
+Multiple judge repetitions are opt-in for experiments that explicitly need a
+consensus robustness study.
 `run --pilot` remains the explicit exception for future incomplete revisions:
 it runs only train cases, never optimization or held-out splits, uses one
 diagnostic judge vote per fixture/case, records `benchmark_valid: false`, and

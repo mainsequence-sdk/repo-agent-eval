@@ -85,7 +85,7 @@ stages:
     budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
   judge:
     reuse: {policy: exact}
-    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+    budget: {model_calls: 1, tokens: 64000, wall_seconds: 600}
   fit:
     executor: local-process
     reuse: {policy: exact}
@@ -155,7 +155,7 @@ evaluation:
           feedback: str
     validation:
       directory: judge-validation
-    repetitions: 3
+    repetitions: 1
 
 experiments:
   baseline:
