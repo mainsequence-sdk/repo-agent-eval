@@ -110,8 +110,9 @@ class RecorderProjector:
             report,
             start_time_ms,
         )
+        available_tables = self._tables(statuses, model_calls, report)
         tables = (
-            self._tables(statuses, model_calls, report)
+            available_tables
             if status
             in {
                 RunLifecycleState.COMPLETED,
@@ -157,8 +158,10 @@ class RecorderProjector:
         if self.recording.artifact_policy is RecordingArtifactPolicy.FULL:
             for path, (payload, media_type) in sorted(graph_artifacts.items()):
                 artifacts.append(self._artifact(path, payload, media_type))
-            table_index = _table_index_html(tables)
-            recording_index = _recording_index_html(run_descriptor, chart_manifest, tables)
+            table_index = _table_index_html(available_tables)
+            recording_index = _recording_index_html(
+                run_descriptor, chart_manifest, available_tables
+            )
             artifacts.append(
                 self._artifact(
                     "tables/index.html",
@@ -178,8 +181,10 @@ class RecorderProjector:
             if self.recording.content_policy is RecordingContentPolicy.FULL:
                 artifacts.extend(self._full_evidence_artifacts(statuses, model_calls))
         else:
-            table_index = _table_index_html(tables)
-            recording_index = _recording_index_html(run_descriptor, chart_manifest, tables)
+            table_index = _table_index_html(available_tables)
+            recording_index = _recording_index_html(
+                run_descriptor, chart_manifest, available_tables
+            )
 
         self._materialize_local_run_assets(
             run_id,

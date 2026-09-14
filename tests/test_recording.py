@@ -157,6 +157,23 @@ def test_projection_is_deterministic_and_round_trips(tmp_path: Path) -> None:
     _run(store)
     lifecycle = RunLifecycleLedger(store)
     lifecycle.append("run-1", RunLifecycleState.CREATED, reason="run_created")
+    lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_started")
+    ledger = StageLedger(store)
+    packet = StagePacket.create(
+        run_id="run-1",
+        experiment_id="baseline",
+        experiment_revision_id=f"sha256:{'2' * 64}",
+        stage=StageKind.SOLVE,
+        attempt=1,
+        dependencies=(),
+        inputs=(),
+        instructions=ledger.put_json("instructions", {"policy": "be correct"}),
+        output_schema="solver-response-v1",
+        executor=StageExecutorIdentity("remote-models", "openai_compatible", f"sha256:{'3' * 64}"),
+        model=StageModelIdentity("solver", f"sha256:{'4' * 64}"),
+        budget=StageBudget(1, 1000, 60),
+    )
+    ledger.prepare(packet)
     configuration = _configuration()
     projector = RecorderProjector(
         store,
@@ -169,6 +186,9 @@ def test_projection_is_deterministic_and_round_trips(tmp_path: Path) -> None:
 
     assert first.plan_id == second.plan_id
     assert first.as_dict() == second.as_dict()
+    # Native MLflow tables remain terminal-only to avoid uploading a new table
+    # artifact on every live checkpoint, but the local/browser table view must
+    # expose the evidence already available during a running experiment.
     assert first.tables == ()
     assert {item.path for item in first.artifacts} >= {
         "evidence/artifact-index.json",
@@ -179,6 +199,13 @@ def test_projection_is_deterministic_and_round_trips(tmp_path: Path) -> None:
         "identity/recorder-manifest.json",
         "identity/run.json",
     }
+    table_artifact = next(item for item in first.artifacts if item.path == "tables/index.html")
+    with store.get_blob(table_artifact.reference) as handle:
+        table_index = handle.read().decode("utf-8")
+    assert '"name":"stage-attempts"' in table_index
+    assert (store.summary_root / "runs" / "run-1" / "tables" / "index.html").read_text(
+        encoding="utf-8"
+    ) == table_index
 
 
 def test_execution_dag_svg_renders_dependencies_and_accessible_description() -> None:
@@ -475,7 +502,10 @@ def test_recorder_delivery_is_retryable_idempotent_and_redacts_errors(
     assert synced["status"] == "synced"
     assert repeated["status"] == "synced"
     assert len(fake.plans) == 1
-    assert fake.finalized == [RunLifecycleState.COMPLETED]
+    assert fake.finalized == [
+        RunLifecycleState.COMPLETED,
+        RunLifecycleState.COMPLETED,
+    ]
     assert synced["external_run_id"] == "run-remote-1"
     event = next((service._run_root("run-1") / "events").glob("*.json"))
     assert load_recording_plan_event(event).plan_id == fake.plans[0].plan_id
@@ -619,6 +649,8 @@ def test_mlflow_adapter_write_probe_uses_the_pinned_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("mlflow")
+    from mlflow import MlflowClient
+
     monkeypatch.chdir(tmp_path)
     database = tmp_path / "mlflow.db"
     configuration = RecorderConfiguration(
@@ -637,6 +669,8 @@ def test_mlflow_adapter_write_probe_uses_the_pinned_client(
     assert result["artifact_download"] is True
     assert result["table"] is True
     assert result["trace"] is True
+    client = MlflowClient(tracking_uri=configuration.tracking_uri)
+    assert client.get_experiment_by_name("ms-agent-eval/doctor/doctor") is None
 
 
 @pytest.mark.mlflow
@@ -782,6 +816,8 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     client = MlflowClient(tracking_uri=recorder.tracking_uri)
     root = client.get_run(str(status["external_run_id"]))
     assert root.data.tags["agent_eval.local_run_id"] == "run-1"
+    assert root.data.tags["mlflow.runName"].endswith("· run run-1")
+    assert root.info.status == "FINISHED"
     assert client.list_artifacts(root.info.run_id, "graphs")
     stage_tables = client.list_artifacts(root.info.run_id, "tables/stage-attempts")
     assert len(stage_tables) == 1
@@ -800,3 +836,16 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     )
     assert len(traces) == 1
     assert traces[0].info.tags["agent_eval.local_run_id"] == "run-1"
+
+    lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_resumed")
+    resumed = service.sync_run("run-1", raise_on_error=True)
+
+    assert resumed["external_run_id"] == status["external_run_id"]
+    resumed_root = client.get_run(str(resumed["external_run_id"]))
+    assert resumed_root.info.status == "RUNNING"
+    scoped_runs = client.search_runs(
+        [str(resumed["external_experiment_id"])],
+        filter_string="tags.`agent_eval.local_run_id` = 'run-1'",
+        max_results=1000,
+    )
+    assert all(item.info.status == "RUNNING" for item in scoped_runs)
