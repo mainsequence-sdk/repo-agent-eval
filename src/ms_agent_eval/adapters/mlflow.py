@@ -84,17 +84,13 @@ class MlflowRecorder:
             }
             if not write_test:
                 return result
-            name = self.configuration.resolved_experiment_name("doctor", "doctor")
-            descriptor = ExperimentDescriptor(
-                name=name,
-                tags={"agent_eval.doctor": "true"},
-            )
-            binding = ExternalBinding.create(
-                recorder_id=self.configuration.id,
-                recorder_config_hash=self.configuration.configuration_hash,
-                local_run_id="doctor",
-            )
-            experiment_id = self.ensure_experiment(descriptor, binding)
+            if not experiments:
+                raise RecordingError("MLflow has no active experiment for the write probe")
+            # A write probe must not leave a permanent experiment container behind.
+            # MLflow always provides at least its Default experiment; use whichever
+            # active experiment the read probe already resolved, then delete the
+            # temporary run in the finally block below.
+            experiment_id = str(experiments[0].experiment_id)
             run = self.client.create_run(
                 experiment_id,
                 tags={
@@ -194,6 +190,7 @@ class MlflowRecorder:
                 local_id = run.data.tags.get("agent_eval.local_run_id")
                 if local_id != descriptor.local_run_id:
                     raise IntegrityError("bound MLflow run does not match the local run")
+                self._prepare_root_run(run, descriptor)
                 return str(run.info.run_id)
             existing = self._find_run(
                 binding.external_experiment_id,
@@ -201,11 +198,12 @@ class MlflowRecorder:
                 scope_id=None,
             )
             if existing is not None:
+                self._prepare_root_run(existing, descriptor)
                 return str(existing.info.run_id)
             tags = _tags(descriptor.tags)
             tags.update(
                 {
-                    "mlflow.runName": descriptor.name,
+                    "mlflow.runName": _root_run_name(descriptor),
                     "agent_eval.local_run_id": descriptor.local_run_id,
                     "agent_eval.recorder_config_hash": binding.recorder_config_hash,
                 }
@@ -232,7 +230,11 @@ class MlflowRecorder:
             for key, value in sorted(plan.run.parameters.items()):
                 if value is not None:
                     self.client.log_param(root_id, key, _string_value(value))
-            self._ensure_scopes(plan.scopes, binding)
+            self._ensure_scopes(
+                plan.scopes,
+                binding,
+                reopen=_is_nonterminal_run(plan.run.status),
+            )
 
             delivered = {
                 "metrics": 0,
@@ -329,12 +331,15 @@ class MlflowRecorder:
         self,
         scopes: Sequence[ScopeDescriptor],
         binding: ExternalBinding,
+        *,
+        reopen: bool,
     ) -> None:
         assert binding.external_experiment_id is not None
         assert binding.external_run_id is not None
         for scope in scopes:
             if scope.id in binding.scopes:
-                self.client.get_run(binding.scopes[scope.id])
+                run = self.client.get_run(binding.scopes[scope.id])
+                self._prepare_scope_run(run, scope, reopen=reopen)
                 continue
             existing = self._find_run(
                 binding.external_experiment_id,
@@ -343,6 +348,7 @@ class MlflowRecorder:
             )
             if existing is not None:
                 binding.scopes[scope.id] = str(existing.info.run_id)
+                self._prepare_scope_run(existing, scope, reopen=reopen)
                 continue
             parent = (
                 binding.external_run_id
@@ -366,6 +372,30 @@ class MlflowRecorder:
                 tags=tags,
             )
             binding.scopes[scope.id] = str(run.info.run_id)
+
+    def _prepare_root_run(self, run: Any, descriptor: RunDescriptor) -> None:
+        """Keep one bound MLflow run usable and identifiable across resumes."""
+
+        status = "RUNNING" if _is_nonterminal_run(descriptor.status) else None
+        self.client.update_run(
+            str(run.info.run_id),
+            status=(status if status is not None and run.info.status != status else None),
+            name=_root_run_name(descriptor),
+        )
+
+    def _prepare_scope_run(
+        self,
+        run: Any,
+        scope: ScopeDescriptor,
+        *,
+        reopen: bool,
+    ) -> None:
+        status = "RUNNING" if reopen and run.info.status != "RUNNING" else None
+        self.client.update_run(
+            str(run.info.run_id),
+            status=status,
+            name=scope.name,
+        )
 
     def _find_run(
         self,
@@ -592,3 +622,17 @@ def _table_value(value: object) -> object:
 
 def _filter_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _root_run_name(descriptor: RunDescriptor) -> str:
+    """Make separate attempts visibly distinct without hiding their shared revision."""
+
+    return f"{descriptor.name} · run {descriptor.local_run_id[:8]}"
+
+
+def _is_nonterminal_run(status: str) -> bool:
+    return status not in {
+        RunLifecycleState.COMPLETED.value,
+        RunLifecycleState.FAILED.value,
+        RunLifecycleState.CANCELLED.value,
+    }

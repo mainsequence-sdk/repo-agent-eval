@@ -523,15 +523,36 @@ class RecorderService:
                     self._write_binding(run_id, binding)
                     binding.external_run_id = adapter.ensure_run(plan.run, binding)
                     self._write_binding(run_id, binding)
-                    details = adapter.sync(plan, binding)
-                    if plan.run.status in {
-                        RunLifecycleState.COMPLETED.value,
-                        RunLifecycleState.FAILED.value,
-                        RunLifecycleState.CANCELLED.value,
-                    }:
+                    terminal_state = (
+                        RunLifecycleState(plan.run.status)
+                        if plan.run.status
+                        in {
+                            RunLifecycleState.COMPLETED.value,
+                            RunLifecycleState.FAILED.value,
+                            RunLifecycleState.CANCELLED.value,
+                        }
+                        else None
+                    )
+                    try:
+                        details = adapter.sync(plan, binding)
+                    except Exception:
+                        # Terminal lifecycle state is canonical and must reach the
+                        # external recorder even if a table, trace, or artifact
+                        # fails later in the same projection attempt.
+                        if terminal_state is not None:
+                            try:
+                                adapter.finalize(
+                                    binding,
+                                    terminal_state,
+                                    plan.run.end_time_ms or plan.run.start_time_ms,
+                                )
+                            except Exception:
+                                pass
+                        raise
+                    if terminal_state is not None:
                         terminal = adapter.finalize(
                             binding,
-                            RunLifecycleState(plan.run.status),
+                            terminal_state,
                             plan.run.end_time_ms or plan.run.start_time_ms,
                         )
                         details = {**dict(details), "finalization": dict(terminal)}
