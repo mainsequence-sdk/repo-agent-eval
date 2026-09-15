@@ -121,17 +121,17 @@ stages:
     executor: lan-inference
     model: qwen-judge
     reuse: {policy: exact}
-    budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
+    budget: {model_calls: 100, wall_seconds: 1800}
   solve:
     executor: lan-inference
     model: qwen-solver
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
   judge:
     executor: lan-inference
     model: qwen-judge
     reuse: {policy: exact}
-    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+    budget: {model_calls: 3, wall_seconds: 600}
 ```
 
 The executor id describes the service pool rather than a specific model. Model

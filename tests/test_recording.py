@@ -930,7 +930,7 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert "Filter any visible column" in table_index
     with store.get_blob(artifacts["index.html"].reference) as handle:
         recording_index = handle.read().decode("utf-8")
-    assert "Open interactive charts" in recording_index
+    assert "Open chart pages" in recording_index
     assert "Open sortable tables" in recording_index
     with store.get_blob(artifacts["graphs/execution-dag.json"].reference) as handle:
         dag = json.load(handle)

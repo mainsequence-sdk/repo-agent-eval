@@ -10,12 +10,20 @@ COPRO_PROPOSAL_ACCOUNTING_FIELDS = frozenset(
         "requested_count",
         "received_count",
         "accepted_count",
+        "malformed_dropped_count",
         "unchanged_dropped_count",
         "duplicate_dropped_count",
         "excess_dropped_count",
         "shortfall_count",
         "degraded",
     }
+)
+
+# Proposal results are immutable and are deliberately reused across runs.  The
+# first accounting shape did not distinguish malformed candidates; it is still
+# semantically valid with that count interpreted as zero.
+_COPRO_PROPOSAL_ACCOUNTING_V1_FIELDS = frozenset(
+    field for field in COPRO_PROPOSAL_ACCOUNTING_FIELDS if field != "malformed_dropped_count"
 )
 
 
@@ -41,30 +49,21 @@ def normalize_copro_proposals(
 
     accepted: list[dict[str, str]] = []
     identities: set[tuple[str, str]] = set()
+    malformed_count = 0
     unchanged_count = 0
     duplicate_count = 0
     excess_count = 0
 
     for raw_candidate in raw_candidates:
-        if not isinstance(raw_candidate, Mapping):
-            raise IntegrityError("optimizer candidate must be an object")
-        unknown = set(raw_candidate) - {"instruction", "text", "output_prefix"}
-        if unknown:
-            raise IntegrityError(
-                f"optimizer candidate contains unknown fields: {sorted(unknown)}"
-            )
-        if "instruction" in raw_candidate and "text" in raw_candidate:
-            raise IntegrityError(
-                "optimizer candidate cannot contain both instruction and text"
-            )
-        instruction = _non_empty_text(
-            raw_candidate.get("instruction", raw_candidate.get("text")),
-            "candidate instruction",
-        )
-        raw_prefix = raw_candidate.get("output_prefix", "")
-        if not isinstance(raw_prefix, str):
-            raise IntegrityError("candidate output_prefix must be a string")
-        output_prefix = ""
+        try:
+            instruction, output_prefix = _normalize_copro_candidate(raw_candidate)
+        except IntegrityError:
+            # A generative model can return one complete candidate beside an
+            # incomplete or schema-drifted sibling.  The malformed candidate
+            # must never be repaired or selected, but it must not discard
+            # useful independent proposals from the same immutable response.
+            malformed_count += 1
+            continue
 
         identity = (instruction, output_prefix)
         if identity == original_identity:
@@ -84,6 +83,7 @@ def normalize_copro_proposals(
         "requested_count": requested_count,
         "received_count": len(raw_candidates),
         "accepted_count": len(accepted),
+        "malformed_dropped_count": malformed_count,
         "unchanged_dropped_count": unchanged_count,
         "duplicate_dropped_count": duplicate_count,
         "excess_dropped_count": excess_count,
@@ -101,12 +101,14 @@ def validate_copro_proposal_accounting(
 ) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise IntegrityError("COPRO proposal_accounting must be an object")
-    if set(value) != COPRO_PROPOSAL_ACCOUNTING_FIELDS:
+    supplied_fields = set(value)
+    is_v1 = supplied_fields == _COPRO_PROPOSAL_ACCOUNTING_V1_FIELDS
+    if supplied_fields != COPRO_PROPOSAL_ACCOUNTING_FIELDS and not is_v1:
         raise IntegrityError("COPRO proposal_accounting has the wrong fields")
 
     counts: dict[str, int] = {}
     for field in COPRO_PROPOSAL_ACCOUNTING_FIELDS - {"degraded"}:
-        raw = value.get(field)
+        raw = 0 if is_v1 and field == "malformed_dropped_count" else value.get(field)
         if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
             raise IntegrityError(f"COPRO proposal_accounting {field} must be non-negative")
         counts[field] = raw
@@ -120,7 +122,8 @@ def validate_copro_proposal_accounting(
     if accepted_count > expected_count:
         raise IntegrityError("COPRO proposal_accounting exceeds requested_count")
     dropped = (
-        counts["unchanged_dropped_count"]
+        counts["malformed_dropped_count"]
+        + counts["unchanged_dropped_count"]
         + counts["duplicate_dropped_count"]
         + counts["excess_dropped_count"]
     )
@@ -136,6 +139,33 @@ def _non_empty_text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise IntegrityError(f"{label} must be a non-empty string")
     return value.strip()
+
+
+def _normalize_copro_candidate(raw_candidate: object) -> tuple[str, str]:
+    """Return one complete candidate or reject that candidate alone.
+
+    This intentionally remains strict: invalid fields are not stripped and
+    incomplete instructions are not salvaged.  The caller accounts for the
+    rejected candidate as a proposal shortfall.
+    """
+
+    if not isinstance(raw_candidate, Mapping):
+        raise IntegrityError("optimizer candidate must be an object")
+    unknown = set(raw_candidate) - {"instruction", "text", "output_prefix"}
+    if unknown:
+        raise IntegrityError(
+            f"optimizer candidate contains unknown fields: {sorted(unknown)}"
+        )
+    if "instruction" in raw_candidate and "text" in raw_candidate:
+        raise IntegrityError("optimizer candidate cannot contain both instruction and text")
+    instruction = _non_empty_text(
+        raw_candidate.get("instruction", raw_candidate.get("text")),
+        "candidate instruction",
+    )
+    raw_prefix = raw_candidate.get("output_prefix", "")
+    if not isinstance(raw_prefix, str):
+        raise IntegrityError("candidate output_prefix must be a string")
+    return instruction, ""
 
 
 __all__ = ["normalize_copro_proposals", "validate_copro_proposal_accounting"]

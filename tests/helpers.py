@@ -136,38 +136,38 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "executor": "authoring-harness",
                 "model": "author",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
+                "budget": {"model_calls": 1, "wall_seconds": 300},
             },
             "validate_judge": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
+                "budget": {"model_calls": 10, "wall_seconds": 300},
             },
             "optimize": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 1, "tokens": 10000, "wall_seconds": 300},
+                "budget": {"model_calls": 1, "wall_seconds": 300},
             },
             "solve": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 10, "tokens": 10000, "wall_seconds": 300},
+                "budget": {"model_calls": 10, "wall_seconds": 300},
             },
             "judge": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 30, "tokens": 10000, "wall_seconds": 300},
+                "budget": {"model_calls": 30, "wall_seconds": 300},
             },
             "fit": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+                "budget": {"model_calls": 0, "wall_seconds": 300},
             },
             "select": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+                "budget": {"model_calls": 0, "wall_seconds": 300},
             },
             "aggregate": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+                "budget": {"model_calls": 0, "wall_seconds": 300},
             },
         },
         "evaluation": {

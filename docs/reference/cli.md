@@ -11,7 +11,8 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
 | `ms-agent-eval preflight <experiment>` | Expand the complete workload, then calculate endpoint-native token fit and usable concurrency without generation. |
-| `ms-agent-eval run <experiment>` | Start a named evaluation or optimization and automatically manage recording when enabled. |
+| `ms-agent-eval run <experiment>` | Resume the latest unfinished matching revision, or start it when none exists; automatically manages recording when enabled. |
+| `ms-agent-eval run <experiment> --fresh` | Intentionally create another run for the current revision. |
 | `ms-agent-eval run resume <run-id>` | Continue an existing immutable run with the same automatic recording behavior. |
 | `ms-agent-eval stage list` | List packet attempts and states for a run. |
 | `ms-agent-eval stage prepare` | Prepare a stage packet independently. |

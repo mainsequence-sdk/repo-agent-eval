@@ -52,6 +52,8 @@ class TerminalRunReporter:
             self._packet_retrying(event)
         elif event.kind == "optimizer_history_reduced":
             self._optimizer_history_reduced(event)
+        elif event.kind == "optimizer_target_skipped":
+            self._optimizer_target_skipped(event)
         elif event.kind == "packet_failed":
             self._packet_failed(event)
         elif event.kind == "packet_waiting":
@@ -197,6 +199,17 @@ class TerminalRunReporter:
         self.console.print(
             f"[yellow]↳[/] Retrying {_subject(event)} with scored structural deltas "
             "because the complete candidate history exceeded the model context"
+        )
+
+    def _optimizer_target_skipped(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        target = event.details.get("target_id", "target")
+        kind = event.details.get("error_kind", "execution_failed")
+        detail = _terminal_error(event.details.get("error"))
+        suffix = f": {detail}" if detail else ""
+        self.console.print(
+            f"[yellow]![/] Skipped optimizer target {target} ({kind}); "
+            f"keeping its frozen skill{suffix}"
         )
 
     def _packet_failed(self, event: ProgressEvent) -> None:

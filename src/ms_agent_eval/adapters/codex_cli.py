@@ -344,8 +344,6 @@ class CodexCliExecutor:
                 usage[key] += int(invocation_usage.get(key, 0))
             if usage["model_calls"] > packet.budget.model_calls:
                 raise IntegrityError("Codex execution exceeded its model-call budget")
-            if usage["tokens"] > packet.budget.tokens:
-                raise IntegrityError("Codex execution exceeded its token budget")
             return raw
 
         if packet.stage is StageKind.AUTHOR:

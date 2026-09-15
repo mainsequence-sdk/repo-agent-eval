@@ -274,13 +274,13 @@ models:
 stages:
   optimize:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
   solve:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
   judge:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 64000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
 
 experiments:
   qwen-baseline:
@@ -330,8 +330,9 @@ Endpoint topology, scheduling, and provenance are documented in
 Starting a run also freezes its selected workspace configuration and every
 loaded case, split, judge-validation, catalog, policy, and source-snapshot identity
 into an immutable revision bundle. `run resume <run-id>` always continues that
-stored revision—even after relevant workspace edits—while `run baseline`
-compiles the edited workspace as a new revision and reuses only compatible work.
+stored revision—even after relevant workspace edits. A normal `run baseline`
+or `run optimize-solver` first resumes the latest unfinished matching revision;
+use `--fresh` only when intentionally creating another run.
 
 ## Full flow
 
@@ -453,7 +454,7 @@ Mutable and generated data belongs outside Git under the workspace data root:
     ├── results.csv             one row per judged case repetition
     ├── results.json            canonical derived report
     ├── cases/                  readable per-case evidence
-    ├── graphs/                 Plotly HTML, SVG, DAG, and chart guide
+    ├── graphs/                 chart pages, SVG exports, DAG, and chart guide
     └── tables/                 sortable browser plus CSV/JSON tables
 ```
 

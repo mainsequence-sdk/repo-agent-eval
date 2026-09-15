@@ -1,9 +1,9 @@
 # Resume and Recovery
 
 Runs are append-only state machines. Resume inspects persisted attempts and
-continues from the first incomplete dependency. Starting a separate run also
-reuses eligible validated work from earlier runs when its stable `work_id`
-matches.
+continues from the first incomplete dependency. `run <experiment>` does this
+automatically for the latest unfinished matching revision; `--fresh` is the
+explicit request to start a separate run.
 
 ## Inspect and resume
 
@@ -53,8 +53,8 @@ The two operator intents are therefore explicit:
 # Continue exactly the frozen old revision, even if workspace.yaml changed.
 uv run ms-agent-eval run resume <run-id> --workspace workspace.yaml
 
-# Compile the edited workspace as a new revision and reuse compatible old work.
-uv run ms-agent-eval run baseline --workspace workspace.yaml
+# Intentionally create another run for this revision and reuse compatible old work.
+uv run ms-agent-eval run baseline --fresh --workspace workspace.yaml
 ```
 
 Rehydration verifies the selected workspace configuration, case and judge-validation

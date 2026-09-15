@@ -17,6 +17,7 @@ from ms_agent_eval.core.errors import PreflightError
 from ms_agent_eval.core.coordinator import StageCoordinator
 from ms_agent_eval.core.evaluation import CaseDefinition, deterministic_group_split
 from ms_agent_eval.core.hashing import content_hash, sha256_file
+from ms_agent_eval.core.lifecycle import RunLifecycleState
 from ms_agent_eval.core.planning import compile_workspace
 from ms_agent_eval.core.progress import ProgressEvent
 from ms_agent_eval.core.providers import ModelCallObserver
@@ -54,9 +55,7 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
 
 
-def _copro_compiled(
-    tmp_path: Path, *, global_instructions: bool = False
-):  # type: ignore[no-untyped-def]
+def _copro_compiled(tmp_path: Path, *, global_instructions: bool = False):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
     payload["experiments"]["optimize"]["optimizer"] = {
@@ -814,6 +813,50 @@ def test_second_run_reuses_validated_stage_graph_without_model_calls(
     assert all(result is not None and result.usage["model_calls"] == 0 for result in model_results)
 
 
+def test_cli_style_run_or_resume_continues_matching_cancelled_revision(
+    tmp_path: Path,
+) -> None:
+    compiled = _compiled(tmp_path)
+    responses = {
+        "solver": [solver_response()],
+        "judge": [
+            judge_response(1.0),
+            judge_response(0.5),
+            judge_response(0.0),
+            judge_response(0.0),
+            judge_response(0.0),
+            judge_response(1.0),
+        ],
+    }
+    calls: Counter[str] = Counter()
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        del budget, api_key
+        calls[model.role] += 1
+        return FixedObservedLM(observer, responses[model.role], model=model.role)
+
+    events: list[ProgressEvent] = []
+    runner = ExperimentRunner(compiled, lm_factory=factory, progress_sink=events.append)
+    original = runner.run("baseline", environment=_environment())
+    runner.coordinator.lifecycle.append(
+        original.run_id,
+        RunLifecycleState.CANCELLED,
+        reason="interrupted_after_completion",
+    )
+    calls_before_resume = calls.copy()
+
+    resumed = runner.run_or_resume("baseline", environment=_environment())
+
+    assert resumed.run_id == original.run_id
+    assert calls == calls_before_resume
+    assert any(event.kind == "run_resumed" and event.run_id == original.run_id for event in events)
+
+
 def test_failed_judge_validation_is_not_reused(tmp_path: Path) -> None:
     compiled = _compiled(tmp_path)
     calls: Counter[str] = Counter()
@@ -1300,11 +1343,9 @@ def test_copro_skill_search_freezes_global_and_dspy_instructions(
     second_round_skill = next(
         runner.coordinator._input(status.packet, "optimizer_context")
         for status in optimizer_packets
-        if runner.coordinator._input(status.packet, "optimizer_context")["scope"]
-        == "optimization"
+        if runner.coordinator._input(status.packet, "optimizer_context")["scope"] == "optimization"
         and runner.coordinator._input(status.packet, "optimizer_context")["round"] == 2
-        and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"]
-        == "skill"
+        and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"] == "skill"
     )
     assert second_round_skill["current_text"] == "Optimized solver or skill instruction."
     assert second_round_skill["scored_attempts"]
@@ -1427,6 +1468,15 @@ def test_copro_skill_search_freezes_global_and_dspy_instructions(
         "copro-criterion-comparison",
         "expected-response-token-counts",
     } <= {item.name for item in projection.tables}
+    artifacts = {item.path: item for item in projection.artifacts}
+    with runner.coordinator.artifacts.get_blob(
+        artifacts["graphs/copro-case-paired-score.html"].reference
+    ) as handle:
+        case_chart_html = handle.read().decode("utf-8")
+    assert "COPRO baseline versus optimized by test case" in case_chart_html
+    assert "copro-case-paired-score.svg" in case_chart_html
+    assert "Plotly" not in case_chart_html
+    assert "gamma" in case_chart_html
 
 
 def test_copro_reduces_candidate_text_only_after_full_history_exceeds_context(
@@ -1465,8 +1515,7 @@ def test_copro_reduces_candidate_text_only_after_full_history_exceeds_context(
             else:
                 score = (
                     1.0
-                    if "strong candidate" in rendered
-                    or "optimized skill answer" in rendered
+                    if "strong candidate" in rendered or "optimized skill answer" in rendered
                     else (0.5 if "partial candidate" in rendered else 0.0)
                 )
                 response = judge_response(score)
@@ -1548,9 +1597,7 @@ def test_copro_reduces_candidate_text_only_after_full_history_exceeds_context(
     reduced = next(
         status
         for status in optimizer_statuses
-        if runner.coordinator._input(status.packet, "optimizer_context").get(
-            "history_reduction"
-        )
+        if runner.coordinator._input(status.packet, "optimizer_context").get("history_reduction")
         == "structural_delta_v1"
     )
     assert reduced.state is StageState.PERSISTED
@@ -1630,9 +1677,7 @@ def test_copro_global_instruction_search_freezes_every_skill_and_dspy_signature(
         if status.packet.stage is StageKind.OPTIMIZE
     ]
     assert optimizer_contexts
-    assert {context["target_kind"] for context in optimizer_contexts} == {
-        "global_instructions"
-    }
+    assert {context["target_kind"] for context in optimizer_contexts} == {"global_instructions"}
     assert all(context["target_id"] == "global" for context in optimizer_contexts)
     final_fit = next(
         status
@@ -1741,10 +1786,137 @@ def test_copro_schedules_independent_skill_targets_together(tmp_path: Path) -> N
         for status in statuses
         if status.packet.stage is StageKind.FIT
         and status.result is not None
-        and runner.coordinator.ledger.read_output(status.result)["phase"]
-        == "final_fit"
+        and runner.coordinator.ledger.read_output(status.result)["phase"] == "final_fit"
     )
     assert skill_selections <= set(final_fit.dependencies)
+
+
+def test_copro_keeps_running_when_one_skill_target_fails(tmp_path: Path) -> None:
+    compiled = _parallel_copro_compiled(tmp_path)
+
+    class OneTargetFailsLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                if "Use alpha." in rendered:
+                    raise RuntimeError("optimizer target needs a larger context")
+                response = (
+                    "[[ ## candidates ## ]]\n"
+                    '[{"instruction":"Optimized beta instruction.","output_prefix":""}]\n\n'
+                    "[[ ## completed ## ]]"
+                )
+            elif self.model == "solver":
+                response = solver_response("optimized answer")
+            else:
+                score = 1.0 if "strong candidate" in rendered else 0.5
+                if any(
+                    marker in rendered
+                    for marker in (
+                        "incorrect candidate",
+                        "contradictory candidate",
+                        "adversarial candidate",
+                    )
+                ):
+                    score = 0.0
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return OneTargetFailsLM(observer, role=model.role)
+
+    runner = ExperimentRunner(compiled, lm_factory=factory)
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    report = json.loads(
+        (
+            runner.coordinator.artifacts.summary_root / "runs" / run.run_id / "results.json"
+        ).read_text(encoding="utf-8")
+    )
+    failures = report["optimization"]["target_failures"]
+    assert len(failures) == 1
+    assert failures[0]["target_id"] == "alpha"
+    assert failures[0]["error_kind"] == "runtimeerror"
+    summary = (
+        runner.coordinator.artifacts.summary_root / "runs" / run.run_id / "summary.md"
+    ).read_text(encoding="utf-8")
+    assert "Failed optimizer targets" in summary
+    assert "alpha" in summary
+
+
+def test_copro_keeps_other_skills_when_one_candidate_evaluation_fails(tmp_path: Path) -> None:
+    compiled = _parallel_copro_compiled(tmp_path)
+    solver_calls = 0
+
+    class OneCandidateEvaluationFailsLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal solver_calls
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                response = (
+                    "[[ ## candidates ## ]]\n"
+                    '[{"instruction":"Optimized instruction.","output_prefix":""}]\n\n'
+                    "[[ ## completed ## ]]"
+                )
+            elif self.model == "solver":
+                solver_calls += 1
+                if solver_calls == 1:
+                    raise RuntimeError("alpha candidate evaluation needs a larger context")
+                response = solver_response("optimized answer")
+            else:
+                score = 1.0 if "strong candidate" in rendered else 0.5
+                if any(
+                    marker in rendered
+                    for marker in (
+                        "incorrect candidate",
+                        "contradictory candidate",
+                        "adversarial candidate",
+                    )
+                ):
+                    score = 0.0
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return OneCandidateEvaluationFailsLM(observer, role=model.role)
+
+    runner = ExperimentRunner(compiled, lm_factory=factory)
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    report = json.loads(
+        (
+            runner.coordinator.artifacts.summary_root / "runs" / run.run_id / "results.json"
+        ).read_text(encoding="utf-8")
+    )
+    failures = report["optimization"]["target_failures"]
+    assert any(
+        failure["target_id"] == "alpha" and failure["error_kind"] == "runtimeerror"
+        for failure in failures
+    )
+    assert any(item["target_id"] == "beta" for item in report["optimization"]["rounds"])
 
 
 def test_optimization_rejects_judge_validation_on_held_out_case_before_lm_creation(

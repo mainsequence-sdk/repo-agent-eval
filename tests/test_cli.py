@@ -109,6 +109,18 @@ def test_cli_has_no_backend_case_builder_command() -> None:
     assert "cases" not in _parser().format_help()
 
 
+def test_run_defaults_to_resume_and_requires_fresh_for_a_new_run() -> None:
+    arguments = _parser().parse_args(
+        ["run", "optimize-solver", "--workspace", "workspace.yaml"]
+    )
+    fresh = _parser().parse_args(
+        ["run", "optimize-solver", "--fresh", "--workspace", "workspace.yaml"]
+    )
+
+    assert arguments.fresh is False
+    assert fresh.fresh is True
+
+
 def test_cli_exposes_deterministic_report_backfill() -> None:
     arguments = _parser().parse_args(
         ["report", "build", "--run", "run-1", "--workspace", "workspace.yaml"]

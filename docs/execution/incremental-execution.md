@@ -150,7 +150,7 @@ Normal exact reuse:
 stages:
   solve:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
 ```
 
 Force a fresh result:

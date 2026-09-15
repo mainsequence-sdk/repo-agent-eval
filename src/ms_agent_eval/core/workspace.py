@@ -1300,15 +1300,22 @@ class StageConfiguration:
 @dataclass(frozen=True)
 class RoleBudget:
     model_calls: int
-    tokens: int
+    # Retained only to read immutable locks created before token ceilings were
+    # removed. New workspace configuration must omit this field.
+    tokens: int | None
     wall_seconds: float
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object], *, field: str) -> RoleBudget:
         _reject_unknown(payload, {"model_calls", "tokens", "wall_seconds"}, field)
+        raw_tokens = payload.get("tokens")
         return cls(
             _non_negative_int(payload.get("model_calls"), f"{field}.model_calls"),
-            _non_negative_int(payload.get("tokens"), f"{field}.tokens"),
+            (
+                _non_negative_int(raw_tokens, f"{field}.tokens")
+                if raw_tokens is not None
+                else None
+            ),
             _positive_number(payload.get("wall_seconds", 1800), f"{field}.wall_seconds"),
         )
 

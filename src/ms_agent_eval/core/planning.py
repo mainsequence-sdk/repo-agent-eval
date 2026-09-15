@@ -74,47 +74,21 @@ def _optimization_preflight(
         required_calls: Mapping[str, int],
         configured_budget: Mapping[str, object],
     ) -> Mapping[str, object]:
-        stage_by_role = {"optimizer": "optimize", "solver": "solve", "judge": "judge"}
         configured_calls = {
             role: int(getattr(configured_budget[role], "model_calls")) for role in required_calls
-        }
-        configured_tokens = {
-            role: int(getattr(configured_budget[role], "tokens")) for role in required_calls
-        }
-        output_tokens = {
-            role: (
-                None
-                if output_limit(experiment_id, role) is None
-                else required_calls[role] * int(output_limit(experiment_id, role))
-            )
-            for role in required_calls
         }
         short_calls = {
             role: {"required": required_calls[role], "configured": configured_calls[role]}
             for role in required_calls
             if configured_calls[role] < required_calls[role]
         }
-        short_tokens = {
-            role: {
-                "required_maximum_output_tokens": output_tokens[role],
-                "configured": configured_tokens[role],
-            }
-            for role in required_calls
-            if (
-                output_tokens[role] is not None
-                and configured_tokens[role] < int(output_tokens[role])
-            )
-            or configured_tokens[role] < workspace.stages[stage_by_role[role]].budget.tokens
-        }
-        if short_calls or short_tokens:
+        if short_calls:
             raise PreflightError(
                 f"{strategy} experiment {experiment_id!r} has insufficient hard budget: "
-                f"model_calls={short_calls}, tokens={short_tokens}"
+                f"model_calls={short_calls}"
             )
         return {
             "configured_model_calls": configured_calls,
-            "configured_tokens": configured_tokens,
-            "planned_maximum_output_tokens": output_tokens,
         }
 
     for experiment_id, experiment in workspace.experiments.items():

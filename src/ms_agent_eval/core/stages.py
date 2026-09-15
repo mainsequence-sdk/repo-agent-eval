@@ -101,7 +101,9 @@ class StageModelIdentity:
 @dataclass(frozen=True)
 class StageBudget:
     model_calls: int
-    tokens: int
+    # Token ceilings are intentionally not enforced. A numeric value is read
+    # only for immutable packets created by earlier releases.
+    tokens: int | None
     wall_seconds: float
 
     @classmethod
@@ -111,7 +113,9 @@ class StageBudget:
         wall = payload.get("wall_seconds")
         if not isinstance(calls, int) or isinstance(calls, bool) or calls < 0:
             raise ConfigurationError("stage budget model_calls must be non-negative")
-        if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+        if tokens is not None and (
+            not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0
+        ):
             raise ConfigurationError("stage budget tokens must be non-negative")
         if not isinstance(wall, (int, float)) or isinstance(wall, bool) or wall <= 0:
             raise ConfigurationError("stage budget wall_seconds must be positive")
@@ -161,6 +165,7 @@ class StagePacket:
         executor: StageExecutorIdentity,
         model: StageModelIdentity,
         budget: StageBudget,
+        _legacy_token_identity: bool = False,
     ) -> StagePacket:
         if attempt < 1:
             raise ConfigurationError("stage packet attempt must be positive")
@@ -187,23 +192,17 @@ class StagePacket:
             raise ConfigurationError("stage packet input ids must be unique")
         normalized_work_spec = dict(work_spec or {"inputs": inputs_tuple})
         revision_id = _content_id(experiment_revision_id, "experiment revision id")
-        work_identity = {
-            "schema_version": 1,
-            "stage": stage.value,
-            "semantic_inputs": normalized_work_spec,
-            "dependency_artifacts": dependency_artifacts_tuple,
-            "instructions": instructions,
-            "output_contract": {"schema_id": _identifier(output_schema, "output schema")},
-            "executor": {
-                "adapter": executor.adapter,
-                "configuration_hash": executor.configuration_hash,
-            },
-            "model": model,
-            "model_visible_limits": {
-                "model_calls": normalized_budget.model_calls,
-                "tokens": normalized_budget.tokens,
-            },
-        }
+        work_identity = cls._work_identity(
+            stage=stage,
+            work_spec=normalized_work_spec,
+            dependency_artifacts=dependency_artifacts_tuple,
+            instructions=instructions,
+            output_schema=_identifier(output_schema, "output schema"),
+            executor=executor,
+            model=model,
+            budget=normalized_budget,
+            include_retired_token_limit=_legacy_token_identity,
+        )
         work_id = content_hash(work_identity)
         attempt_identity = {
             "schema_version": 2,
@@ -257,42 +256,50 @@ class StagePacket:
         except (TypeError, ValueError) as error:
             raise ConfigurationError("unknown stage packet kind") from error
         output_contract = _mapping(payload.get("output_contract"), "output_contract")
-        packet = cls.create(
-            run_id=_required_string(payload.get("run_id"), "stage packet run_id"),
-            experiment_id=_identifier(payload.get("experiment_id"), "stage packet experiment_id"),
-            experiment_revision_id=_content_id(
+        create_arguments = {
+            "run_id": _required_string(payload.get("run_id"), "stage packet run_id"),
+            "experiment_id": _identifier(payload.get("experiment_id"), "stage packet experiment_id"),
+            "experiment_revision_id": _content_id(
                 payload.get("experiment_revision_id"), "experiment revision id"
             ),
-            stage=stage,
-            attempt=_positive_int(payload.get("attempt"), "stage packet attempt"),
-            replicate_slot=_positive_int(
+            "stage": stage,
+            "attempt": _positive_int(payload.get("attempt"), "stage packet attempt"),
+            "replicate_slot": _positive_int(
                 payload.get("replicate_slot"), "stage packet replicate_slot"
             ),
-            reuse_policy=_required_string(payload.get("reuse_policy"), "stage packet reuse_policy"),
-            dependencies=tuple(
+            "reuse_policy": _required_string(payload.get("reuse_policy"), "stage packet reuse_policy"),
+            "dependencies": tuple(
                 _content_id(item, "stage packet dependency") for item in raw_dependencies
             ),
-            dependency_artifacts=tuple(
+            "dependency_artifacts": tuple(
                 _content_id(item, "stage packet dependency artifact")
                 for item in raw_dependency_artifacts
             ),
-            work_spec=_mapping(payload.get("work_spec"), "stage packet work_spec"),
-            inputs=tuple(
+            "work_spec": _mapping(payload.get("work_spec"), "stage packet work_spec"),
+            "inputs": tuple(
                 StageArtifact.from_mapping(_mapping(item, "stage packet input"))
                 for item in raw_inputs
             ),
-            instructions=StageArtifact.from_mapping(
+            "instructions": StageArtifact.from_mapping(
                 _mapping(payload.get("instructions"), "stage packet instructions")
             ),
-            output_schema=_identifier(output_contract.get("schema_id"), "output schema"),
-            executor=StageExecutorIdentity.from_mapping(
+            "output_schema": _identifier(output_contract.get("schema_id"), "output schema"),
+            "executor": StageExecutorIdentity.from_mapping(
                 _mapping(payload.get("executor"), "stage packet executor")
             ),
-            model=StageModelIdentity.from_mapping(
+            "model": StageModelIdentity.from_mapping(
                 _mapping(payload.get("model"), "stage packet model")
             ),
-            budget=StageBudget.from_mapping(_mapping(payload.get("budget"), "stage packet budget")),
-        )
+            "budget": StageBudget.from_mapping(
+                _mapping(payload.get("budget"), "stage packet budget")
+            ),
+        }
+        packet = cls.create(**create_arguments)
+        if payload.get("work_id") != packet.work_id:
+            # Historical packets encoded the now-retired token ceiling in their
+            # work ID.  Preserve their immutable identity when reading them so
+            # their completed results remain independently verifiable.
+            packet = cls.create(**create_arguments, _legacy_token_identity=True)
         if payload.get("work_id") != packet.work_id:
             raise IntegrityError("stage packet work identity hash is invalid")
         if payload.get("attempt_id") != packet.attempt_id:
@@ -311,22 +318,63 @@ class StagePacket:
     def work_document(self) -> Mapping[str, object]:
         """Return the canonical, run-independent computation identity."""
 
+        current = self._work_identity(
+            stage=self.stage,
+            work_spec=self.work_spec,
+            dependency_artifacts=self.dependency_artifacts,
+            instructions=self.instructions,
+            output_schema=self.output_schema,
+            executor=self.executor,
+            model=self.model,
+            budget=self.budget,
+            include_retired_token_limit=False,
+        )
+        if content_hash(current) == self.work_id:
+            return current
+        historical = self._work_identity(
+            stage=self.stage,
+            work_spec=self.work_spec,
+            dependency_artifacts=self.dependency_artifacts,
+            instructions=self.instructions,
+            output_schema=self.output_schema,
+            executor=self.executor,
+            model=self.model,
+            budget=self.budget,
+            include_retired_token_limit=True,
+        )
+        if content_hash(historical) == self.work_id:
+            return historical
+        return current
+
+    @staticmethod
+    def _work_identity(
+        *,
+        stage: StageKind,
+        work_spec: Mapping[str, object],
+        dependency_artifacts: Sequence[str],
+        instructions: StageArtifact,
+        output_schema: str,
+        executor: StageExecutorIdentity,
+        model: StageModelIdentity,
+        budget: StageBudget,
+        include_retired_token_limit: bool,
+    ) -> Mapping[str, object]:
+        limits: dict[str, object] = {"model_calls": budget.model_calls}
+        if include_retired_token_limit:
+            limits["tokens"] = budget.tokens
         return {
             "schema_version": 1,
-            "stage": self.stage.value,
-            "semantic_inputs": dict(self.work_spec),
-            "dependency_artifacts": list(self.dependency_artifacts),
-            "instructions": json_value(self.instructions),
-            "output_contract": {"schema_id": self.output_schema},
+            "stage": stage.value,
+            "semantic_inputs": dict(work_spec),
+            "dependency_artifacts": list(dependency_artifacts),
+            "instructions": json_value(instructions),
+            "output_contract": {"schema_id": output_schema},
             "executor": {
-                "adapter": self.executor.adapter,
-                "configuration_hash": self.executor.configuration_hash,
+                "adapter": executor.adapter,
+                "configuration_hash": executor.configuration_hash,
             },
-            "model": json_value(self.model),
-            "model_visible_limits": {
-                "model_calls": self.budget.model_calls,
-                "tokens": self.budget.tokens,
-            },
+            "model": json_value(model),
+            "model_visible_limits": limits,
         }
 
 
@@ -529,6 +577,7 @@ class StageLedger:
         self.store = store
         self.clock = clock
         self._lock_path = store.operations_root / "stage-ledger.lock"
+        self._semantic_work_index: Mapping[str, tuple[str, ...]] | None = None
 
     def create_run(self, run_id: str, document: Mapping[str, object]) -> ArtifactReference:
         return self.store.put_manifest(f"runs/{run_id}/run", document)
@@ -783,15 +832,59 @@ class StageLedger:
         return status.result
 
     def reusable_result(self, packet: StagePacket) -> StageResult | None:
-        """Return a deterministically selected verified result for an exact work ID."""
+        """Return a verified result for this computation, without rerunning a model.
+
+        Work packets written before token ceilings were retired contained that
+        non-semantic operational limit in their hash.  The fallback below
+        compares the immutable work documents after removing only that retired
+        field; every model-visible input and all other limits remain exact.
+        """
 
         if packet.reuse_policy != "exact":
             return None
+        for work_id in self._reusable_work_ids(packet):
+            result = self._reusable_result_for_work(packet, work_id)
+            if result is not None:
+                return result
+        return None
+
+    def _reusable_work_ids(self, packet: StagePacket) -> tuple[str, ...]:
+        current = packet.work_id
+        semantic_id = _semantic_work_id(packet.work_document())
+        historical = self._semantic_work_index_entries().get(semantic_id, ())
+        return (current, *tuple(item for item in historical if item != current))
+
+    def _semantic_work_index_entries(self) -> Mapping[str, tuple[str, ...]]:
+        if self._semantic_work_index is not None:
+            return self._semantic_work_index
+        entries: dict[str, list[str]] = {}
+        root = self.store.manifest_root / "graph" / "work"
+        if root.is_dir():
+            for path in root.glob("*/work.json"):
+                try:
+                    document = self._load_mapping(path, "stage work document")
+                    work_id = content_hash(document)
+                    entries.setdefault(_semantic_work_id(document), []).append(work_id)
+                except (ConfigurationError, IntegrityError, ResolutionError, OSError, ValueError):
+                    continue
+        self._semantic_work_index = MappingProxyType(
+            {
+                semantic_id: tuple(sorted(set(work_ids)))
+                for semantic_id, work_ids in entries.items()
+            }
+        )
+        return self._semantic_work_index
+
+    def _reusable_result_for_work(
+        self,
+        packet: StagePacket,
+        source_work_id: str,
+    ) -> StageResult | None:
         root = (
             self.store.manifest_root
             / "graph"
             / "work"
-            / packet.work_id.removeprefix("sha256:")
+            / source_work_id.removeprefix("sha256:")
             / "results"
         )
         if not root.is_dir():
@@ -801,10 +894,10 @@ class StageLedger:
                 entry = self._load_mapping(entry_path, "reusable work result")
                 if entry.get("schema_version") != 1:
                     continue
-                if entry.get("work_id") != packet.work_id:
+                if entry.get("work_id") != source_work_id:
                     continue
                 result = self.load_result(_content_id(entry.get("result_id"), "reusable result id"))
-                if result.work_id != packet.work_id or result.status != "completed":
+                if result.work_id != source_work_id or result.status != "completed":
                     continue
                 if result.provenance.get("cache_eligible") is False:
                     continue
@@ -1090,6 +1183,18 @@ class StageLedger:
 
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _semantic_work_id(document: Mapping[str, object]) -> str:
+    """Hash a work document after removing retired operational token metadata."""
+
+    normalized = {str(key): value for key, value in document.items()}
+    raw_limits = normalized.get("model_visible_limits")
+    if isinstance(raw_limits, Mapping):
+        limits = {str(key): value for key, value in raw_limits.items()}
+        limits.pop("tokens", None)
+        normalized["model_visible_limits"] = limits
+    return content_hash(normalized)
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

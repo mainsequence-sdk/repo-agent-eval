@@ -1667,6 +1667,7 @@ version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "dspy" },
+    { name = "matplotlib" },
     { name = "plotly" },
     { name = "pyyaml" },
     { name = "questionary" },
@@ -1687,6 +1688,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dspy", specifier = "==3.2.1" },
+    { name = "matplotlib", specifier = "==3.11.2" },
     { name = "mlflow", marker = "extra == 'mlflow'", specifier = "==3.16.0" },
     { name = "plotly", specifier = "==7.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },

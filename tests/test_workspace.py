@@ -130,7 +130,7 @@ def test_schema_v14_is_upgraded_only_for_an_immutable_frozen_run() -> None:
         "search": {"breadth": 3, "depth": 2, "init_temperature": 1.4},
         "metric": {"name": "rubric_mean_score"},
     }
-    optimize["budget"]["optimizer"] = {"model_calls": 20, "tokens": 10000}
+    optimize["budget"]["optimizer"] = {"model_calls": 20}
     validation = optimize.pop("validation")
     optimize["cross_validation"] = {
         "folds": 2,

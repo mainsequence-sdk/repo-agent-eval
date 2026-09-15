@@ -768,10 +768,24 @@ class RunReportBuilder:
             and status.packet.work_spec.get("materialize_final_artifacts") is True
         ]
         final_program = None
+        final_target_failures: list[Mapping[str, object]] = []
         if final_fits:
             selected = final_fits[-1]
             assert selected.result is not None
             output = _mapping(self.ledger.read_output(selected.result), "final fitted program")
+            raw_evidence = output.get("selected_candidate_evidence")
+            selected_evidence = (
+                _mapping(raw_evidence, "selected candidate evidence")
+                if isinstance(raw_evidence, Mapping)
+                else {}
+            )
+            raw_failures = selected_evidence.get("target_failures", [])
+            if isinstance(raw_failures, Sequence) and not isinstance(
+                raw_failures, (str, bytes, bytearray)
+            ):
+                final_target_failures = [
+                    _mapping(item, "COPRO target failure") for item in raw_failures
+                ]
             final_program = {
                 "candidate_id": output.get("candidate_id"),
                 "program_hash": output.get("fitted_program_hash"),
@@ -785,20 +799,15 @@ class RunReportBuilder:
                 "output_prefix": output.get("output_prefix"),
                 "output_prefix_artifact": output.get("output_prefix_artifact"),
                 "search_space_type": output.get("search_space_type"),
-                "frozen_global_context_hash": output.get(
-                    "frozen_global_context_hash"
-                ),
-                "effective_global_context_hash": output.get(
-                    "effective_global_context_hash"
-                ),
-                "global_instruction_artifact": output.get(
-                    "global_instruction_artifact"
-                ),
+                "frozen_global_context_hash": output.get("frozen_global_context_hash"),
+                "effective_global_context_hash": output.get("effective_global_context_hash"),
+                "global_instruction_artifact": output.get("global_instruction_artifact"),
                 "frozen_skill_bank_hash": output.get("frozen_skill_bank_hash"),
                 "effective_skill_bank_hash": output.get("effective_skill_bank_hash"),
                 "skill_overlays": output.get("skill_overlay_artifacts"),
             }
         rounds = []
+        target_failures = list(final_target_failures)
         if strategy == "copro":
             for status in statuses:
                 if (
@@ -831,12 +840,21 @@ class RunReportBuilder:
                     str(item.get("target_id")),
                 )
             )
+            target_failures.sort(
+                key=lambda item: (
+                    int(item.get("round") or 0),
+                    str(item.get("target_kind")),
+                    str(item.get("target_id")),
+                    str(item.get("packet_id")),
+                )
+            )
         return {
             "strategy": strategy,
             "search_space_type": optimizer.get("search_space_type"),
             "configuration": optimizer,
             "final_program": final_program,
             "rounds": rounds,
+            "target_failures": target_failures,
         }
 
     @staticmethod
@@ -1419,6 +1437,7 @@ def render_report_markdown(report: RunReport) -> bytes:
             else {}
         )
         rounds = optimization.get("rounds", [])
+        target_failures = optimization.get("target_failures", [])
         degraded_rounds = (
             sum(
                 1
@@ -1445,12 +1464,36 @@ def render_report_markdown(report: RunReport) -> bytes:
                 f"- Effective skill-bank hash: `{final_mapping.get('effective_skill_bank_hash')}`",
                 f"- Search rounds: `{len(rounds) if isinstance(rounds, Sequence) else 0}`",
                 f"- Degraded proposal rounds: `{degraded_rounds}`",
+                f"- Failed optimizer targets: `{len(target_failures) if isinstance(target_failures, Sequence) else 0}`",
                 f"- Compiled manifest: `{_artifact_id(final_mapping.get('compiled_manifest_artifact'))}`",
                 f"- Candidate lineage: `{_artifact_id(final_mapping.get('candidate_lineage_artifact'))}`",
                 f"- Search summary: `{_artifact_id(final_mapping.get('search_summary_artifact'))}`",
                 "",
             ]
         )
+        if (
+            isinstance(target_failures, Sequence)
+            and not isinstance(target_failures, (str, bytes, bytearray))
+            and target_failures
+        ):
+            lines.extend(
+                [
+                    "### Failed optimizer targets",
+                    "",
+                    "| Target | Round | Stage | Failure | Detail |",
+                    "| --- | ---: | --- | --- | --- |",
+                ]
+            )
+            for raw_failure in target_failures:
+                failure = _mapping(raw_failure, "optimizer target failure")
+                target = f"{failure.get('target_kind')}: {failure.get('target_id')}"
+                lines.append(
+                    f"| `{_table(target)}` | {failure.get('round')} | "
+                    f"`{_table(failure.get('stage'))}` | "
+                    f"`{_table(failure.get('error_kind'))}` | "
+                    f"{_table(failure.get('error'))} |"
+                )
+            lines.append("")
     lines.extend(["## Models", ""])
     for role, raw_model in _mapping(value["models"], "report models").items():
         model = _mapping(raw_model, f"{role} model")

@@ -151,6 +151,32 @@ class ExperimentRunner:
             )
         )
 
+    def run_or_resume(
+        self,
+        experiment_id: str,
+        *,
+        environment: Mapping[str, str] | None = None,
+        through: str | None = None,
+        pilot: bool = False,
+        fresh: bool = False,
+    ) -> RunProgress:
+        """Continue the matching unfinished revision unless a fresh run is explicit."""
+
+        if not fresh:
+            run_id = self.coordinator.resumable_run_id(
+                experiment_id,
+                environment=environment,
+                pilot=pilot,
+            )
+            if run_id is not None:
+                return self.resume(run_id, environment=environment, through=through)
+        return self.run(
+            experiment_id,
+            environment=environment,
+            through=through,
+            pilot=pilot,
+        )
+
     def _execute(self, operation: Callable[[], RunProgress]) -> RunProgress:
         recording = self.coordinator.recorder_service.recording
         if not recording.enabled:

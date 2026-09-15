@@ -277,42 +277,41 @@ def build_workspace_template(
                 "executor": "authoring-harness",
                 "model": "author",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 1, "tokens": 64000, "wall_seconds": 1800},
+                "budget": {"model_calls": 1, "wall_seconds": 1800},
             },
             "validate_judge": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 100, "tokens": 250000, "wall_seconds": 1800},
+                "budget": {"model_calls": 100, "wall_seconds": 1800},
             },
             "optimize": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
+                "budget": {"model_calls": 1, "wall_seconds": 600},
             },
             "solve": {
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 1, "tokens": 32000, "wall_seconds": 600},
+                "budget": {"model_calls": 1, "wall_seconds": 600},
             },
             "judge": {
                 "reuse": {"policy": "exact"},
                 "budget": {
                     "model_calls": judge_repetitions,
-                    "tokens": 64000,
                     "wall_seconds": 600,
                 },
             },
             "fit": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 1800},
+                "budget": {"model_calls": 0, "wall_seconds": 1800},
             },
             "select": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+                "budget": {"model_calls": 0, "wall_seconds": 300},
             },
             "aggregate": {
                 "executor": "local-process",
                 "reuse": {"policy": "exact"},
-                "budget": {"model_calls": 0, "tokens": 0, "wall_seconds": 300},
+                "budget": {"model_calls": 0, "wall_seconds": 300},
             },
         },
         "evaluation": {
@@ -383,12 +382,12 @@ def build_workspace_template(
             "validation": {"strategy": "holdout", "fraction": 0.2, "seed": 0},
             "budget": {
                 **(
-                    {"optimizer": {"model_calls": 1000, "tokens": 4000000}}
+                    {"optimizer": {"model_calls": 1000}}
                     if optimization_strategy == "copro"
                     else {}
                 ),
-                "solver": {"model_calls": 10000, "tokens": 40000000},
-                "judge": {"model_calls": 30000, "tokens": 60000000},
+                "solver": {"model_calls": 10000},
+                "judge": {"model_calls": 30000},
                 "wall_seconds": 14400,
             },
         }

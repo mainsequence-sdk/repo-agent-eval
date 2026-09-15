@@ -30,6 +30,7 @@ def test_duplicate_copro_proposals_create_an_audited_shortfall() -> None:
         "requested_count": 2,
         "received_count": 2,
         "accepted_count": 1,
+        "malformed_dropped_count": 0,
         "unchanged_dropped_count": 0,
         "duplicate_dropped_count": 1,
         "excess_dropped_count": 0,
@@ -70,15 +71,44 @@ def test_copro_proposal_normalization_drops_unchanged_and_excess_candidates() ->
     assert accounting["degraded"] is False
 
 
-def test_copro_proposal_normalization_keeps_structural_errors_fatal() -> None:
-    with pytest.raises(IntegrityError, match="non-empty string"):
-        normalize_copro_proposals(
-            [{"instruction": " ", "output_prefix": "Answer:"}],
-            requested_count=1,
-            target_kind="global_instructions",
-            current_text="Current global instructions",
-            current_output_prefix="",
-        )
+def test_copro_proposal_normalization_discards_malformed_siblings() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [
+            {"instruction": "A complete rewrite", "output_prefix": ""},
+            {
+                "determine": "A leaked markdown fragment",
+                "instruction": "An incomplete rewrite",
+                "output_prefix": "",
+            },
+            {"instruction": " ", "output_prefix": "Answer:"},
+        ],
+        requested_count=2,
+        target_kind="global_instructions",
+        current_text="Current global instructions",
+        current_output_prefix="",
+    )
+
+    assert candidates == [{"instruction": "A complete rewrite", "output_prefix": ""}]
+    assert accounting["received_count"] == 3
+    assert accounting["accepted_count"] == 1
+    assert accounting["malformed_dropped_count"] == 2
+    assert accounting["shortfall_count"] == 1
+    assert accounting["degraded"] is True
+
+
+def test_copro_proposal_normalization_allows_an_empty_degraded_proposal() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [{"determine": "A leaked markdown fragment"}],
+        requested_count=1,
+        target_kind="skill",
+        current_text="Current skill",
+        current_output_prefix="",
+    )
+
+    assert candidates == []
+    assert accounting["malformed_dropped_count"] == 1
+    assert accounting["shortfall_count"] == 1
+    assert accounting["degraded"] is True
 
 
 def test_copro_proposal_normalization_accepts_text_as_provider_alias() -> None:
@@ -96,15 +126,18 @@ def test_copro_proposal_normalization_accepts_text_as_provider_alias() -> None:
     assert accounting["shortfall_count"] == 0
 
 
-def test_copro_proposal_normalization_rejects_ambiguous_text_alias() -> None:
-    with pytest.raises(IntegrityError, match="both instruction and text"):
-        normalize_copro_proposals(
-            [{"instruction": "Rewrite A", "text": "Rewrite B"}],
-            requested_count=1,
-            target_kind="skill",
-            current_text="Current skill",
-            current_output_prefix="",
-        )
+def test_copro_proposal_normalization_discards_ambiguous_text_alias() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [{"instruction": "Rewrite A", "text": "Rewrite B"}],
+        requested_count=1,
+        target_kind="skill",
+        current_text="Current skill",
+        current_output_prefix="",
+    )
+
+    assert candidates == []
+    assert accounting["malformed_dropped_count"] == 1
+    assert accounting["degraded"] is True
 
 
 def test_copro_proposal_accounting_rejects_inconsistent_counts() -> None:
@@ -114,6 +147,7 @@ def test_copro_proposal_accounting_rejects_inconsistent_counts() -> None:
                 "requested_count": 2,
                 "received_count": 2,
                 "accepted_count": 1,
+                "malformed_dropped_count": 0,
                 "unchanged_dropped_count": 0,
                 "duplicate_dropped_count": 0,
                 "excess_dropped_count": 0,
@@ -123,6 +157,28 @@ def test_copro_proposal_accounting_rejects_inconsistent_counts() -> None:
             expected_count=2,
             accepted_count=1,
         )
+
+
+def test_copro_proposal_accounting_accepts_immutable_v1_results() -> None:
+    legacy_accounting = {
+        "requested_count": 2,
+        "received_count": 2,
+        "accepted_count": 1,
+        "unchanged_dropped_count": 0,
+        "duplicate_dropped_count": 1,
+        "excess_dropped_count": 0,
+        "shortfall_count": 1,
+        "degraded": True,
+    }
+
+    assert (
+        validate_copro_proposal_accounting(
+            legacy_accounting,
+            expected_count=2,
+            accepted_count=1,
+        )
+        == legacy_accounting
+    )
 
 
 def test_historical_duplicate_failure_gets_an_append_only_retry() -> None:

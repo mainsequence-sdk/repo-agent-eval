@@ -10,7 +10,9 @@ from dataclasses import dataclass
 class BudgetLimits:
     model_calls: int
     configured_cost: float
-    tokens: int
+    # Retained as an observable usage field for historical lock compatibility.
+    # It is not an execution ceiling.
+    tokens: int | None
     wall_seconds: float
     concurrency: int
 
@@ -63,8 +65,6 @@ class BudgetLedger:
                 raise BudgetExceeded("model_calls", snapshot)
             if snapshot.configured_cost + configured_cost > self.limits.configured_cost:
                 raise BudgetExceeded("configured_cost", snapshot)
-            if snapshot.tokens >= self.limits.tokens:
-                raise BudgetExceeded("tokens", snapshot)
             self._model_calls += 1
             self._configured_cost += configured_cost
             self._active_calls += 1
@@ -79,8 +79,6 @@ class BudgetLedger:
             self._tokens += tokens
             snapshot = self._snapshot_unlocked()
             self._raise_if_elapsed(snapshot)
-            if snapshot.tokens > self.limits.tokens:
-                raise BudgetExceeded("tokens", snapshot)
 
     def check(self) -> None:
         with self._lock:

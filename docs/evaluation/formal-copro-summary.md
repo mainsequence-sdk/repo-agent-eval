@@ -96,9 +96,11 @@ endpoint tables, and report bundle:
 
 ### Graphs
 
-Each basename below is recorded as interactive Plotly `.html` and a static
-`.svg` export. Open the HTML artifact in MLflow to hover, zoom, select, toggle
-series, and export the current view.
+Each basename below is recorded as an `.html` human view and a static `.svg`
+export. Most HTML charts are interactive Plotly views. The dense per-case COPRO
+comparison is intentionally a readable matplotlib SVG inside an HTML report with
+a case-details table, because 100+ paired rows are easier to inspect as a static
+horizontal figure ordered by delta.
 
 | Artifact | Question answered |
 | --- | --- |

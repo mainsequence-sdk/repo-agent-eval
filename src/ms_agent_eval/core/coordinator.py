@@ -848,6 +848,58 @@ class StageCoordinator:
             self._recording_checkpoint(run_id, force=True, flush=True)
             raise
 
+    def resumable_run_id(
+        self,
+        experiment_id: str,
+        *,
+        environment: Mapping[str, str] | None = None,
+        pilot: bool = False,
+    ) -> str | None:
+        """Find the latest unfinished run for this exact frozen revision.
+
+        A normal CLI invocation continues this run.  Creating a second run is
+        deliberate (`--fresh`), rather than an accidental consequence of a
+        terminal interruption or a transient endpoint failure.
+        """
+
+        resolved_environment = (
+            environment if environment is not None else self.workspace.repository.environment()
+        )
+        lock = self.workspace.experiment_lock(experiment_id, environment=resolved_environment)
+        execution_mode = "pilot" if pilot else "benchmark"
+        resumable = {
+            RunLifecycleState.CREATED,
+            RunLifecycleState.RUNNING,
+            RunLifecycleState.PAUSED,
+            RunLifecycleState.AWAITING_HARNESS,
+            RunLifecycleState.FAILED,
+            RunLifecycleState.CANCELLED,
+        }
+        matches: list[tuple[str, str]] = []
+        root = self.artifacts.manifest_root / "runs"
+        if not root.is_dir():
+            return None
+        for path in root.glob("*/run.json"):
+            run_id = path.parent.name
+            try:
+                run = self.ledger.load_run(run_id)
+                if (
+                    run.get("experiment_id") != experiment_id
+                    or run.get("experiment_revision_id") != lock.content_hash
+                    or _execution_mode(run) != execution_mode
+                ):
+                    continue
+                state = self.lifecycle.current(run_id)
+                if state is None or state.state not in resumable:
+                    continue
+                matches.append((
+                    _string(run.get("created_at"), "run created_at"),
+                    run_id,
+                ))
+            except (ConfigurationError, IntegrityError, ResolutionError, OSError, ValueError):
+                continue
+        return max(matches)[1] if matches else None
+
     def _experiment_definition(self, lock: ExperimentLock) -> Mapping[str, object]:
         """Freeze all static, stage-visible inputs needed by this revision."""
 
@@ -1481,8 +1533,7 @@ class StageCoordinator:
             target_kind, target_id = next(
                 (kind, target)
                 for kind, target in self._copro_targets(optimizer)
-                if kind == "global_instructions"
-                or any(case.skill == target for case in training)
+                if kind == "global_instructions" or any(case.skill == target for case in training)
             )
             return (
                 self._copro_proposal_packet(
@@ -1986,6 +2037,99 @@ class StageCoordinator:
             return min(failures, key=lambda item: item[0])[1]
         return None
 
+    def _execute_all_collect_failures(
+        self,
+        packets: Sequence[StagePacket],
+        lock: ExperimentLock,
+        session: _ExecutionSession,
+    ) -> tuple[tuple[StagePacket, ...], StagePacket | None]:
+        """Run independent packets without allowing one failed target to stop siblings.
+
+        A pending harness packet remains a boundary because the coordinator
+        cannot safely infer its outcome. Failed automatic packets are durable
+        evidence and are returned to the caller for target-level handling.
+        """
+
+        if not packets:
+            return (), None
+        configurations = [self._executor(packet) for packet in packets]
+        first = configurations[0]
+        eligible_concurrency = self._stage_concurrency(lock, packets[0].stage, first)
+        failures: list[tuple[int, StagePacket]] = []
+        pending: list[tuple[int, StagePacket]] = []
+
+        def record(position: int, packet: StagePacket, succeeded: bool) -> None:
+            if succeeded:
+                return
+            state = self.ledger.status(packet.packet_id).state
+            if state in {StageState.FAILED, StageState.REJECTED}:
+                failures.append((position, packet))
+            else:
+                pending.append((position, packet))
+
+        if (
+            first.type is not ExecutorType.ENDPOINT
+            or any(configuration.id != first.id for configuration in configurations)
+            or eligible_concurrency <= 1
+        ):
+            for position, packet in enumerate(packets, start=1):
+                record(
+                    position,
+                    packet,
+                    self._ensure_executed(
+                        packet, lock, session, position=position, total=len(packets)
+                    ),
+                )
+            return (
+                tuple(packet for _, packet in sorted(failures)),
+                min(pending, key=lambda item: item[0])[1] if pending else None,
+            )
+
+        total = len(packets)
+        maximum_workers = min(total, eligible_concurrency)
+
+        def execute(position: int, packet: StagePacket) -> bool:
+            worker_session = _ExecutionSession(self, lock, session.environment)
+            return self._ensure_executed(
+                packet,
+                lock,
+                worker_session,
+                position=position,
+                total=total,
+            )
+
+        errors: list[tuple[int, Exception]] = []
+        next_index = 0
+        futures: dict[Future[bool], tuple[int, StagePacket]] = {}
+        with ThreadPoolExecutor(
+            max_workers=maximum_workers,
+            thread_name_prefix=f"ms-agent-eval-{first.id}",
+        ) as pool:
+            while next_index < maximum_workers:
+                position = next_index + 1
+                packet = packets[next_index]
+                futures[pool.submit(execute, position, packet)] = (position, packet)
+                next_index += 1
+            while futures:
+                completed, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    position, packet = futures.pop(future)
+                    try:
+                        record(position, packet, future.result())
+                    except Exception as error:
+                        errors.append((position, error))
+                while next_index < total and len(futures) < maximum_workers:
+                    position = next_index + 1
+                    packet = packets[next_index]
+                    futures[pool.submit(execute, position, packet)] = (position, packet)
+                    next_index += 1
+        if errors:
+            raise min(errors, key=lambda item: item[0])[1]
+        return (
+            tuple(packet for _, packet in sorted(failures)),
+            min(pending, key=lambda item: item[0])[1] if pending else None,
+        )
+
     def _execute_solve_judge_pipeline(
         self,
         solves: Sequence[StagePacket],
@@ -2130,6 +2274,49 @@ class StageCoordinator:
         if len(judges_by_position) != total:
             raise IntegrityError("solve/judge pipeline did not materialize every judgment")
         return tuple(judges_by_position[position] for position in range(1, total + 1)), None
+
+    def _execute_solve_judge_pipeline_collect_failures(
+        self,
+        solves: Sequence[StagePacket],
+        lock: ExperimentLock,
+        session: _ExecutionSession,
+        judge_validation: StagePacket,
+    ) -> tuple[tuple[StagePacket, ...], tuple[StagePacket, ...], StagePacket | None]:
+        """Run independent COPRO candidate edges while retaining local failures.
+
+        A complete candidate must have every validation solve and judgment. If
+        any of its packets fails, its owning COPRO target is left frozen, but
+        other targets continue. The normal benchmark pipeline remains strict:
+        a partial test corpus must not become a published benchmark score.
+        """
+
+        failed_solves, pending = self._execute_all_collect_failures(solves, lock, session)
+        if pending is not None:
+            return (), failed_solves, pending
+        completed_solves = tuple(
+            packet
+            for packet in solves
+            if packet.packet_id not in {item.packet_id for item in failed_solves}
+        )
+        judges = (
+            self._judge_packets(
+                completed_solves[0].run_id,
+                lock,
+                judge_validation,
+                completed_solves,
+            )
+            if completed_solves
+            else ()
+        )
+        failed_judges, pending = self._execute_all_collect_failures(judges, lock, session)
+        if pending is not None:
+            return (), failed_solves + failed_judges, pending
+        completed_judges = tuple(
+            packet
+            for packet in judges
+            if packet.packet_id not in {item.packet_id for item in failed_judges}
+        )
+        return completed_judges, failed_solves + failed_judges, None
 
     def _stage_concurrency(
         self,
@@ -2869,6 +3056,9 @@ class StageCoordinator:
                 **(
                     {
                         "requested_candidate_count": accounting.get("requested_count"),
+                        "proposal_malformed_dropped_count": accounting.get(
+                            "malformed_dropped_count"
+                        ),
                         "proposal_shortfall_count": accounting.get("shortfall_count"),
                         "proposal_degraded": accounting.get("degraded"),
                     }
@@ -3484,9 +3674,7 @@ class StageCoordinator:
                 search_space_type = experiment.optimizer.search_space_type
                 if search_space_type == "skills":
                     if global_context != self.workspace.context.global_context:
-                        raise IntegrityError(
-                            "skill optimization cannot change global instructions"
-                        )
+                        raise IntegrityError("skill optimization cannot change global instructions")
                     if global_instruction_overlay:
                         raise IntegrityError(
                             "skill optimization cannot contain a global instruction overlay"
@@ -3547,33 +3735,28 @@ class StageCoordinator:
                 else None
             )
             source_skill_hashes = {
-                item.id: item.content_hash
-                for item in self.workspace.context.instruction_units
+                item.id: item.content_hash for item in self.workspace.context.instruction_units
             }
             frozen_skill_text_hashes = {
                 skill_id: content_hash(text)
-                for skill_id, text in sorted(
-                    self.workspace.context.skill_contexts.items()
-                )
+                for skill_id, text in sorted(self.workspace.context.skill_contexts.items())
             }
             effective_skill_hashes = {
                 skill_id: content_hash(skill_overlays.get(skill_id, text))
-                for skill_id, text in sorted(
-                    self.workspace.context.skill_contexts.items()
-                )
+                for skill_id, text in sorted(self.workspace.context.skill_contexts.items())
             }
             frozen_skill_bank_hash = content_hash(frozen_skill_text_hashes)
             effective_skill_bank_hash = content_hash(effective_skill_hashes)
             compiled_manifest = None
             candidate_lineage_artifact = None
             search_summary_artifact = None
+            selected_evidence = None
             if phase == "final_fit":
                 selection_reference = None
                 if len(packet.dependencies) > 1:
                     selection_status = self.ledger.status(packet.dependencies[-1])
                     if selection_status.result is not None:
                         selection_reference = selection_status.result.outputs[0].content_id
-                selected_evidence = None
                 if strategy == "copro":
                     lineage = []
                     for item in self.ledger.list(packet.run_id):
@@ -3616,13 +3799,14 @@ class StageCoordinator:
                             str(item.get("target_id")),
                         )
                     )
-                    if not lineage:
-                        raise IntegrityError("final COPRO fit has no candidate lineage")
-                    final_round = max(int(item.get("round") or 0) for item in lineage)
+                    target_failures = self._copro_target_failures(packet.run_id)
+                    final_round = (
+                        max(int(item.get("round") or 0) for item in lineage) if lineage else None
+                    )
                     terminal_selections = [
                         item["selection_artifact"]
                         for item in lineage
-                        if int(item.get("round") or 0) == final_round
+                        if final_round is not None and int(item.get("round") or 0) == final_round
                     ]
                     selected_evidence = {
                         "selected_candidate_id": candidate_id,
@@ -3630,9 +3814,18 @@ class StageCoordinator:
                         "search_space_type": search_space_type,
                         "round": final_round,
                         "terminal_selection_artifacts": terminal_selections,
+                        "target_failures": list(target_failures),
                     }
                     candidate_lineage_artifact = self.artifacts.put_blob(
-                        BytesIO(canonical_json_bytes({"schema_version": 1, "rounds": lineage})),
+                        BytesIO(
+                            canonical_json_bytes(
+                                {
+                                    "schema_version": 1,
+                                    "rounds": lineage,
+                                    "target_failures": list(target_failures),
+                                }
+                            )
+                        ),
                         "application/json",
                     )
                     search_summary_artifact = self.artifacts.put_blob(
@@ -3643,6 +3836,8 @@ class StageCoordinator:
                                     "strategy": "copro",
                                     "configuration": json_value(experiment.optimizer),
                                     "round_count": len(lineage),
+                                    "target_failure_count": len(target_failures),
+                                    "target_failures": list(target_failures),
                                     "selected_candidate_id": candidate_id,
                                     "selected_evidence": selected_evidence,
                                 }
@@ -3666,9 +3861,7 @@ class StageCoordinator:
                         "state_artifact": json_value(state),
                         "solver_instruction_artifact": json_value(instruction_artifact),
                         "output_prefix_artifact": json_value(prefix_artifact),
-                        "global_instruction_artifact": json_value(
-                            global_instruction_artifact
-                        ),
+                        "global_instruction_artifact": json_value(global_instruction_artifact),
                         "frozen_global_context_hash": content_hash(
                             self.workspace.context.global_context
                         ),
@@ -3676,8 +3869,7 @@ class StageCoordinator:
                         "global_instruction_files": (
                             list(self._selected_global_instruction_files(experiment.optimizer))
                             if isinstance(experiment.optimizer, CoproConfiguration)
-                            and experiment.optimizer.search_space_type
-                            == "global_instructions"
+                            and experiment.optimizer.search_space_type == "global_instructions"
                             else []
                         ),
                         "source_global_hashes": {
@@ -3731,9 +3923,7 @@ class StageCoordinator:
                 "solver_instruction_artifact": json_value(instruction_artifact),
                 "output_prefix_artifact": json_value(prefix_artifact),
                 "global_context": global_context,
-                "frozen_global_context_hash": content_hash(
-                    self.workspace.context.global_context
-                ),
+                "frozen_global_context_hash": content_hash(self.workspace.context.global_context),
                 "effective_global_context_hash": content_hash(global_context),
                 "global_instruction_overlay": global_instruction_overlay,
                 "global_instruction_artifact": json_value(global_instruction_artifact),
@@ -3752,6 +3942,7 @@ class StageCoordinator:
                     if search_summary_artifact is not None
                     else None
                 ),
+                "selected_candidate_evidence": selected_evidence,
                 "demonstration_count": sum(
                     len(predictor.demos) for _, predictor in compiled.named_predictors()
                 ),
@@ -3856,9 +4047,7 @@ class StageCoordinator:
                             "mean_score": sum(scores) / len(scores),
                             "case_count": len(scores),
                             "text": text,
-                            "output_prefix": (
-                                ""
-                            ),
+                            "output_prefix": (""),
                             "text_hash": content_hash(text),
                             "normalized_length": len(" ".join(text.split())),
                             "outcomes": outcomes,
@@ -4355,18 +4544,14 @@ class StageCoordinator:
             return ()
         available = set(self.workspace.context.skill_contexts)
         selected = (
-            tuple(sorted(available))
-            if optimizer.skills == "all"
-            else tuple(optimizer.skills)
+            tuple(sorted(available)) if optimizer.skills == "all" else tuple(optimizer.skills)
         )
         unknown = sorted(set(selected) - available)
         if unknown:
             raise PreflightError(f"COPRO targets unknown skills: {unknown}")
         return selected
 
-    def _selected_global_instruction_files(
-        self, optimizer: CoproConfiguration
-    ) -> tuple[str, ...]:
+    def _selected_global_instruction_files(self, optimizer: CoproConfiguration) -> tuple[str, ...]:
         if optimizer.search_space_type != "global_instructions":
             return ()
         configured = self.workspace.repository.workspace.evaluation.instructions.global_paths
@@ -4446,9 +4631,7 @@ class StageCoordinator:
         normalized = {
             "instruction": _string(bundle.get("instruction"), "COPRO bundle instruction"),
             "output_prefix": _string(bundle.get("output_prefix"), "COPRO bundle prefix"),
-            "global_context": _string(
-                bundle.get("global_context"), "COPRO bundle global context"
-            ),
+            "global_context": _string(bundle.get("global_context"), "COPRO bundle global context"),
             "global_overlay": _text(
                 bundle.get("global_overlay", ""), "COPRO bundle global overlay"
             ),
@@ -4511,14 +4694,12 @@ class StageCoordinator:
         selected_headings = {
             line.strip()
             for line in selected_lines
-            if line.strip().startswith("#")
-            and line.strip().lstrip("#").startswith(" ")
+            if line.strip().startswith("#") and line.strip().lstrip("#").startswith(" ")
         }
         candidate_headings = {
             line.strip()
             for line in candidate_lines
-            if line.strip().startswith("#")
-            and line.strip().lstrip("#").startswith(" ")
+            if line.strip().startswith("#") and line.strip().lstrip("#").startswith(" ")
         }
         return {
             "kind": "structural_delta_v1",
@@ -4540,9 +4721,7 @@ class StageCoordinator:
                     ),
                     "selected_line_range": [selected_start + 1, selected_end],
                     "candidate_line_range": [candidate_start + 1, candidate_end],
-                    "before": cls._copro_text_excerpt(
-                        selected_lines[selected_start:selected_end]
-                    ),
+                    "before": cls._copro_text_excerpt(selected_lines[selected_start:selected_end]),
                     "after": cls._copro_text_excerpt(
                         candidate_lines[candidate_start:candidate_end]
                     ),
@@ -4583,9 +4762,7 @@ class StageCoordinator:
                 raise IntegrityError("COPRO history candidate text hash is invalid")
             score = _number(item.get("mean_score"), "history mean score")
             selected = text_hash == current_text_hash
-            outcomes = json_value(
-                _list(item.get("outcomes", []), "COPRO history outcomes")
-            )
+            outcomes = json_value(_list(item.get("outcomes", []), "COPRO history outcomes"))
             assert isinstance(outcomes, list)
             value: dict[str, object] = {
                 "candidate_id": _string(
@@ -4646,16 +4823,13 @@ class StageCoordinator:
             raise IntegrityError("COPRO proposal requires COPRO configuration")
         skills = _mapping(bundle.get("skills", {}), "COPRO bundle skills")
         if target_kind == "global_instructions":
-            current_text = _string(
-                bundle.get("global_overlay"), "global instruction bundle"
-            )
+            current_text = _string(bundle.get("global_overlay"), "global instruction bundle")
             current_prefix = ""
             selected_files = self._selected_global_instruction_files(optimizer)
             requirements = (
                 "Rewrite only the configured global instruction bundle. Preserve its technical "
                 "facts and repository-wide responsibilities. Do not rewrite skills or the DSPy "
-                "signature. Selected source paths: "
-                + ", ".join(selected_files)
+                "signature. Selected source paths: " + ", ".join(selected_files)
             )
         else:
             current_text = _string(
@@ -4775,9 +4949,7 @@ class StageCoordinator:
                 "skills": dict(_mapping(bundle.get("skills", {}), "COPRO bundle skills")),
             }
             if target_kind == "global_instructions":
-                overlay = _string(
-                    proposed.get("instruction"), "proposed global instruction bundle"
-                )
+                overlay = _string(proposed.get("instruction"), "proposed global instruction bundle")
                 next_bundle["global_overlay"] = overlay
                 next_bundle["global_context"] = self._effective_global_context(
                     optimizer,
@@ -4937,10 +5109,14 @@ class StageCoordinator:
         bundle: Mapping[str, object] = initial_bundle
         dependencies: tuple[StagePacket, ...] = ()
         history_by_target: dict[str, list[Mapping[str, object]]] = {}
+        failed_targets: set[tuple[str, str]] = set()
         for round_number in range(1, optimizer.depth + 1):
             targets = self._copro_targets(optimizer)
             target_batches = (targets,)
             for target_batch in target_batches:
+                target_batch = tuple(
+                    target for target in target_batch if target not in failed_targets
+                )
                 if not target_batch:
                     continue
 
@@ -5003,82 +5179,126 @@ class StageCoordinator:
                     continue
 
                 while True:
-                    pending = self._execute_all(tuple(proposals), lock, session)
-                    if pending is None:
-                        break
-                    pending_status = self.ledger.status(pending.packet_id)
-                    pending_context = _mapping(
-                        self._input(pending, "optimizer_context"),
-                        "optimizer context",
-                    )
-                    is_context_failure = bool(
-                        pending_status.result is not None
-                        and pending_status.result.error is not None
-                        and pending_status.result.error.kind == "context_window_exceeded"
-                    )
-                    if (
-                        not is_context_failure
-                        or not pending_context.get("scored_attempts")
-                        or pending_context.get("history_reduction")
-                        == "structural_delta_v1"
-                    ):
-                        return self._blocked_progress(
-                            run_id,
-                            lock.configuration.id,
-                            pending,
-                        )
-                    pending_index = next(
-                        (
-                            index
-                            for index, item in enumerate(target_inputs)
-                            if item[4].packet_id == pending.packet_id
-                        ),
-                        None,
-                    )
-                    if pending_index is None:
-                        raise IntegrityError(
-                            "failed COPRO proposal is absent from its target batch"
-                        )
-                    (
-                        target_kind,
-                        target_id,
-                        target_training_cases,
-                        target_validation_cases,
-                        _,
-                    ) = target_inputs[pending_index]
-                    reduced = self._copro_proposal_packet(
-                        run_id,
+                    failed_proposals, pending = self._execute_all_collect_failures(
+                        tuple(proposals),
                         lock,
-                        judge_validation=judge_validation,
-                        bundle=frozen_bundle,
-                        target_kind=target_kind,
-                        target_id=target_id,
-                        round_number=round_number,
-                        scope=scope,
-                        fitting_cases=target_training_cases,
-                        history=history_by_target.get(target_id, ()),
-                        dependencies=dependencies,
-                        history_representation="structural_delta_v1",
+                        session,
                     )
+                    if pending is None:
+                        replacements: list[tuple[int, StagePacket]] = []
+                        for failed in failed_proposals:
+                            failed_index = next(
+                                (
+                                    index
+                                    for index, item in enumerate(target_inputs)
+                                    if item[4].packet_id == failed.packet_id
+                                ),
+                                None,
+                            )
+                            if failed_index is None:
+                                raise IntegrityError(
+                                    "failed COPRO proposal is absent from its target batch"
+                                )
+                            status = self.ledger.status(failed.packet_id)
+                            context = _mapping(
+                                self._input(failed, "optimizer_context"),
+                                "optimizer context",
+                            )
+                            is_context_failure = bool(
+                                status.result is not None
+                                and status.result.error is not None
+                                and status.result.error.kind == "context_window_exceeded"
+                            )
+                            if (
+                                not is_context_failure
+                                or not context.get("scored_attempts")
+                                or context.get("history_reduction") == "structural_delta_v1"
+                            ):
+                                continue
+                            (
+                                target_kind,
+                                target_id,
+                                target_training_cases,
+                                target_validation_cases,
+                                _,
+                            ) = target_inputs[failed_index]
+                            reduced = self._copro_proposal_packet(
+                                run_id,
+                                lock,
+                                judge_validation=judge_validation,
+                                bundle=frozen_bundle,
+                                target_kind=target_kind,
+                                target_id=target_id,
+                                round_number=round_number,
+                                scope=scope,
+                                fitting_cases=target_training_cases,
+                                history=history_by_target.get(target_id, ()),
+                                dependencies=dependencies,
+                                history_representation="structural_delta_v1",
+                            )
+                            self._emit_packet(
+                                "optimizer_history_reduced",
+                                reduced,
+                                position=failed_index + 1,
+                                total=len(target_inputs),
+                                details={
+                                    "source_packet_id": failed.packet_id,
+                                    "history_reduction": "structural_delta_v1",
+                                    "reason": "complete_history_exceeded_model_context",
+                                },
+                            )
+                            replacements.append((failed_index, reduced))
+                        if not replacements:
+                            break
+                        for failed_index, reduced in replacements:
+                            (
+                                target_kind,
+                                target_id,
+                                target_training_cases,
+                                target_validation_cases,
+                                _,
+                            ) = target_inputs[failed_index]
+                            proposals[failed_index] = reduced
+                            target_inputs[failed_index] = (
+                                target_kind,
+                                target_id,
+                                target_training_cases,
+                                target_validation_cases,
+                                reduced,
+                            )
+                        continue
+                    return self._blocked_progress(
+                        run_id,
+                        lock.configuration.id,
+                        pending,
+                    )
+
+                failed_ids = {packet.packet_id for packet in failed_proposals}
+                retained_inputs = []
+                for position, target_input in enumerate(target_inputs, start=1):
+                    target_kind, target_id, _, _, proposal = target_input
+                    if proposal.packet_id not in failed_ids:
+                        retained_inputs.append(target_input)
+                        continue
+                    failed_targets.add((target_kind, target_id))
+                    status = self.ledger.status(proposal.packet_id)
+                    error = status.result.error if status.result is not None else None
                     self._emit_packet(
-                        "optimizer_history_reduced",
-                        reduced,
-                        position=pending_index + 1,
+                        "optimizer_target_skipped",
+                        proposal,
+                        position=position,
                         total=len(target_inputs),
                         details={
-                            "source_packet_id": pending.packet_id,
-                            "history_reduction": "structural_delta_v1",
-                            "reason": "complete_history_exceeded_model_context",
+                            "target_kind": target_kind,
+                            "target_id": target_id,
+                            "error_kind": error.kind if error is not None else status.state.value,
+                            "error": error.message if error is not None else status.state.value,
+                            "reason": "target_proposal_failed",
                         },
                     )
-                    proposals[pending_index] = reduced
-                    target_inputs[pending_index] = (
-                        target_kind,
-                        target_id,
-                        target_training_cases,
-                        target_validation_cases,
-                        reduced,
-                    )
+                target_inputs = retained_inputs
+                if not target_inputs:
+                    continue
 
                 prepared: list[
                     tuple[
@@ -5093,6 +5313,7 @@ class StageCoordinator:
                     ]
                 ] = []
                 all_fits: list[StagePacket] = []
+                fit_targets: dict[str, tuple[str, str, StagePacket]] = {}
                 for (
                     target_kind,
                     target_id,
@@ -5116,6 +5337,8 @@ class StageCoordinator:
                         for candidate in candidates
                     )
                     all_fits.extend(fits)
+                    for fit in fits:
+                        fit_targets[fit.packet_id] = (target_kind, target_id, proposal)
                     prepared.append(
                         (
                             target_kind,
@@ -5128,9 +5351,51 @@ class StageCoordinator:
                             fits,
                         )
                     )
-                pending = self._execute_all(tuple(all_fits), lock, session)
+                failed_fits, pending = self._execute_all_collect_failures(
+                    tuple(all_fits),
+                    lock,
+                    session,
+                )
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
+
+                failed_fit_targets: dict[tuple[str, str], StagePacket] = {}
+                for failed in failed_fits:
+                    target_kind, target_id, proposal = fit_targets[failed.packet_id]
+                    failed_fit_targets.setdefault((target_kind, target_id), proposal)
+                for (target_kind, target_id), proposal in failed_fit_targets.items():
+                    failed_targets.add((target_kind, target_id))
+                    status = self.ledger.status(proposal.packet_id)
+                    error_status = next(
+                        item
+                        for item in failed_fits
+                        if fit_targets[item.packet_id][:2] == (target_kind, target_id)
+                    )
+                    error = self.ledger.status(error_status.packet_id).result
+                    self._emit_packet(
+                        "optimizer_target_skipped",
+                        proposal,
+                        details={
+                            "target_kind": target_kind,
+                            "target_id": target_id,
+                            "error_kind": (
+                                error.error.kind
+                                if error is not None and error.error is not None
+                                else status.state.value
+                            ),
+                            "error": (
+                                error.error.message
+                                if error is not None and error.error is not None
+                                else status.state.value
+                            ),
+                            "reason": "candidate_fit_failed",
+                        },
+                    )
+                prepared = [
+                    item for item in prepared if (item[0], item[1]) not in failed_fit_targets
+                ]
+                if not prepared:
+                    continue
 
                 plans: list[_CoproTargetPlan] = []
                 all_solves: list[StagePacket] = []
@@ -5171,20 +5436,66 @@ class StageCoordinator:
                         )
                     )
 
-                all_judges, pending = self._execute_solve_judge_pipeline(
-                    tuple(all_solves),
-                    lock,
-                    session,
-                    judge_validation,
+                all_judges, failed_execution_packets, pending = (
+                    self._execute_solve_judge_pipeline_collect_failures(
+                        tuple(all_solves),
+                        lock,
+                        session,
+                        judge_validation,
+                    )
                 )
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
 
+                solve_targets = {
+                    solve.packet_id: (plan.target_kind, plan.target_id, plan.proposal)
+                    for plan in plans
+                    for solve in plan.solves
+                }
+                failed_execution_targets: dict[
+                    tuple[str, str], tuple[StagePacket, StagePacket]
+                ] = {}
+                for failed in failed_execution_packets:
+                    solve_packet_id = (
+                        failed.packet_id
+                        if failed.stage is StageKind.SOLVE
+                        else failed.dependencies[-1]
+                    )
+                    target_kind, target_id, proposal = solve_targets[solve_packet_id]
+                    failed_execution_targets.setdefault(
+                        (target_kind, target_id),
+                        (proposal, failed),
+                    )
+                for (target_kind, target_id), (
+                    proposal,
+                    failed,
+                ) in failed_execution_targets.items():
+                    failed_targets.add((target_kind, target_id))
+                    status = self.ledger.status(failed.packet_id)
+                    error = status.result.error if status.result is not None else None
+                    self._emit_packet(
+                        "optimizer_target_skipped",
+                        proposal,
+                        details={
+                            "target_kind": target_kind,
+                            "target_id": target_id,
+                            "error_kind": error.kind if error is not None else status.state.value,
+                            "error": error.message if error is not None else status.state.value,
+                            "reason": "candidate_evaluation_failed",
+                        },
+                    )
+                plans = [
+                    plan
+                    for plan in plans
+                    if (plan.target_kind, plan.target_id) not in failed_execution_targets
+                ]
+                if not plans:
+                    continue
+
                 selections: list[StagePacket] = []
-                judge_offset = 0
+                judge_by_solve = {judge.dependencies[-1]: judge for judge in all_judges}
                 for plan in plans:
-                    target_judges = all_judges[judge_offset : judge_offset + len(plan.solves)]
-                    judge_offset += len(plan.solves)
+                    target_judges = tuple(judge_by_solve[solve.packet_id] for solve in plan.solves)
                     selections.append(
                         self._copro_selection_packet(
                             run_id,
@@ -5201,9 +5512,40 @@ class StageCoordinator:
                             current_candidate_id=plan.current_candidate_id,
                         )
                     )
-                pending = self._execute_all(tuple(selections), lock, session)
+                failed_selections, pending = self._execute_all_collect_failures(
+                    tuple(selections),
+                    lock,
+                    session,
+                )
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
+
+                failed_selection_ids = {packet.packet_id for packet in failed_selections}
+                retained_plans: list[_CoproTargetPlan] = []
+                retained_selections: list[StagePacket] = []
+                for plan, selection in zip(plans, selections, strict=True):
+                    if selection.packet_id not in failed_selection_ids:
+                        retained_plans.append(plan)
+                        retained_selections.append(selection)
+                        continue
+                    failed_targets.add((plan.target_kind, plan.target_id))
+                    status = self.ledger.status(selection.packet_id)
+                    error = status.result.error if status.result is not None else None
+                    self._emit_packet(
+                        "optimizer_target_skipped",
+                        plan.proposal,
+                        details={
+                            "target_kind": plan.target_kind,
+                            "target_id": plan.target_id,
+                            "error_kind": error.kind if error is not None else status.state.value,
+                            "error": error.message if error is not None else status.state.value,
+                            "reason": "candidate_selection_failed",
+                        },
+                    )
+                plans = retained_plans
+                selections = retained_selections
+                if not plans:
+                    continue
 
                 selected_by_target: dict[str, Mapping[str, object]] = {}
                 for plan, selection in zip(plans, selections, strict=True):
@@ -5249,8 +5591,9 @@ class StageCoordinator:
                     }
                 dependencies = tuple(selections)
 
-        if not dependencies:
-            raise IntegrityError("COPRO search produced no selection")
+        # Every target may legitimately fail at the endpoint boundary. In that
+        # case the final fit materializes the unchanged baseline bundle and the
+        # report carries the target-level failures rather than failing the run.
         return _CoproSearchResult(bundle, dependencies)
 
     def _advance_copro(
@@ -5286,7 +5629,7 @@ class StageCoordinator:
             candidate=self._copro_candidate(search.bundle),
             phase="final_fit",
             validation_assignment_hash=validation_assignment_hash,
-            selection=search.dependencies[-1],
+            selection=search.dependencies[-1] if search.dependencies else None,
             upstream_dependencies=search.dependencies[:-1],
         )
         if not self._ensure_executed(final_fit, lock, session):
@@ -5294,6 +5637,92 @@ class StageCoordinator:
         if through in {StageKind.OPTIMIZE.value, StageKind.SELECT.value, StageKind.FIT.value}:
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.FIT)
         return final_fit
+
+    def _copro_target_failures(self, run_id: str) -> tuple[Mapping[str, object], ...]:
+        """Return COPRO target failures, including candidate evaluation edges."""
+
+        statuses = self.ledger.list(run_id)
+        packets = {status.packet.packet_id: status.packet for status in statuses}
+        failures = []
+        for status in statuses:
+            if status.state not in {StageState.FAILED, StageState.REJECTED}:
+                continue
+            if not self._is_copro_target_evaluation_packet(status.packet):
+                continue
+            context = self._copro_target_context(status.packet, packets)
+            if context is None:
+                continue
+            error = status.result.error if status.result is not None else None
+            failures.append(
+                {
+                    "target_kind": context.get("target_kind"),
+                    "target_id": context.get("target_id"),
+                    "round": context.get("round"),
+                    "stage": status.packet.stage.value,
+                    "error_kind": error.kind if error is not None else status.state.value,
+                    "error": error.message if error is not None else status.state.value,
+                    "packet_id": status.packet.packet_id,
+                }
+            )
+        return tuple(
+            sorted(
+                failures,
+                key=lambda item: (
+                    int(item.get("round") or 0),
+                    str(item.get("target_kind")),
+                    str(item.get("target_id")),
+                    str(item.get("packet_id")),
+                ),
+            )
+        )
+
+    def _is_copro_target_evaluation_packet(self, packet: StagePacket) -> bool:
+        """Whether a failed packet belongs to a target-local COPRO search edge."""
+
+        if packet.stage is StageKind.OPTIMIZE:
+            return packet.output_schema == "copro-proposal-v1"
+        if packet.output_schema == "copro-selection-v1":
+            return True
+        if packet.stage is StageKind.FIT:
+            training = _mapping(self._input(packet, "training_set"), "training set")
+            context = _mapping(training.get("context"), "training context")
+            return context.get("phase") == "copro_candidate"
+        if packet.stage is StageKind.SOLVE:
+            case = _mapping(self._input(packet, "case"), "solve case")
+            return case.get("evaluation_phase") == "validation" and case.get("strategy") == "copro"
+        if packet.stage is StageKind.JUDGE:
+            evaluation = _mapping(self._input(packet, "evaluation"), "judge evaluation")
+            return (
+                evaluation.get("evaluation_phase") == "validation"
+                and evaluation.get("strategy") == "copro"
+            )
+        return False
+
+    def _copro_target_context(
+        self,
+        packet: StagePacket,
+        packets: Mapping[str, StagePacket],
+    ) -> Mapping[str, object] | None:
+        """Find the proposal ancestor that owns a target-local COPRO edge."""
+
+        queue = [packet]
+        visited: set[str] = set()
+        while queue:
+            current = queue.pop(0)
+            if current.packet_id in visited:
+                continue
+            visited.add(current.packet_id)
+            if current.stage is StageKind.OPTIMIZE and current.output_schema == "copro-proposal-v1":
+                return _mapping(
+                    self._input(current, "optimizer_context"),
+                    "optimizer context",
+                )
+            queue.extend(
+                packets[dependency]
+                for dependency in current.dependencies
+                if dependency in packets and dependency not in visited
+            )
+        return None
 
     def _validation_assignment(self, lock: ExperimentLock) -> tuple[Mapping[str, str], str]:
         validation = lock.configuration.validation
@@ -6115,9 +6544,7 @@ class StageCoordinator:
                 if not identity[0]:
                     raise IntegrityError("COPRO proposal candidate instruction is empty")
                 if prefix.strip():
-                    raise IntegrityError(
-                        "COPRO candidates cannot change the frozen output prefix"
-                    )
+                    raise IntegrityError("COPRO candidates cannot change the frozen output prefix")
                 if identity == original or identity in identities:
                     raise IntegrityError("COPRO proposal candidates must be new and unique")
                 identities.add(identity)
@@ -6240,13 +6667,9 @@ class StageCoordinator:
                 )
                 if search_space_type == "skills":
                     if frozen_global_hash != effective_global_hash:
-                        raise IntegrityError(
-                            "skill optimization changed the global context hash"
-                        )
+                        raise IntegrityError("skill optimization changed the global context hash")
                     if payload.get("global_instruction_overlay") != "":
-                        raise IntegrityError(
-                            "skill optimization changed global instructions"
-                        )
+                        raise IntegrityError("skill optimization changed global instructions")
                     if payload.get("global_instruction_artifact") is not None:
                         raise IntegrityError(
                             "skill optimization contains a global instruction artifact"
@@ -6334,8 +6757,9 @@ class StageCoordinator:
     def _validate_result_budget(packet: StagePacket, result: StageResult) -> None:
         for key, usage_key, limit in (
             ("model_calls", "completed_calls", packet.budget.model_calls),
-            ("tokens", "tokens", packet.budget.tokens),
         ):
+            if limit is None:
+                continue
             value = result.usage.get(usage_key)
             if value is None and usage_key == "completed_calls":
                 value = result.usage.get("model_calls")
@@ -6401,7 +6825,9 @@ class StageCoordinator:
             BudgetLimits(
                 model_calls=budget.model_calls * model_call_multiplier,
                 configured_cost=float("inf"),
-                tokens=budget.tokens,
+                # Token usage is recorded in the ledger but never constrains
+                # execution. Legacy locks may still contain this field.
+                tokens=None,
                 wall_seconds=budget.wall_seconds,
                 concurrency=concurrency,
             )
@@ -6650,9 +7076,7 @@ def _upgrade_frozen_workspace_payload(
     if version == 16:
         return _upgrade_frozen_copro_search_spaces(upgraded)
     if version == 15:
-        return _upgrade_frozen_copro_search_spaces(
-            _upgrade_frozen_recording_payload(upgraded)
-        )
+        return _upgrade_frozen_copro_search_spaces(_upgrade_frozen_recording_payload(upgraded))
     if version == 14:
         experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
         upgraded_experiments: dict[str, object] = {}
@@ -6678,9 +7102,7 @@ def _upgrade_frozen_workspace_payload(
                 }
             upgraded_experiments[experiment_id] = experiment
         upgraded["experiments"] = upgraded_experiments
-        return _upgrade_frozen_copro_search_spaces(
-            _upgrade_frozen_recording_payload(upgraded)
-        )
+        return _upgrade_frozen_copro_search_spaces(_upgrade_frozen_recording_payload(upgraded))
 
     stages = _mapping(upgraded.get("stages"), "frozen workspace stages")
     models = _mapping(upgraded.get("models"), "frozen workspace models")
@@ -6810,9 +7232,7 @@ def _upgrade_frozen_workspace_payload(
     upgraded["stages"] = upgraded_stages
     upgraded["experiments"] = upgraded_experiments
     upgraded.setdefault("comparisons", {})
-    return _upgrade_frozen_copro_search_spaces(
-        _upgrade_frozen_recording_payload(upgraded)
-    )
+    return _upgrade_frozen_copro_search_spaces(_upgrade_frozen_recording_payload(upgraded))
 
 
 def _upgrade_frozen_copro_search_spaces(upgraded: dict[str, object]) -> dict[str, object]:
@@ -7072,8 +7492,7 @@ def _dspy_execution_failure(role: str, result: ProgramResult) -> AutomaticExecut
                 for call in result.calls
                 if isinstance(call.parameters.get("max_tokens"), int)
                 and not isinstance(call.parameters.get("max_tokens"), bool)
-                and call.usage.get("completion_tokens")
-                == call.parameters.get("max_tokens")
+                and call.usage.get("completion_tokens") == call.parameters.get("max_tokens")
             ),
             None,
         )

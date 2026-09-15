@@ -95,7 +95,9 @@ comparisons: {}
   `replicate` with `samples`.
 - Solver, optimizer, and judge are selected inside each experiment arm even
   when deliberately assigned profiles backed by the same deployment.
-- Every stage has a finite budget.
+- Every stage limits model calls and wall-clock time. Token usage is measured
+  and reported, not used as a framework execution ceiling; endpoint context
+  preflight is the request-fit boundary.
 - An optimization experiment names its baseline with `based_on`, selects
   exactly one `optimizer.strategy`, declares that strategy's search space, and
   configures one fixed validation holdout. COPRO carries state across its
@@ -279,7 +281,7 @@ stages:
     reuse:
       policy: replicate
       samples: 3
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
 ```
 
 Replicates share one semantic `work_id` but receive separate attempt identities
@@ -309,8 +311,8 @@ experiments:
       search: {k: [1, 2, 4]}
     validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget:
-      solver: {model_calls: 1000, tokens: 4000000}
-      judge: {model_calls: 3000, tokens: 6000000}
+      solver: {model_calls: 1000}
+      judge: {model_calls: 3000}
       wall_seconds: 7200
 ```
 
@@ -343,9 +345,9 @@ experiments:
       metric: {name: rubric_mean_score}
     validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget:
-      optimizer: {model_calls: 100, tokens: 400000}
-      solver: {model_calls: 5000, tokens: 20000000}
-      judge: {model_calls: 15000, tokens: 30000000}
+      optimizer: {model_calls: 100}
+      solver: {model_calls: 5000}
+      judge: {model_calls: 15000}
       wall_seconds: 14400
 ```
 

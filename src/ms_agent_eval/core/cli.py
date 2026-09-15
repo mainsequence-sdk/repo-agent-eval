@@ -204,6 +204,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("target", help="Experiment id, or the literal 'resume'.")
     run.add_argument("run_id", nargs="?", help="Run id when target is 'resume'.")
     run.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Create a new run instead of resuming the matching unfinished revision.",
+    )
+    run.add_argument(
         "--through",
         choices=(
             "author",
@@ -627,6 +632,8 @@ def _run(
         if arguments.target == "resume":
             if not arguments.run_id:
                 raise ConfigurationError("run resume requires a run id")
+            if arguments.fresh:
+                raise ConfigurationError("--fresh cannot be used with 'run resume'")
             return json_value(
                 runner.resume(
                     arguments.run_id,
@@ -637,11 +644,12 @@ def _run(
         if arguments.run_id is not None:
             raise ConfigurationError("a run id is only valid with 'run resume'")
         return json_value(
-            runner.run(
+            runner.run_or_resume(
                 arguments.target,
                 environment=environment,
                 through=arguments.through,
                 pilot=pilot,
+                fresh=arguments.fresh,
             )
         )
     from .coordinator import StageCoordinator

@@ -35,8 +35,8 @@ optimize-solver:
       k: [1, 2, 4]
   validation: {strategy: holdout, fraction: 0.2, seed: 0}
   budget:
-    solver: {model_calls: 100, tokens: 250000}
-    judge: {model_calls: 300, tokens: 500000}
+    solver: {model_calls: 100}
+    judge: {model_calls: 300}
     wall_seconds: 1800
 ```
 
@@ -61,9 +61,9 @@ optimize-solver:
     metric: {name: rubric_mean_score}
   validation: {strategy: holdout, fraction: 0.2, seed: 0}
   budget:
-    optimizer: {model_calls: 100, tokens: 400000}
-    solver: {model_calls: 5000, tokens: 20000000}
-    judge: {model_calls: 15000, tokens: 30000000}
+    optimizer: {model_calls: 100}
+    solver: {model_calls: 5000}
+    judge: {model_calls: 15000}
     wall_seconds: 14400
 ```
 

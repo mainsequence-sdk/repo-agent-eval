@@ -1968,19 +1968,18 @@ class RecorderProjector:
                     ),
                 )
                 artifacts["graphs/copro-case-paired-score.svg"] = (
-                    _dumbbell_svg(
-                        "COPRO paired score by test case · ordered by optimization delta",
-                        tuple(
-                            (
-                                f"{item.get('case_id')} · repetition {item.get('repetition')}",
-                                _number_or(item.get("baseline_score"), 0.0),
-                                _number_or(item.get("optimized_score"), 0.0),
-                            )
-                            for item in ordered_cases
-                        ),
+                    _case_paired_score_svg(
+                        ordered_cases,
                         description=_chart_description("copro-case-paired-score.svg"),
                     ),
                     "image/svg+xml",
+                )
+                artifacts["graphs/copro-case-paired-score.html"] = (
+                    _case_paired_score_html(
+                        ordered_cases,
+                        description=_chart_description("copro-case-paired-score.svg"),
+                    ),
+                    "text/html",
                 )
                 artifacts["graphs/copro-case-delta-distribution.svg"] = (
                     _delta_histogram_svg(
@@ -3107,6 +3106,8 @@ def _interactive_plotly_charts(
     artifacts: dict[str, tuple[bytes, str]] = {}
 
     def add(static_name: str, figure: go.Figure, *, height: int = 560) -> None:
+        if static_name == "copro-case-paired-score.svg":
+            return
         static_path = f"graphs/{static_name}"
         if static_path not in generated_static_paths:
             return
@@ -3350,31 +3351,9 @@ def _interactive_plotly_charts(
                     )
                 ),
                 height=max(560, 34 * len(skill_rows) + 190),
-            )
+        )
         case_rows = _comparison_rows(comparison, "cases")
         if case_rows:
-            ordered_cases = sorted(
-                case_rows,
-                key=lambda item: (
-                    _number_or(item.get("delta"), 0.0),
-                    str(item.get("case_id")),
-                    _int_or(item.get("repetition"), 0),
-                ),
-            )
-            add(
-                "copro-case-paired-score.svg",
-                _paired_plotly_figure(
-                    tuple(
-                        (
-                            f"{item.get('case_id')} · repetition {item.get('repetition')}",
-                            _number_or(item.get("baseline_score"), 0.0),
-                            _number_or(item.get("optimized_score"), 0.0),
-                        )
-                        for item in ordered_cases
-                    )
-                ),
-                height=max(620, 30 * len(ordered_cases) + 200),
-            )
             delta_values = [_number_or(item.get("delta"), 0.0) for item in case_rows]
             histogram = go.Figure(
                 go.Histogram(
@@ -3823,6 +3802,221 @@ def _plotly_html(static_name: str, figure: go.Figure, *, height: int) -> bytes:
     ).encode("utf-8")
 
 
+def _case_paired_score_svg(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    description: str = "",
+) -> bytes:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from matplotlib.backends.backend_svg import FigureCanvasSVG
+    from matplotlib.figure import Figure
+
+    row_count = len(rows)
+    figure_height = max(7.5, 0.27 * row_count + 2.8)
+    figure = Figure(figsize=(15.5, figure_height), dpi=130, facecolor="white")
+    axis = figure.add_subplot(111)
+
+    labels = [_case_chart_label(row) for row in rows]
+    baseline = [_number_or(row.get("baseline_score"), 0.0) for row in rows]
+    optimized = [_number_or(row.get("optimized_score"), 0.0) for row in rows]
+    deltas = [candidate - original for original, candidate in zip(baseline, optimized, strict=True)]
+    y_positions = list(range(row_count))
+
+    axis.axvline(0, color="#cbd5e1", linewidth=1)
+    axis.axvline(1, color="#cbd5e1", linewidth=1)
+    axis.axvline(0.5, color="#e2e8f0", linewidth=1, linestyle=":")
+    for y, original, candidate, delta in zip(
+        y_positions, baseline, optimized, deltas, strict=True
+    ):
+        color = "#137333" if delta > 0 else "#b3261e" if delta < 0 else "#64748b"
+        axis.plot([original, candidate], [y, y], color=color, linewidth=2.2, alpha=0.72)
+    axis.scatter(baseline, y_positions, label="Baseline", color="#4C78A8", s=22, zorder=3)
+    axis.scatter(
+        optimized,
+        y_positions,
+        label="COPRO optimized",
+        color="#F58518",
+        s=22,
+        zorder=4,
+    )
+    for y, original, candidate, delta in zip(
+        y_positions, baseline, optimized, deltas, strict=True
+    ):
+        axis.text(
+            1.025,
+            y,
+            f"{delta:+.3f}",
+            va="center",
+            ha="left",
+            fontsize=7.5,
+            color="#137333" if delta > 0 else "#b3261e" if delta < 0 else "#475569",
+        )
+        axis.text(
+            -0.025,
+            y,
+            f"{original:.2f}->{candidate:.2f}",
+            va="center",
+            ha="right",
+            fontsize=7,
+            color="#475569",
+        )
+
+    axis.set_xlim(-0.17, 1.13)
+    axis.set_ylim(-0.6, max(0.6, row_count - 0.4))
+    axis.set_yticks(y_positions)
+    axis.set_yticklabels(labels, fontsize=7.5)
+    axis.invert_yaxis()
+    axis.set_xlabel("Judge score from 0 to 1")
+    axis.set_title(
+        "COPRO baseline versus optimized by test case, ordered by delta",
+        loc="left",
+        fontsize=14,
+        fontweight="bold",
+        pad=20,
+    )
+    if description:
+        figure.text(0.01, 0.975, description, ha="left", va="top", fontsize=8.5, color="#475569")
+    axis.grid(axis="x", color="#e2e8f0", linewidth=0.8)
+    axis.legend(loc="lower right", frameon=False, ncols=2)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_visible(False)
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+
+    buffer = BytesIO()
+    FigureCanvasSVG(figure).print_svg(buffer)
+    return buffer.getvalue()
+
+
+def _case_chart_label(row: Mapping[str, object]) -> str:
+    skill = str(row.get("skill_name") or "unknown")
+    title = str(row.get("case_title") or row.get("case_id") or "case")
+    repetition = _int_or(row.get("repetition"), 0)
+    label = f"{skill} | {title}"
+    if repetition > 1:
+        label = f"{label} | rep {repetition}"
+    return _shorten_middle(label, 78)
+
+
+def _shorten_middle(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    keep = max(6, (width - 3) // 2)
+    return f"{value[:keep].rstrip()}...{value[-keep:].lstrip()}"
+
+
+def _case_paired_score_html(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    description: str = "",
+) -> bytes:
+    deltas = [_number_or(row.get("delta"), 0.0) for row in rows]
+    improved = sum(1 for value in deltas if value > 1e-9)
+    regressed = sum(1 for value in deltas if value < -1e-9)
+    unchanged = len(deltas) - improved - regressed
+    mean_delta = statistics.fmean(deltas) if deltas else 0.0
+    best = max(deltas) if deltas else 0.0
+    worst = min(deltas) if deltas else 0.0
+    table_rows = "\n".join(_case_paired_table_row(row) for row in rows)
+    template = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>COPRO baseline versus optimized by case</title>
+<style>
+:root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+body { margin: 0 auto; max-width: 1500px; padding: 28px; line-height: 1.4; }
+h1 { margin: 0 0 8px; font-size: 28px; }
+p { color: #475569; margin: 0 0 16px; }
+.summary { display: grid; gap: 10px; grid-template-columns: repeat(5, minmax(130px, 1fr)); margin: 18px 0 22px; }
+.metric { border-top: 3px solid #cbd5e1; padding-top: 8px; }
+.metric strong { display: block; font-size: 24px; }
+.metric span { color: #64748b; font-size: 12px; }
+.chart { overflow-x: auto; border: 1px solid #cbd5e1; background: white; padding: 10px; }
+.chart img { display: block; min-width: 1180px; width: 100%; height: auto; }
+.legend { color: #64748b; font-size: 12px; margin: 10px 0 22px; }
+table { border-collapse: collapse; font-size: 12px; margin-top: 18px; width: 100%; }
+thead th { background: #f8fafc; position: sticky; top: 0; z-index: 1; }
+th, td { border-bottom: 1px solid #e2e8f0; padding: 7px 8px; text-align: right; vertical-align: top; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+td.case-id { color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-width: 320px; overflow-wrap: anywhere; }
+.delta-pos { color: #137333; font-weight: 700; }
+.delta-neg { color: #b3261e; font-weight: 700; }
+.delta-zero { color: #475569; }
+@media (max-width: 900px) {
+  body { padding: 16px; }
+  .summary { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+}
+@media (prefers-color-scheme: dark) {
+  body { background: #0f172a; color: #e2e8f0; }
+  p, .metric span, .legend, td.case-id { color: #94a3b8; }
+  .chart { background: #fff; border-color: #334155; }
+  th, td { border-color: #334155; }
+  thead th { background: #111827; }
+}
+</style>
+</head>
+<body>
+<h1>COPRO baseline versus optimized by test case</h1>
+<p>__DESCRIPTION__</p>
+<div class="summary">
+  <div class="metric"><strong>__COUNT__</strong><span>paired case responses</span></div>
+  <div class="metric"><strong>__IMPROVED__</strong><span>improved</span></div>
+  <div class="metric"><strong>__UNCHANGED__</strong><span>unchanged</span></div>
+  <div class="metric"><strong>__REGRESSED__</strong><span>regressed</span></div>
+  <div class="metric"><strong>__MEAN_DELTA__</strong><span>mean delta</span></div>
+</div>
+<div class="legend">Ordered by optimized minus baseline score, strongest gains first. Left labels show baseline-&gt;optimized; right labels show delta.</div>
+<div class="chart"><img src="copro-case-paired-score.svg" alt="Horizontal paired-score chart ordered by delta"></div>
+<div class="legend">Best case delta: __BEST_DELTA__. Worst case delta: __WORST_DELTA__.</div>
+<table>
+<thead><tr><th>Skill</th><th>Case</th><th>Case id</th><th>Rep</th><th>Baseline</th><th>Optimized</th><th>Delta</th><th>Expected tokens</th><th>Band</th></tr></thead>
+<tbody>
+__TABLE_ROWS__
+</tbody>
+</table>
+</body>
+</html>
+"""
+    return (
+        template.replace("__DESCRIPTION__", html.escape(description))
+        .replace("__COUNT__", str(len(rows)))
+        .replace("__IMPROVED__", str(improved))
+        .replace("__UNCHANGED__", str(unchanged))
+        .replace("__REGRESSED__", str(regressed))
+        .replace("__MEAN_DELTA__", f"{mean_delta:+.3f}")
+        .replace("__BEST_DELTA__", f"{best:+.3f}")
+        .replace("__WORST_DELTA__", f"{worst:+.3f}")
+        .replace("__TABLE_ROWS__", table_rows)
+        .encode("utf-8")
+    )
+
+
+def _case_paired_table_row(row: Mapping[str, object]) -> str:
+    baseline = _number_or(row.get("baseline_score"), 0.0)
+    optimized = _number_or(row.get("optimized_score"), 0.0)
+    delta = _number_or(row.get("delta"), optimized - baseline)
+    delta_class = "delta-pos" if delta > 1e-9 else "delta-neg" if delta < -1e-9 else "delta-zero"
+    expected_tokens = row.get("expected_response_tokens")
+    tokens = str(expected_tokens) if isinstance(expected_tokens, int) else ""
+    return (
+        "<tr>"
+        f"<td>{html.escape(str(row.get('skill_name') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('case_title') or ''))}</td>"
+        f"<td class=\"case-id\">{html.escape(str(row.get('case_id') or ''))}</td>"
+        f"<td>{_int_or(row.get('repetition'), 0)}</td>"
+        f"<td>{baseline:.4f}</td>"
+        f"<td>{optimized:.4f}</td>"
+        f"<td class=\"{delta_class}\">{delta:+.4f}</td>"
+        f"<td>{html.escape(tokens)}</td>"
+        f"<td>{html.escape(str(row.get('expected_response_length_band') or ''))}</td>"
+        "</tr>"
+    )
+
+
 def _chart_description(name: str) -> str:
     definition = _CHART_DEFINITIONS.get(name, {})
     return str(definition.get("description", ""))
@@ -3850,9 +4044,9 @@ def _chart_manifest(
         )
         charts.append(
             {
-                # The Plotly document is the canonical human view. SVG is a
-                # static export for reports and environments that cannot run
-                # JavaScript.
+                # The HTML document is the canonical human view. Most charts
+                # use Plotly; dense per-case comparisons use matplotlib plus a
+                # readable details table.
                 "artifact": canonical_artifact,
                 "static_artifact": f"graphs/{name}",
                 **(
@@ -3872,9 +4066,9 @@ def _chart_manifest(
     return {
         "schema_version": 2,
         "purpose": (
-            "Definitions and provenance for recorder-neutral experiment charts. Plotly HTML is "
-            "the interactive analytical view; SVG is the static export. Raw observations remain "
-            "in the named source tables."
+            "Definitions and provenance for recorder-neutral experiment charts. HTML is the "
+            "canonical human view; SVG is the static export. Raw observations remain in the "
+            "named source tables."
         ),
         "interactive_explorer": "graphs/index.html",
         "charts": charts,
@@ -4787,12 +4981,12 @@ code { overflow-wrap: anywhere; }
 <p class="muted">__RUN_NAME__</p>
 <div class="cards">
   <div class="card"><strong>__STATUS__</strong><span>run status</span></div>
-  <div class="card"><strong>__CHARTS__</strong><span>interactive Plotly charts</span></div>
+  <div class="card"><strong>__CHARTS__</strong><span>chart pages</span></div>
   <div class="card"><strong>__TABLES__</strong><span>browsable tables</span></div>
 </div>
 <div class="entry">
-  <a href="graphs/index.html">Open interactive charts</a>
-  <p>Plotly views support hover, filters, zoom, pan and export. SVG files are static exports, not the primary analytical view.</p>
+  <a href="graphs/index.html">Open chart pages</a>
+  <p>Most chart pages are interactive Plotly views. Dense case comparisons are rendered as readable static figures with details tables.</p>
 </div>
 <div class="entry">
   <a href="tables/index.html">Open sortable tables</a>
@@ -4870,11 +5064,11 @@ li a { font-size: 17px; font-weight: 700; }
 <h1>Cross-model comparison</h1>
 <p class="muted">__RUN_NAME__</p>
 <div class="cards">
-  <div class="card"><strong>__CHARTS__</strong><span>interactive Plotly charts</span></div>
+  <div class="card"><strong>__CHARTS__</strong><span>chart pages</span></div>
   <div class="card"><strong>__TABLES__</strong><span>browsable comparison tables</span></div>
 </div>
 <p><a href="tables/index.html">Open sortable comparison tables</a></p>
-<h2>Interactive charts</h2>
+<h2>Chart pages</h2>
 <ul>__CHART_ITEMS__</ul>
 </body>
 </html>
@@ -5141,8 +5335,13 @@ def _chart_index_html(
             static_artifact = Path(str(item.get("static_artifact", ""))).name
             if status == "generated":
                 if name.endswith(".html"):
+                    iframe_class = (
+                        ' class="case-comparison"'
+                        if static_artifact == "copro-case-paired-score.svg"
+                        else ""
+                    )
                     media = (
-                        f'<iframe src="{html.escape(name)}" loading="lazy" '
+                        f'<iframe{iframe_class} src="{html.escape(name)}" loading="lazy" '
                         f'title="{title}"></iframe>'
                     )
                 else:
@@ -5212,6 +5411,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
 .chart-panel { border: 1px solid #cbd5e1; border-radius: 10px; padding: 16px; }
 .chart-panel h3, .omitted-panel h3 { margin: 0 0 6px; }
 .chart-panel iframe { background: white; border: 0; height: 590px; width: 100%; }
+.chart-panel iframe.case-comparison { height: min(1120px, 82vh); }
 .chart-panel img { background: white; display: block; max-height: 760px; max-width: 100%; object-fit: contain; }
 .provenance { font-size: 12px; }
 .omitted-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -5234,8 +5434,9 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
 </head>
 <body>
 <h1>Experiment graph and metric explorer</h1>
-<p>Filter, hover, zoom, pan, select, and export the Plotly views below. Static SVG exports and raw
-observations remain available for reports, automation, and exact inspection.</p>
+<p>Open the generated chart pages below. Most charts are interactive Plotly views; dense case
+comparisons are static horizontal figures with details tables. Raw observations remain available
+for reports, automation, and exact inspection.</p>
 
 __COMPARISON_NOTICE__
 

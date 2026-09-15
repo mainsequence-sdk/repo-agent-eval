@@ -296,20 +296,20 @@ budgets. Process-only stages may retain an explicit process executor.
 stages:
   validate_judge:
     reuse: {policy: exact}
-    budget: {model_calls: 100, tokens: 250000, wall_seconds: 1800}
+    budget: {model_calls: 100, wall_seconds: 1800}
   optimize:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
   solve:
     reuse: {policy: exact}
-    budget: {model_calls: 1, tokens: 32000, wall_seconds: 600}
+    budget: {model_calls: 1, wall_seconds: 600}
   judge:
     reuse: {policy: exact}
-    budget: {model_calls: 3, tokens: 64000, wall_seconds: 600}
+    budget: {model_calls: 3, wall_seconds: 600}
   aggregate:
     executor: local-process
     reuse: {policy: exact}
-    budget: {model_calls: 0, tokens: 0, wall_seconds: 300}
+    budget: {model_calls: 0, wall_seconds: 300}
 
 experiments:
   qwen-baseline:

@@ -108,20 +108,21 @@ uv run ms-agent-eval stage list --run <run-id> --workspace workspace.yaml
 uv run ms-agent-eval run resume <run-id> --workspace workspace.yaml
 ```
 
-Resume uses the existing immutable run and packet identities. If the selected
-workspace definition has changed, the coordinator verifies and rehydrates the
-old run's frozen experiment definition instead of applying the edit to an
-in-flight run. Starting the named experiment creates the new revision; resuming
-the old run completes the old revision. A pilot must be resumed and operated
-with `--pilot` so its execution mode cannot be confused with a benchmark.
+`run <experiment>` resumes the latest unfinished run whose frozen revision and
+execution mode match the selected workspace. If the selected workspace
+definition has changed, no old run matches and the command creates the new
+revision. `run resume <run-id>` names a particular historical run explicitly.
+Use `--fresh` only when intentionally creating another run for an unchanged
+revision. A pilot must be resumed and operated with `--pilot` so its execution
+mode cannot be confused with a benchmark.
 
 Starting another run is not the same as forcing another model sample. Under the
 default `exact` policy the coordinator attaches eligible validated work from
 any compatible prior run. Use `refresh` or solver `replicate` intentionally
 when fresh execution is the experiment. A failed run does not delete completed
 stage results. After a framework or deployment fix, resuming preserves the old
-failure and uses append-only retries where supported; starting the same
-experiment again can reuse compatible completed work in a new run. See
+failure and uses append-only retries where supported; `--fresh` can create a
+separate run that reuses compatible completed work. See
 [Incremental execution](../execution/incremental-execution.md).
 
 See [Pilot versus scored runs](../evaluation/pilot-vs-scored-runs.md),

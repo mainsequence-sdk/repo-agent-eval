@@ -164,6 +164,74 @@ def test_work_identity_is_reusable_across_runs_but_attempt_identity_is_not(
     assert ledger.reusable_result(refreshed) is None
 
 
+def test_retired_token_limit_neither_changes_new_work_identity_nor_discards_history(
+    tmp_path: Path,
+) -> None:
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    seed = _packet(ledger)
+    historical = StagePacket.create(
+        run_id="run-legacy",
+        experiment_id=seed.experiment_id,
+        experiment_revision_id=seed.experiment_revision_id,
+        stage=seed.stage,
+        attempt=1,
+        dependencies=(),
+        work_spec=seed.work_spec,
+        inputs=seed.inputs,
+        instructions=seed.instructions,
+        output_schema=seed.output_schema,
+        executor=seed.executor,
+        model=seed.model,
+        budget=StageBudget(1, 1000, 60),
+        _legacy_token_identity=True,
+    )
+    historical = ledger.prepare(historical)
+    claim = ledger.claim(historical.packet_id, executor_id="remote", worker_id="worker")
+    result = _result(ledger, historical)
+    ledger.submit(result, lease_id=claim.lease_id)
+    ledger.validate(historical.packet_id, lambda _packet, _result: None)
+    ledger.persist(historical.packet_id)
+
+    current_with_legacy_value = StagePacket.create(
+        run_id="run-current-a",
+        experiment_id=seed.experiment_id,
+        experiment_revision_id=seed.experiment_revision_id,
+        stage=seed.stage,
+        attempt=1,
+        dependencies=(),
+        work_spec=seed.work_spec,
+        inputs=seed.inputs,
+        instructions=seed.instructions,
+        output_schema=seed.output_schema,
+        executor=seed.executor,
+        model=seed.model,
+        budget=StageBudget(1, 1000, 60),
+    )
+    current_without_value = StagePacket.create(
+        run_id="run-current-b",
+        experiment_id=seed.experiment_id,
+        experiment_revision_id=seed.experiment_revision_id,
+        stage=seed.stage,
+        attempt=1,
+        dependencies=(),
+        work_spec=seed.work_spec,
+        inputs=seed.inputs,
+        instructions=seed.instructions,
+        output_schema=seed.output_schema,
+        executor=seed.executor,
+        model=seed.model,
+        budget=StageBudget(1, None, 60),
+    )
+    assert current_with_legacy_value.work_id == current_without_value.work_id
+    assert current_with_legacy_value.work_id != historical.work_id
+    restored_historical = StagePacket.from_mapping(historical.as_dict())
+    assert restored_historical.work_id == historical.work_id
+    assert restored_historical.attempt_id == historical.attempt_id
+
+    current = ledger.prepare(current_without_value)
+    assert ledger.reusable_result(current) == result
+
+
 def test_orchestration_metadata_does_not_change_semantic_work_identity(
     tmp_path: Path,
 ) -> None:

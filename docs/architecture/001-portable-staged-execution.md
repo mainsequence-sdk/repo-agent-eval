@@ -138,13 +138,18 @@ model:
   id: qwen3.6:27b-coding
 budget:
   model_calls: 1
-  tokens: 32000
   wall_seconds: 600
 ```
 
 The packet stores content references rather than mutable source paths whenever
 possible. It must include enough identity to reproduce the rendered request
 without including credentials.
+
+Token usage belongs in the result provenance, not the packet's execution
+budget. The runner records input, output, and total token counts for every
+call, but it does not reject a completed response for exceeding an internal
+token ceiling. Request admission is instead governed by exact context
+preflight and the selected endpoint's real context window.
 
 Stage-specific packet construction enforces information boundaries. In
 particular, a `solve` packet cannot reference rubric, expected-answer, judge, or
