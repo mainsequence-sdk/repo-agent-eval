@@ -66,9 +66,15 @@ class CoproProposal(dspy.Signature):
     contain ``instruction`` and leave ``output_prefix`` empty because the DSPy
     solver signature is frozen by the optimization contract.
     Aim to return candidate_count distinct candidates; the unchanged original
-    is added separately by the coordinator and must not be returned. If useful
-    alternatives are exhausted, return the best distinct candidates available.
-    The coordinator records any shortfall and continues the bounded search.
+    is added separately by the coordinator and must not be returned. Return the
+    candidates output as a JSON array. Every array item must contain exactly two
+    fields: ``instruction`` with the complete rewritten target text and
+    ``output_prefix`` with an empty string. Never use ``text``, ``content``, or
+    any other field name. Complete, parseable JSON takes priority over reaching
+    candidate_count: for a long target, return one complete candidate instead
+    of starting another candidate that may be truncated. If useful alternatives
+    are exhausted, return the best distinct candidates available. The
+    coordinator records any shortfall and continues the bounded search.
     """
 
     target_kind: str = dspy.InputField()
@@ -79,6 +85,48 @@ class CoproProposal(dspy.Signature):
     requirements: str = dspy.InputField()
     candidate_count: int = dspy.InputField()
     candidates: list[dict[str, str]] = dspy.OutputField()
+
+
+class _PortableStructuredAdapter(dspy.ChatAdapter):
+    """Parse ChatAdapter markers or equivalent JSON without another model call."""
+
+    def __init__(self) -> None:
+        # DSPy's built-in JSON fallback performs a second LM call. Execution
+        # portability requires local normalization of an already valid response.
+        super().__init__(use_json_adapter_fallback=False)
+
+    def parse(  # type: ignore[override]
+        self,
+        signature: type[dspy.Signature],
+        completion: str,
+    ) -> dict[str, object]:
+        try:
+            return dict(super().parse(signature, completion))
+        except Exception as chat_error:
+            json_adapter = dspy.JSONAdapter()
+            try:
+                return dict(json_adapter.parse(signature, completion))
+            except Exception:
+                pass
+
+            # Some OpenAI-compatible models return the value of the sole output
+            # field directly. For CoproProposal that is the candidates array.
+            text = completion.strip()
+            if text.startswith("```") and text.endswith("```"):
+                lines = text.splitlines()
+                text = "\n".join(lines[1:-1]).strip()
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                raise chat_error from None
+            output_names = tuple(signature.output_fields)
+            if len(output_names) != 1:
+                raise chat_error from None
+            wrapped = json.dumps({output_names[0]: decoded}, ensure_ascii=False)
+            try:
+                return dict(json_adapter.parse(signature, wrapped))
+            except Exception:
+                raise chat_error from None
 
 
 PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {
@@ -243,6 +291,17 @@ def _failure_kind(error: Exception) -> str:
     return name.lower()
 
 
+def _concise_failure_message(error: Exception, kind: str) -> str:
+    """Keep raw DSPy/provider output in the trace, not in terminal-facing errors."""
+
+    if kind == "typed_output_parse_error":
+        return "structured output did not match the DSPy signature"
+    message = " ".join(str(error).split())
+    if len(message) > 500:
+        return message[:497].rstrip() + "..."
+    return message
+
+
 @dataclass(frozen=True)
 class DspyExecutionContract:
     role: str
@@ -272,7 +331,7 @@ class DspyExecutor:
             raise IntegrityError("DSPy execution contract and observer roles differ")
         if program_hash(program) != contract.program_hash:
             raise IntegrityError("DSPy program state differs from its locked hash")
-        selected_adapter = adapter or dspy.ChatAdapter(use_json_adapter_fallback=False)
+        selected_adapter = adapter or _PortableStructuredAdapter()
         start = len(observer.records)
         try:
             with dspy.context(lm=lm, adapter=selected_adapter):
@@ -345,7 +404,7 @@ class DspyExecutor:
                 trace_artifact=trace,
                 status="failed",
                 error_kind=kind,
-                error_message=str(error),
+                error_message=_concise_failure_message(error, kind),
             )
 
     def save_state_artifact(self, program: dspy.Module) -> ArtifactReference:

@@ -6657,7 +6657,23 @@ def _dspy_execution_failure(role: str, result: ProgramResult) -> AutomaticExecut
     if kind == "context_window_exceeded":
         summary = f"{role} context preflight rejected request{detail}"
     elif kind == "typed_output_parse_error":
-        summary = f"{role} DSPy could not parse the completed model response{detail}"
+        exhausted = next(
+            (
+                int(call.parameters["max_tokens"])
+                for call in result.calls
+                if isinstance(call.parameters.get("max_tokens"), int)
+                and not isinstance(call.parameters.get("max_tokens"), bool)
+                and call.usage.get("completion_tokens")
+                == call.parameters.get("max_tokens")
+            ),
+            None,
+        )
+        summary = (
+            f"{role} response reached max_tokens={exhausted} before completing "
+            "valid structured output"
+            if exhausted is not None
+            else f"{role} returned invalid structured output{detail}"
+        )
     elif kind == "runtimeerror" and not result.calls and isinstance(message, str):
         summary = message
     else:

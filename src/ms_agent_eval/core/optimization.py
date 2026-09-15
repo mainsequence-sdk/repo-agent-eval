@@ -48,13 +48,18 @@ def normalize_copro_proposals(
     for raw_candidate in raw_candidates:
         if not isinstance(raw_candidate, Mapping):
             raise IntegrityError("optimizer candidate must be an object")
-        unknown = set(raw_candidate) - {"instruction", "output_prefix"}
+        unknown = set(raw_candidate) - {"instruction", "text", "output_prefix"}
         if unknown:
             raise IntegrityError(
                 f"optimizer candidate contains unknown fields: {sorted(unknown)}"
             )
+        if "instruction" in raw_candidate and "text" in raw_candidate:
+            raise IntegrityError(
+                "optimizer candidate cannot contain both instruction and text"
+            )
         instruction = _non_empty_text(
-            raw_candidate.get("instruction"), "candidate instruction"
+            raw_candidate.get("instruction", raw_candidate.get("text")),
+            "candidate instruction",
         )
         raw_prefix = raw_candidate.get("output_prefix", "")
         if not isinstance(raw_prefix, str):

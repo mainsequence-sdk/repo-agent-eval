@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from rich.console import Console
+from rich.markup import escape
 from rich.status import Status
 from rich.table import Table
 
@@ -204,7 +205,8 @@ class TerminalRunReporter:
             )
             return
         message = event.details.get("error")
-        suffix = f": {message}" if isinstance(message, str) and message else ""
+        rendered = _terminal_error(message)
+        suffix = f": {rendered}" if rendered else ""
         self.console.print(f"[red]✗[/] {_subject(event)} failed{suffix}")
 
     def _packet_waiting(self, event: ProgressEvent) -> None:
@@ -231,8 +233,9 @@ class TerminalRunReporter:
             description += " · preflight skipped"
         if failed:
             error = event.details.get("error")
-            if isinstance(error, str) and error:
-                description += f": {error}"
+            rendered = _terminal_error(error)
+            if rendered:
+                description += f": {rendered}"
         mark = "[red]✗[/]" if failed else "[green]✓[/]"
         self.console.print(f"{mark} {description}{_duration(event)}")
 
@@ -265,7 +268,8 @@ class TerminalRunReporter:
         stage = f" at {event.stage}" if event.stage else ""
         error = event.details.get("result", {})
         message = error.get("error") if isinstance(error, Mapping) else None
-        suffix = f": {message}" if isinstance(message, str) and message else ""
+        rendered = _terminal_error(message)
+        suffix = f": {rendered}" if rendered else ""
         self.console.print(f"[{color}]{label}{stage}{suffix}[/{color}]")
 
     def _recording_status(self, event: ProgressEvent) -> None:
@@ -385,6 +389,17 @@ def _duration(event: ProgressEvent) -> str:
     if event.duration_seconds is None:
         return ""
     return f" [dim]· {event.duration_seconds:.1f}s[/]"
+
+
+def _terminal_error(value: object, *, maximum: int = 300) -> str:
+    """Render one bounded line; full diagnostics belong in immutable artifacts."""
+
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    message = " ".join(value.split())
+    if len(message) > maximum:
+        message = message[: maximum - 3].rstrip() + "..."
+    return escape(message)
 
 
 def _completion_detail(event: ProgressEvent) -> str:

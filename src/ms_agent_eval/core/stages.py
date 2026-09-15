@@ -439,9 +439,17 @@ class StageResult:
         error = None
         if raw_error is not None:
             error_payload = _mapping(raw_error, "stage result error")
+            error_message = error_payload.get("message")
+            if not isinstance(error_message, str) or not error_message.strip():
+                raise ConfigurationError(
+                    "stage result error message must be a non-empty string"
+                )
             error = StageError(
                 _identifier(error_payload.get("kind"), "stage result error kind"),
-                _required_string(error_payload.get("message"), "stage result error message"),
+                # Error text is immutable evidence. Do not strip it before verifying the
+                # result identity: provider and parser errors may legitimately end in a
+                # newline, and changing even one byte invalidates the content hash.
+                error_message,
             )
         outputs = tuple(
             StageArtifact.from_mapping(_mapping(item, "stage result output"))

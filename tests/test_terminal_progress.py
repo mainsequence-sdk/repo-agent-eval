@@ -221,6 +221,28 @@ def test_terminal_reporter_shows_automatic_execution_error() -> None:
     assert "connection refused" in rendered
 
 
+def test_terminal_reporter_bounds_provider_error_payloads() -> None:
+    output = StringIO()
+    reporter = TerminalRunReporter(
+        Console(file=output, force_terminal=False, color_system=None, width=120)
+    )
+    reporter.handle(
+        ProgressEvent(
+            "packet_failed",
+            run_id="run-123",
+            experiment_id="optimize-solver",
+            stage="optimize",
+            details={"error": "LM response: " + ("rewritten skill " * 500)},
+        )
+    )
+    reporter.close()
+
+    rendered = output.getvalue()
+    assert "optimizer candidate set failed: LM response:" in rendered
+    assert "..." in rendered
+    assert len(rendered) < 400
+
+
 def test_terminal_reporter_shows_parallel_judge_validation_votes() -> None:
     output = StringIO()
     reporter = TerminalRunReporter(

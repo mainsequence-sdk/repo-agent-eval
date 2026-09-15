@@ -238,3 +238,27 @@ def test_failed_result_records_normalized_error(tmp_path: Path) -> None:
     )
     ledger.submit(failed, lease_id=claim.lease_id)
     assert ledger.status(packet.packet_id).state is StageState.FAILED
+
+
+def test_failed_result_identity_preserves_error_message_whitespace(tmp_path: Path) -> None:
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    packet = ledger.prepare(_packet(ledger))
+    claim = ledger.claim(packet.packet_id, executor_id="remote", worker_id="worker")
+    message = "parser included immutable provider evidence\n"
+    failed = StageResult.create(
+        packet=packet,
+        status="failed",
+        executor_version="1",
+        worker_id="worker",
+        started_at="2026-09-12T00:00:00+00:00",
+        completed_at="2026-09-12T00:00:01+00:00",
+        error=StageError("typed_output_parse_error", message),
+    )
+    ledger.submit(failed, lease_id=claim.lease_id)
+
+    restarted = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    restored = restarted.status(packet.packet_id).result
+
+    assert restored is not None
+    assert restored.result_id == failed.result_id
+    assert restored.error == StageError("typed_output_parse_error", message)

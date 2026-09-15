@@ -81,6 +81,32 @@ def test_copro_proposal_normalization_keeps_structural_errors_fatal() -> None:
         )
 
 
+def test_copro_proposal_normalization_accepts_text_as_provider_alias() -> None:
+    candidates, accounting = normalize_copro_proposals(
+        [{"text": "A complete rewritten skill"}],
+        requested_count=1,
+        target_kind="skill",
+        current_text="Current skill",
+        current_output_prefix="",
+    )
+
+    assert candidates == [
+        {"instruction": "A complete rewritten skill", "output_prefix": ""}
+    ]
+    assert accounting["shortfall_count"] == 0
+
+
+def test_copro_proposal_normalization_rejects_ambiguous_text_alias() -> None:
+    with pytest.raises(IntegrityError, match="both instruction and text"):
+        normalize_copro_proposals(
+            [{"instruction": "Rewrite A", "text": "Rewrite B"}],
+            requested_count=1,
+            target_kind="skill",
+            current_text="Current skill",
+            current_output_prefix="",
+        )
+
+
 def test_copro_proposal_accounting_rejects_inconsistent_counts() -> None:
     with pytest.raises(IntegrityError, match="received_count is inconsistent"):
         validate_copro_proposal_accounting(
