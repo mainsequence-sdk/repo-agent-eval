@@ -30,6 +30,7 @@ from ms_agent_eval.core.recording_projection import (
 from ms_agent_eval.core.stages import StageLedger
 from ms_agent_eval.core.stages import (
     StageBudget,
+    StageError,
     StageExecutorIdentity,
     StageKind,
     StageModelIdentity,
@@ -208,6 +209,132 @@ def test_projection_is_deterministic_and_round_trips(tmp_path: Path) -> None:
     ) == table_index
 
 
+def test_projection_exposes_actionable_failure_tables(tmp_path: Path) -> None:
+    store = FilesystemArtifactStore(tmp_path / "external")
+    _run(store)
+    lifecycle = RunLifecycleLedger(store)
+    lifecycle.append("run-1", RunLifecycleState.CREATED, reason="run_created")
+    lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_started")
+    ledger = StageLedger(store)
+    packet = StagePacket.create(
+        run_id="run-1",
+        experiment_id="baseline",
+        experiment_revision_id=f"sha256:{'2' * 64}",
+        stage=StageKind.SOLVE,
+        attempt=1,
+        dependencies=(),
+        work_spec={
+            "case_id": "api-release-evidence",
+            "skill": "application_surfaces/api_surfaces",
+            "split": "train",
+            "evaluation_phase": "validation",
+            "partition": 1,
+            "candidate_id": "baseline",
+        },
+        inputs=(
+            ledger.put_json(
+                "case",
+                {
+                    "case_id": "api-release-evidence",
+                    "skill": "application_surfaces/api_surfaces",
+                    "split": "train",
+                },
+            ),
+        ),
+        instructions=ledger.put_json("instructions", {"policy": "be correct"}),
+        output_schema="solver-response-v1",
+        executor=StageExecutorIdentity("remote-models", "openai_compatible", f"sha256:{'3' * 64}"),
+        model=StageModelIdentity("solver", f"sha256:{'4' * 64}"),
+        budget=StageBudget(1, 1000, 60),
+    )
+    ledger.prepare(packet)
+    claim = ledger.claim(packet.packet_id, executor_id="remote-models", worker_id="worker")
+    observer = ModelCallObserver(
+        store,
+        role="solver",
+        run_id="run-1",
+        packet_id=packet.packet_id,
+        work_id=packet.work_id,
+        attempt_id=packet.attempt_id,
+        experiment_revision_id=packet.experiment_revision_id,
+        stage="solve",
+    )
+    root_error = ConnectionRefusedError(61, "Connection refused")
+    provider_error = RuntimeError("OpenAI-compatible request failed")
+    provider_error.__cause__ = root_error
+    call = observer.failed(
+        provider_id="openai_compatible",
+        model="solver-model",
+        parameters={"api_base": "http://localhost:8000/v1"},
+        messages=(),
+        request={},
+        error=provider_error,
+        latency_seconds=0.25,
+        configured_cost=0.0,
+    )
+    result = StageResult.create(
+        packet=packet,
+        status="failed",
+        executor_version="1",
+        worker_id="worker",
+        usage={"model_calls": 1},
+        provenance={
+            "model_call_ids": [call.call_id],
+            "endpoint_pool": {
+                "routes": [
+                    {
+                        "endpoint_id": "endpoint-a",
+                        "max_concurrent_requests": 2,
+                    }
+                ]
+            },
+        },
+        started_at="2026-09-14T10:00:01+00:00",
+        completed_at="2026-09-14T10:00:02+00:00",
+        observed_model="solver-model",
+        error=StageError("connection_error", "solver call could not connect"),
+    )
+    ledger.submit(result, lease_id=claim.lease_id)
+    lifecycle.append("run-1", RunLifecycleState.FAILED, reason="stage_failed")
+
+    configuration = _configuration()
+    plan = RecorderProjector(
+        store,
+        recorder=configuration.recorders[configuration.recording.recorder],
+        recording=configuration.recording,
+    ).build("run-1")
+    tables = {table.name: table.rows for table in plan.tables}
+
+    assert set(tables) >= {
+        "failure-summary",
+        "stage-failures",
+        "model-call-failures",
+    }
+    stage_failure = tables["stage-failures"][0]
+    assert stage_failure["case_id"] == "api-release-evidence"
+    assert stage_failure["skill"] == "application_surfaces/api_surfaces"
+    assert stage_failure["stage_error_message"] == "solver call could not connect"
+    assert stage_failure["root_exception_type"] == "ConnectionRefusedError"
+    assert stage_failure["root_error_message"] == "[Errno 61] Connection refused"
+    assert stage_failure["endpoint_ids"] == ("endpoint-a",)
+    assert stage_failure["endpoint_base_urls"] == ("http://localhost:8000/v1",)
+    assert stage_failure["retryable"] is True
+    assert stage_failure["retry_outcome"] == "not_retried"
+    call_failure = tables["model-call-failures"][0]
+    assert call_failure["errno"] == 61
+    assert call_failure["endpoint_base_url"] == "http://localhost:8000/v1"
+    assert call_failure["recovered_by_retry"] is False
+    summary = tables["failure-summary"][0]
+    assert summary["failed_stage_attempts"] == 1
+    assert summary["failed_model_calls"] == 1
+    assert summary["recovery_status"] == "unrecovered"
+    table_artifact = next(item for item in plan.artifacts if item.path == "tables/index.html")
+    with store.get_blob(table_artifact.reference) as handle:
+        table_index = handle.read().decode("utf-8")
+    assert '"name":"failure-summary"' in table_index
+    assert "[Errno 61] Connection refused" in table_index
+
+
 def test_execution_dag_svg_renders_dependencies_and_accessible_description() -> None:
     dag = {
         "overview": {
@@ -237,7 +364,13 @@ def test_execution_dag_svg_renders_dependencies_and_accessible_description() -> 
                     "target": "scope:judge.test",
                     "type": "dependency",
                     "count": 102,
-                }
+                },
+                {
+                    "source": "scope:judge.test",
+                    "target": "scope:solve.test",
+                    "type": "retry",
+                    "count": 2,
+                },
             ],
         }
     }
@@ -245,8 +378,16 @@ def test_execution_dag_svg_renders_dependencies_and_accessible_description() -> 
     rendered = _dag_svg(dag).decode("utf-8")
 
     assert '<path class="dag-edge"' in rendered
-    assert 'marker-end="url(#dag-arrow)"' in rendered
+    assert 'marker-end="url(#dag-dependency-arrow)"' in rendered
+    assert 'marker-end="url(#dag-retry-arrow)"' in rendered
+    assert 'stroke-dasharray="7 5"' in rendered
     assert "102 dependency edges" in rendered
+    assert "2 retry edges" in rendered
+    assert "Green — all attempts persisted" in rendered
+    assert "Orange — unfinished attempts remain" in rendered
+    assert "Red — contains failed or rejected attempts" in rendered
+    assert "102 persisted" in rendered
+    assert "2 claimed · 100 persisted" in rendered
     assert '<title id="chart-title">Execution dependency overview</title>' in rendered
     assert '<desc id="chart-description">' in rendered
     assert "24516" not in rendered

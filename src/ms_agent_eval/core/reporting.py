@@ -259,7 +259,7 @@ class RunReportBuilder:
                 if item["state"] in {StageState.FAILED.value, StageState.REJECTED.value}
             ],
             "benchmark_metrics": None,
-            "cross_validation": self._cross_validation(statuses),
+            "validation": self._validation_selection(statuses),
             "optimization": self._optimization(statuses, lock),
         }
         if benchmark_valid and aggregate is not None:
@@ -733,21 +733,21 @@ class RunReportBuilder:
             "criteria": by_criterion,
         }
 
-    def _cross_validation(self, statuses: Sequence[StageStatus]) -> Mapping[str, object] | None:
+    def _validation_selection(self, statuses: Sequence[StageStatus]) -> Mapping[str, object] | None:
         values = [
             status
             for status in statuses
             if status.packet.stage is StageKind.SELECT
             and status.state is StageState.PERSISTED
             and status.result is not None
-            and (status.packet.output_schema == "cross-validation-selection-v1")
+            and (status.packet.output_schema == "validation-selection-v1")
         ]
         if len(values) > 1:
             raise IntegrityError("run contains multiple persisted selection results")
         if not values:
             return None
         assert values[0].result is not None
-        return _mapping(self.ledger.read_output(values[0].result), "cross-validation selection")
+        return _mapping(self.ledger.read_output(values[0].result), "validation selection")
 
     def _optimization(
         self,
@@ -765,7 +765,7 @@ class RunReportBuilder:
             if status.packet.stage is StageKind.FIT
             and status.state is StageState.PERSISTED
             and status.result is not None
-            and status.packet.work_spec.get("phase") == "final_fit"
+            and status.packet.work_spec.get("materialize_final_artifacts") is True
         ]
         final_program = None
         if final_fits:
@@ -1374,23 +1374,23 @@ def render_report_markdown(report: RunReport) -> bytes:
         else:
             lines.append("| unavailable | 0 | — | — | — |")
         lines.append("")
-    cross_validation = value.get("cross_validation")
-    if isinstance(cross_validation, Mapping):
+    validation = value.get("validation")
+    if isinstance(validation, Mapping):
         lines.extend(
             [
-                "## Cross-validation selection",
+                "## Validation selection",
                 "",
-                f"- Metric: `{cross_validation.get('metric')}`",
-                f"- Selected candidate: `{cross_validation.get('selected_candidate_id')}`",
-                f"- Selected k: `{cross_validation.get('selected_k')}`",
-                f"- Mean out-of-fold score: `{_format_score(cross_validation.get('selected_mean_score'))}`",
+                f"- Metric: `{validation.get('metric')}`",
+                f"- Selected candidate: `{validation.get('selected_candidate_id')}`",
+                f"- Selected k: `{validation.get('selected_k')}`",
+                f"- Mean validation score: `{_format_score(validation.get('selected_mean_score'))}`",
                 "",
-                "| Candidate | k | Cases | Mean out-of-fold score |",
+                "| Candidate | k | Cases | Mean validation score |",
                 "| --- | ---: | ---: | ---: |",
             ]
         )
         for candidate in _mapping_sequence(
-            cross_validation.get("candidates", []), "cross-validation candidates"
+            validation.get("candidates", []), "validation candidates"
         ):
             lines.append(
                 f"| `{_table(candidate['candidate_id'])}` | {candidate['k']} | "
@@ -1414,8 +1414,7 @@ def render_report_markdown(report: RunReport) -> bytes:
                 and isinstance(raw_round.get("proposal_accounting"), Mapping)
                 and raw_round["proposal_accounting"].get("degraded") is True
             )
-            if isinstance(rounds, Sequence)
-            and not isinstance(rounds, (str, bytes, bytearray))
+            if isinstance(rounds, Sequence) and not isinstance(rounds, (str, bytes, bytearray))
             else 0
         )
         lines.extend(

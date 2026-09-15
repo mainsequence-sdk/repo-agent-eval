@@ -19,7 +19,8 @@ from .evaluation import (
     CapabilityCatalog,
     CaseBank,
     SplitManifest,
-    deterministic_group_k_fold,
+    deterministic_group_training_partitions,
+    deterministic_group_validation_split,
     validate_deterministic_splits,
     validate_case_authoring_provenance,
     validate_case_bank,
@@ -55,6 +56,10 @@ def _optimization_preflight(
     train = tuple(case for case in case_bank.cases if splits.split_for(case) == "train")
     test = tuple(case for case in case_bank.cases if splits.split_for(case) == "test")
     judge_repetitions = workspace.evaluation.judge.repetitions
+
+    def test_solver_repetitions(experiment: ExperimentConfiguration) -> int:
+        reuse = workspace.stages["solve"].reuse
+        return reuse.samples if reuse.policy.value == "replicate" else experiment.repetitions
 
     def output_limit(experiment_id: str, role: str) -> int | None:
         model = resolve_role_models(workspace, experiment_id).get(role)
@@ -118,8 +123,18 @@ def _optimization_preflight(
             continue
         optimizer = experiment.optimizer
         budget = experiment.budget
-        folds = experiment.cross_validation
-        assert optimizer is not None and budget is not None and folds is not None
+        validation = experiment.validation
+        assert optimizer is not None and budget is not None and validation is not None
+        validation_assignments = deterministic_group_validation_split(
+            train,
+            fraction=validation.fraction,
+            seed=validation.seed,
+        )
+        validation_by_group = {item.group: item.split for item in validation_assignments}
+        fitting = tuple(case for case in train if validation_by_group[case.group] == "training")
+        held_out_validation = tuple(
+            case for case in train if validation_by_group[case.group] == "validation"
+        )
         if isinstance(optimizer, CoproConfiguration):
             skills = (
                 sorted(context.skill_contexts)
@@ -132,13 +147,11 @@ def _optimization_preflight(
                     f"COPRO experiment {experiment_id!r} targets unknown skills: {unknown}"
                 )
             groups_by_skill = {
-                skill: sorted({case.group for case in train if case.skill == skill})
+                skill: sorted({case.group for case in fitting if case.skill == skill})
                 for skill in skills
             }
             insufficient = {
-                skill: groups
-                for skill, groups in groups_by_skill.items()
-                if len(groups) < folds.folds
+                skill: groups for skill, groups in groups_by_skill.items() if not groups
             }
             if insufficient:
                 detail = ", ".join(
@@ -146,50 +159,50 @@ def _optimization_preflight(
                     for skill, groups in sorted(insufficient.items())
                 )
                 raise PreflightError(
-                    f"COPRO experiment {experiment_id!r} requires at least {folds.folds} "
-                    f"training leakage groups per selected skill; {detail}"
+                    f"COPRO experiment {experiment_id!r} has no optimization-training "
+                    f"groups for selected skills: {detail}"
                 )
-            target_count = int(optimizer.optimize_prompt) + len(skills)
-            search_scopes = folds.folds + 1
-            proposal_calls = search_scopes * optimizer.depth * target_count
+            missing_validation = sorted(
+                skill
+                for skill in skills
+                if not any(case.skill == skill for case in held_out_validation)
+            )
+            if missing_validation:
+                raise PreflightError(
+                    f"COPRO experiment {experiment_id!r} has no validation cases for "
+                    f"selected skills: {missing_validation}"
+                )
+            partition_assignments = deterministic_group_training_partitions(
+                fitting,
+                partitions=optimizer.partitions,
+                seed=validation.seed,
+            )
+            partition_by_group = {item.group: item.partition for item in partition_assignments}
             candidate_evaluations = 0
-            group_to_fold = {
-                item.group: item.fold
-                for item in deterministic_group_k_fold(train, folds=folds.folds, seed=folds.seed)
-            }
-            fitting_sets = [
-                tuple(case for case in train if group_to_fold[case.group] != fold)
-                for fold in range(folds.folds)
-            ] + [train]
-            missing_fold_targets = {
-                f"fold-{fold}": [
+            proposal_calls = 0
+            for partition in range(optimizer.partitions):
+                partition_cases = tuple(
+                    case for case in fitting if partition_by_group[case.group] == partition
+                )
+                active_skills = [
                     skill
                     for skill in skills
-                    if not any(case.skill == skill for case in fitting_sets[fold])
+                    if any(case.skill == skill for case in partition_cases)
                 ]
-                for fold in range(folds.folds)
-            }
-            missing_fold_targets = {
-                fold: values for fold, values in missing_fold_targets.items() if values
-            }
-            if missing_fold_targets:
-                raise PreflightError(
-                    f"COPRO experiment {experiment_id!r} has no fitting cases for selected "
-                    f"skills in one or more outer folds: {missing_fold_targets}"
+                targets = int(optimizer.optimize_prompt) + len(active_skills)
+                proposal_calls += optimizer.depth * targets
+                validation_evaluations = (
+                    len(held_out_validation) if optimizer.optimize_prompt else 0
+                ) + sum(
+                    sum(case.skill == skill for case in held_out_validation)
+                    for skill in active_skills
                 )
-            for fitting in fitting_sets:
-                per_round = (len(fitting) if optimizer.optimize_prompt else 0) + sum(
-                    sum(case.skill == skill for case in fitting) for skill in skills
+                candidate_evaluations += (
+                    optimizer.depth * optimizer.breadth * validation_evaluations
                 )
-                candidate_evaluations += optimizer.depth * optimizer.breadth * per_round
-            # Final COPRO validation is paired: the untouched test cases are
-            # solved once with the original program and once with the frozen
-            # optimized program, then judged under the same locked rubric.
-            final_test_calls = 2 * len(test)
-            solver_calls = candidate_evaluations + len(train) + final_test_calls
-            judge_calls = (
-                candidate_evaluations + len(train) + final_test_calls
-            ) * judge_repetitions
+            final_test_calls = 2 * len(test) * test_solver_repetitions(experiment)
+            solver_calls = candidate_evaluations + final_test_calls
+            judge_calls = solver_calls * judge_repetitions
             required = {
                 "optimizer": proposal_calls,
                 "solver": solver_calls,
@@ -209,7 +222,14 @@ def _optimization_preflight(
             plans[experiment_id] = {
                 "strategy": "copro",
                 "targets": {"prompt": optimizer.optimize_prompt, "skills": skills},
-                "folds": folds.folds,
+                "validation": {
+                    "strategy": validation.strategy,
+                    "fraction": validation.fraction,
+                    "case_count": len(held_out_validation),
+                    "assignment_hash": content_hash(validation_assignments),
+                },
+                "training_case_count": len(fitting),
+                "training_partitions": optimizer.partitions,
                 "breadth": optimizer.breadth,
                 "depth": optimizer.depth,
                 "planned_upper_bound": required,
@@ -220,7 +240,9 @@ def _optimization_preflight(
             }
         else:
             candidates = len(optimizer.k_values) + 1
-            solver_calls = candidates * len(train) + len(test)
+            solver_calls = candidates * len(held_out_validation) + len(
+                test
+            ) * test_solver_repetitions(experiment)
             judge_calls = (solver_calls) * judge_repetitions
             required = {"solver": solver_calls, "judge": judge_calls}
             budget_plan = validate_budget(
@@ -231,7 +253,13 @@ def _optimization_preflight(
             )
             plans[experiment_id] = {
                 "strategy": "labeled_few_shot",
-                "folds": folds.folds,
+                "validation": {
+                    "strategy": validation.strategy,
+                    "fraction": validation.fraction,
+                    "case_count": len(held_out_validation),
+                    "assignment_hash": content_hash(validation_assignments),
+                },
+                "training_case_count": len(fitting),
                 "candidates": candidates,
                 "planned_upper_bound": required,
                 **budget_plan,
@@ -339,9 +367,7 @@ class CompiledWorkspace:
             "select",
             "aggregate",
         )
-        referenced_executor_ids = {
-            item.executor_id for item in models.values()
-        } | {
+        referenced_executor_ids = {item.executor_id for item in models.values()} | {
             stage.executor
             for stage_id, stage in workspace.stages.items()
             if stage_id in referenced_stage_ids and stage.executor is not None
@@ -349,7 +375,11 @@ class CompiledWorkspace:
         referenced_model_ids = {
             experiment.roles.solver,
             experiment.roles.judge,
-            *(tuple([experiment.roles.optimizer]) if experiment.roles.optimizer is not None else ()),
+            *(
+                tuple([experiment.roles.optimizer])
+                if experiment.roles.optimizer is not None
+                else ()
+            ),
             *(
                 tuple([workspace.stages["author"].model])
                 if workspace.stages["author"].model is not None

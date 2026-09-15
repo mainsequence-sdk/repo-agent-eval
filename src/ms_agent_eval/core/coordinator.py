@@ -58,7 +58,8 @@ from .evaluation import (
     LlmJudge,
     SplitManifest,
     aggregate_judge_votes,
-    deterministic_group_k_fold,
+    deterministic_group_training_partitions,
+    deterministic_group_validation_split,
     judge_validation_result_from_scores,
     validate_judge,
 )
@@ -115,6 +116,7 @@ from .workspace import (
     load_yaml,
     resolve_stage_model,
 )
+from .workload import calculate_workload
 
 
 LmFactory = Callable[
@@ -223,10 +225,7 @@ class _ExecutionSession:
                 budget = self.coordinator._budget_ledger(
                     packet.stage,
                     concurrency=(
-                        sum(
-                            endpoint.max_concurrent_requests
-                            for endpoint in eligible_endpoints
-                        )
+                        sum(endpoint.max_concurrent_requests for endpoint in eligible_endpoints)
                         if executor.type is ExecutorType.ENDPOINT
                         else 1
                     ),
@@ -367,11 +366,15 @@ class _ExecutionSession:
                         return response
                     endpoint_failure = failure_kind(endpoint_error)
                     remaining = configured_ids - excluded - {endpoint.id}
-                    if endpoint_failure in {
-                        "connection_error",
-                        "provider_server_error",
-                        "rate_limit_error",
-                    } and remaining:
+                    if (
+                        endpoint_failure
+                        in {
+                            "connection_error",
+                            "provider_server_error",
+                            "rate_limit_error",
+                        }
+                        and remaining
+                    ):
                         pool.quarantine(endpoint.id)
                         excluded.add(endpoint.id)
                         last_endpoint_error = endpoint_error
@@ -737,6 +740,12 @@ class StageCoordinator:
                     json_value(lock.configuration.optimizer)
                     if lock.configuration.optimizer is not None
                     else None
+                ),
+                "workload": calculate_workload(
+                    self.workspace,
+                    experiment_id,
+                    environment=resolved_environment,
+                    pilot=pilot,
                 ),
             },
         )
@@ -1284,6 +1293,12 @@ class StageCoordinator:
                     if lock.configuration.optimizer is not None
                     else None
                 ),
+                "workload": calculate_workload(
+                    self.workspace,
+                    experiment_id,
+                    environment=resolved_environment,
+                    pilot=pilot,
+                ),
             },
         )
         self.lifecycle.append(
@@ -1348,10 +1363,16 @@ class StageCoordinator:
             optimizer = lock.configuration.optimizer
             if not isinstance(optimizer, CoproConfiguration):
                 raise PreflightError("optimize is valid only for COPRO experiments")
-            train = self._cases_by_split()["train"]
-            fold_by_group, _ = self._fold_assignment(lock)
-            fitting_cases = tuple(case for case in train if fold_by_group[case.group] != 0)
-            target_kind, target_id = self._copro_targets(optimizer)[0]
+            training, _, _ = self._optimization_cases(lock)
+            partition_by_group, _ = self._training_partition_assignment(lock, training)
+            partition_cases = tuple(
+                case for case in training if partition_by_group[case.group] == 0
+            )
+            target_kind, target_id = next(
+                (kind, target)
+                for kind, target in self._copro_targets(optimizer)
+                if kind == "solver_prompt" or any(case.skill == target for case in partition_cases)
+            )
             return (
                 self._copro_proposal_packet(
                     run_id,
@@ -1361,11 +1382,11 @@ class StageCoordinator:
                     target_kind=target_kind,
                     target_id=target_id,
                     round_number=1,
-                    scope="cross_validation/fold-0",
+                    scope="optimization/partition-0",
                     fitting_cases=(
-                        fitting_cases
+                        partition_cases
                         if target_kind == "solver_prompt"
-                        else tuple(case for case in fitting_cases if case.skill == target_id)
+                        else tuple(case for case in partition_cases if case.skill == target_id)
                     ),
                     history=(),
                     dependencies=(),
@@ -1384,7 +1405,7 @@ class StageCoordinator:
             selection = self._persisted_packet(run_id, StageKind.SELECT)
             if selection is not None:
                 return (self._final_fit_packet(run_id, lock, judge_validation, selection),)
-            return self._cross_validation_fit_packets(run_id, lock, judge_validation)
+            return self._validation_fit_packets(run_id, lock, judge_validation)
         if stage is StageKind.SOLVE:
             if lock.configuration.mode is ExperimentMode.OPTIMIZE:
                 fits = self._persisted_fit_packets(run_id, phase="final_fit")
@@ -1414,10 +1435,10 @@ class StageCoordinator:
                         program_dependency=fits[0],
                         evaluation_phase="test",
                     )
-                fits = self._persisted_fit_packets(run_id, phase="cross_validation")
+                fits = self._persisted_fit_packets(run_id, phase="validation")
                 if not fits:
-                    raise PreflightError("cross-validation fits must persist before solve")
-                return self._cross_validation_solve_packets(run_id, lock, judge_validation, fits)
+                    raise PreflightError("validation fits must persist before solve")
+                return self._validation_solve_packets(run_id, lock, judge_validation, fits)
             return self._solve_packets(
                 run_id,
                 lock,
@@ -1437,9 +1458,9 @@ class StageCoordinator:
         if stage is StageKind.SELECT:
             if lock.configuration.mode is not ExperimentMode.OPTIMIZE:
                 raise PreflightError("select is valid only for optimization experiments")
-            judges = self._persisted_judges(run_id, phase="cross_validation")
+            judges = self._persisted_judges(run_id, phase="validation")
             if not judges:
-                raise PreflightError("cross-validation judgments must persist before selection")
+                raise PreflightError("validation judgments must persist before selection")
             return (self._selection_packet(run_id, lock, judge_validation, judges),)
         if stage is StageKind.AGGREGATE:
             judges = self._persisted_judges(run_id)
@@ -1610,22 +1631,22 @@ class StageCoordinator:
                     return copro
                 final_fit = copro
             else:
-                cv_fits = self._cross_validation_fit_packets(run_id, lock, judge_validation)
-                pending = self._execute_all(cv_fits, lock, session)
+                validation_fits = self._validation_fit_packets(run_id, lock, judge_validation)
+                pending = self._execute_all(validation_fits, lock, session)
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
                 if through == StageKind.FIT.value:
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.FIT)
-                cv_solves = self._cross_validation_solve_packets(
-                    run_id, lock, judge_validation, cv_fits
+                validation_solves = self._validation_solve_packets(
+                    run_id, lock, judge_validation, validation_fits
                 )
                 if through == StageKind.SOLVE.value:
-                    pending = self._execute_all(cv_solves, lock, session)
+                    pending = self._execute_all(validation_solves, lock, session)
                     if pending is not None:
                         return self._blocked_progress(run_id, lock.configuration.id, pending)
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.SOLVE)
-                cv_judges, pending = self._execute_solve_judge_pipeline(
-                    cv_solves,
+                validation_judges, pending = self._execute_solve_judge_pipeline(
+                    validation_solves,
                     lock,
                     session,
                     judge_validation,
@@ -1634,7 +1655,9 @@ class StageCoordinator:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
                 if through == StageKind.JUDGE.value:
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.JUDGE)
-                selection = self._selection_packet(run_id, lock, judge_validation, cv_judges)
+                selection = self._selection_packet(
+                    run_id, lock, judge_validation, validation_judges
+                )
                 if not self._ensure_executed(selection, lock, session):
                     return self._blocked_progress(run_id, lock.configuration.id, selection)
                 if through == StageKind.SELECT.value:
@@ -1972,8 +1995,7 @@ class StageCoordinator:
         if model is None:
             return executor.total_concurrency
         capacity = sum(
-            endpoint.max_concurrent_requests
-            for endpoint in model.eligible_endpoints(executor)
+            endpoint.max_concurrent_requests for endpoint in model.eligible_endpoints(executor)
         )
         if capacity <= 0:
             raise ConfigurationError(
@@ -2130,22 +2152,37 @@ class StageCoordinator:
                 "repetition",
                 "program_hash",
                 "evaluation_phase",
-                "fold",
+                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
             ):
                 value[field] = current[field]
+        elif packet.stage is StageKind.FIT:
+            current = _mapping(self._input(packet, "training_set"), "fit input")
+            context = _mapping(current.get("context"), "fit input context")
+            value["phase"] = context["phase"]
+            value["partition"] = context["partition"]
+            value["validation_assignment_hash"] = context["validation_assignment_hash"]
         elif packet.stage is StageKind.JUDGE:
             current = _mapping(self._input(packet, "evaluation"), "judge input")
             value["case_id"] = current["case_id"]
             value["split"] = current["split"]
             value["repetition"] = current["repetition"]
             value["evaluation_phase"] = current["evaluation_phase"]
-            value["fold"] = current["fold"]
+            value["partition"] = current["partition"]
             value["candidate_id"] = current["candidate_id"]
             value["candidate_k"] = current["candidate_k"]
             value["strategy"] = current["strategy"]
+        elif packet.stage is StageKind.OPTIMIZE:
+            current = _mapping(self._input(packet, "optimizer_context"), "optimizer context")
+            value["target_kind"] = current["target_kind"]
+            value["target_id"] = current["target_id"]
+            value["round"] = current["round"]
+        elif packet.stage is StageKind.SELECT and packet.output_schema == "copro-selection-v1":
+            current = _mapping(self._input(packet, "candidate_selection"), "candidate selection")
+            value["scope"] = current["scope"]
+            value["round"] = current["round"]
         elif packet.stage is StageKind.VALIDATE_JUDGE:
             scores = _mapping(value.get("fixture_scores"), "fixture_scores")
             rebound = judge_validation_result_from_scores(
@@ -2690,7 +2727,7 @@ class StageCoordinator:
             return {
                 "candidate_id": output.get("candidate_id"),
                 "phase": output.get("phase"),
-                "fold": output.get("fold"),
+                "partition": output.get("partition"),
             }
         if stage is StageKind.SELECT:
             return {
@@ -3154,7 +3191,7 @@ class StageCoordinator:
                 "response": result.primary_response,
                 "program_hash": program_hash(program),
                 "evaluation_phase": values["evaluation_phase"],
-                "fold": values["fold"],
+                "partition": values["partition"],
                 "candidate_id": values["candidate_id"],
                 "candidate_k": values["candidate_k"],
                 "strategy": values["strategy"],
@@ -3196,7 +3233,7 @@ class StageCoordinator:
                 "split": values["split"],
                 "repetition": values["repetition"],
                 "evaluation_phase": values["evaluation_phase"],
-                "fold": values["fold"],
+                "partition": values["partition"],
                 "candidate_id": values["candidate_id"],
                 "candidate_k": values["candidate_k"],
                 "strategy": values["strategy"],
@@ -3213,14 +3250,23 @@ class StageCoordinator:
                 raise IntegrityError("fit stage has no optimizer")
             configuration = _mapping(packet.work_spec.get("candidate"), "fit candidate")
             candidate_id = _string(configuration.get("id"), "fit candidate id")
-            phase = _string(packet.work_spec.get("phase"), "fit phase")
-            raw_fold = packet.work_spec.get("fold")
-            fold = None if raw_fold is None else _integer(raw_fold, "fit fold")
-            cross_validation = experiment.cross_validation
-            if cross_validation is None:
-                raise IntegrityError("fit stage has no cross-validation configuration")
             training_input = _mapping(self._input(packet, "training_set"), "training set")
             training_cases = _list(training_input.get("cases"), "training cases")
+            fit_context = _mapping(training_input.get("context"), "fit context")
+            phase = _string(fit_context.get("phase"), "fit phase")
+            raw_partition = fit_context.get("partition")
+            partition = None if raw_partition is None else _integer(raw_partition, "fit partition")
+            validation_assignment_hash = _string(
+                fit_context.get("validation_assignment_hash"),
+                "validation assignment hash",
+            )
+            validation = experiment.validation
+            if validation is None:
+                raise IntegrityError("fit stage has no validation configuration")
+            if (phase == "final_fit") is not (
+                packet.work_spec.get("materialize_final_artifacts") is True
+            ):
+                raise IntegrityError("fit context and semantic finalization flag disagree")
             compiled = create_solver_program()
             skill_overlays: Mapping[str, str] = {}
             if isinstance(experiment.optimizer, LabeledFewShotConfiguration):
@@ -3243,7 +3289,7 @@ class StageCoordinator:
                 ]
                 previous = random.getstate()
                 try:
-                    random.seed(f"{cross_validation.seed}:{candidate_id}:{fold}")
+                    random.seed(f"{validation.seed}:{candidate_id}")
                     if raw_k:
                         compiled = dspy.LabeledFewShot(k=raw_k).compile(
                             compiled, trainset=train, sample=True
@@ -3298,9 +3344,11 @@ class StageCoordinator:
                 source_skill_hashes = {
                     item.id: item.content_hash for item in self.workspace.context.instruction_units
                 }
-                selection_reference = (
-                    packet.dependency_artifacts[-1] if packet.dependency_artifacts else None
-                )
+                selection_reference = None
+                if len(packet.dependencies) > 1:
+                    selection_status = self.ledger.status(packet.dependencies[-1])
+                    if selection_status.result is not None:
+                        selection_reference = selection_status.result.outputs[0].content_id
                 selected_evidence = None
                 if strategy == "copro":
                     lineage = []
@@ -3314,7 +3362,9 @@ class StageCoordinator:
                         selection_output = _mapping(
                             self.ledger.read_output(item.result), "COPRO selection output"
                         )
-                        if selection_output.get("scope") != "final_search":
+                        if not str(selection_output.get("scope", "")).startswith(
+                            "optimization/partition-"
+                        ):
                             continue
                         output = item.result.outputs[0]
                         lineage.append(
@@ -3331,9 +3381,7 @@ class StageCoordinator:
                                 ),
                                 "selected_mean_score": selection_output.get("selected_mean_score"),
                                 "candidates": selection_output.get("candidates"),
-                                "proposal_accounting": selection_output.get(
-                                    "proposal_accounting"
-                                ),
+                                "proposal_accounting": selection_output.get("proposal_accounting"),
                                 "selection_artifact": json_value(
                                     self.artifacts.reference(output.content_id, output.media_type)
                                 ),
@@ -3341,6 +3389,7 @@ class StageCoordinator:
                         )
                     lineage.sort(
                         key=lambda item: (
+                            int(str(item.get("scope", "")).removeprefix("optimization/partition-")),
                             int(item.get("round") or 0),
                             0 if item.get("target_kind") == "solver_prompt" else 1,
                             str(item.get("target_id")),
@@ -3348,7 +3397,30 @@ class StageCoordinator:
                     )
                     if not lineage:
                         raise IntegrityError("final COPRO fit has no candidate lineage")
-                    selected_evidence = lineage[-1]
+                    final_partition = max(
+                        int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
+                        for item in lineage
+                    )
+                    final_round = max(
+                        int(item.get("round") or 0)
+                        for item in lineage
+                        if int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
+                        == final_partition
+                    )
+                    terminal_selections = [
+                        item["selection_artifact"]
+                        for item in lineage
+                        if int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
+                        == final_partition
+                        and int(item.get("round") or 0) == final_round
+                    ]
+                    selected_evidence = {
+                        "selected_candidate_id": candidate_id,
+                        "selected_bundle_hash": content_hash(configuration.get("bundle")),
+                        "partition": final_partition,
+                        "round": final_round,
+                        "terminal_selection_artifacts": terminal_selections,
+                    }
                     candidate_lineage_artifact = self.artifacts.put_blob(
                         BytesIO(canonical_json_bytes({"schema_version": 1, "rounds": lineage})),
                         "application/json",
@@ -3396,7 +3468,7 @@ class StageCoordinator:
                             for item in training_cases
                         ],
                         "training_case_hash": content_hash(packet.work_spec.get("training_cases")),
-                        "fold_assignment_hash": packet.work_spec.get("fold_assignment_hash"),
+                        "validation_assignment_hash": validation_assignment_hash,
                         "selection_result": selection_reference,
                         "models": json_value(lock.models),
                         "optimizer_implementation": (
@@ -3409,9 +3481,7 @@ class StageCoordinator:
                 "state_artifact": json_value(state),
                 "fitted_program_hash": program_hash(compiled),
                 "training_case_hash": content_hash(packet.work_spec.get("training_cases")),
-                "fold_assignment_hash": _string(
-                    packet.work_spec.get("fold_assignment_hash"), "fold assignment hash"
-                ),
+                "validation_assignment_hash": validation_assignment_hash,
                 "candidate_id": candidate_id,
                 "candidate_k": raw_k,
                 "strategy": strategy,
@@ -3438,7 +3508,7 @@ class StageCoordinator:
                     len(predictor.demos) for _, predictor in compiled.named_predictors()
                 ),
                 "phase": phase,
-                "fold": fold,
+                "partition": partition,
                 "state_format": "json",
             }
         if packet.stage is StageKind.SELECT:
@@ -3541,77 +3611,28 @@ class StageCoordinator:
                         else {}
                     ),
                 }
-            cross_validation = _mapping(
-                self._input(packet, "cross_validation"), "cross-validation input"
-            )
-            raw_results = _list(cross_validation.get("results"), "cross-validation results")
-            if cross_validation.get("operation") == "cross_validation_summary":
-                expected_cases = {
-                    _string(case_id, "training case id")
-                    for case_id in _list(
-                        cross_validation.get("training_case_ids"), "training case ids"
-                    )
-                }
-                case_ids = [
-                    _string(_mapping(item, "cross-validation result").get("case_id"), "case id")
-                    for item in raw_results
-                ]
-                if len(case_ids) != len(set(case_ids)) or set(case_ids) != expected_cases:
-                    raise IntegrityError(
-                        "COPRO outer cross-validation requires one held-out score per training case"
-                    )
-                scores = [
-                    _number(_mapping(item, "cross-validation result").get("score"), "score")
-                    for item in raw_results
-                ]
-                fold_candidates = sorted(
-                    {
-                        _string(
-                            _mapping(item, "cross-validation result").get("candidate_id"),
-                            "candidate id",
-                        )
-                        for item in raw_results
-                    }
-                )
-                mean_score = sum(scores) / len(scores)
-                return {
-                    "strategy": "copro",
-                    "operation": "cross_validation_summary",
-                    "metric": "mean_score",
-                    "fold_assignment_hash": cross_validation["fold_assignment_hash"],
-                    "candidates": [
-                        {
-                            "candidate_id": "copro-outer-cross-validation",
-                            "k": 0,
-                            "mean_score": mean_score,
-                            "case_count": len(scores),
-                            "fold_candidate_ids": fold_candidates,
-                        }
-                    ],
-                    "selected_candidate_id": "copro-outer-cross-validation",
-                    "selected_k": 0,
-                    "selected_mean_score": mean_score,
-                }
+            validation = _mapping(self._input(packet, "validation"), "validation input")
+            raw_results = _list(validation.get("results"), "validation results")
             by_candidate: dict[str, list[Mapping[str, object]]] = {}
             for raw_result in raw_results:
-                result = _mapping(raw_result, "cross-validation result")
+                result = _mapping(raw_result, "validation result")
                 candidate_id = _string(result.get("candidate_id"), "candidate id")
                 by_candidate.setdefault(candidate_id, []).append(result)
             expected_cases = {
-                _string(case_id, "training case id")
-                for case_id in _list(cross_validation.get("training_case_ids"), "training case ids")
+                _string(case_id, "validation case id")
+                for case_id in _list(validation.get("validation_case_ids"), "validation case ids")
             }
             summaries = []
             for candidate_id, results in sorted(by_candidate.items()):
                 case_ids = [_string(item.get("case_id"), "case id") for item in results]
                 if len(case_ids) != len(set(case_ids)) or set(case_ids) != expected_cases:
                     raise IntegrityError(
-                        f"candidate {candidate_id!r} must have exactly one out-of-fold score per training case"
+                        f"candidate {candidate_id!r} must have exactly one score per validation case"
                     )
                 k_values = {_integer(item.get("k"), "candidate k") for item in results}
                 if len(k_values) != 1:
-                    raise IntegrityError("candidate cross-validation results disagree on k")
-                scores = [_number(item.get("score"), "cross-validation score") for item in results]
+                    raise IntegrityError("candidate validation results disagree on k")
+                scores = [_number(item.get("score"), "validation score") for item in results]
                 summaries.append(
                     {
                         "candidate_id": candidate_id,
@@ -3621,7 +3642,7 @@ class StageCoordinator:
                     }
                 )
             if not summaries:
-                raise IntegrityError("cross-validation selection requires candidate results")
+                raise IntegrityError("validation selection requires candidate results")
             selected = min(
                 summaries,
                 key=lambda item: (
@@ -3632,8 +3653,9 @@ class StageCoordinator:
             )
             return {
                 "metric": "mean_score",
-                "fold_assignment_hash": _string(
-                    cross_validation.get("fold_assignment_hash"), "fold assignment hash"
+                "validation_assignment_hash": _string(
+                    validation.get("validation_assignment_hash"),
+                    "validation assignment hash",
                 ),
                 "candidates": summaries,
                 "selected_candidate_id": selected["candidate_id"],
@@ -3659,9 +3681,7 @@ class StageCoordinator:
             execution_by_stage: dict[str, Counter[str]] = {}
             workspace = self.workspace.repository.workspace
             eligible_deployments: dict[str, set[str]] = defaultdict(set)
-            eligible_endpoints: dict[
-                str, tuple[ExecutorConfiguration, EndpointConfiguration]
-            ] = {}
+            eligible_endpoints: dict[str, tuple[ExecutorConfiguration, EndpointConfiguration]] = {}
             for role_model in lock.models.values():
                 role_executor = workspace.executors[role_model.executor_id]
                 if role_executor.type is not ExecutorType.ENDPOINT:
@@ -4144,13 +4164,7 @@ class StageCoordinator:
             ),
         }
         packet_dependencies = [judge_validation.packet_id]
-        work_dependencies: list[str] = []
-        for dependency in dependencies:
-            packet_dependencies.append(dependency.packet_id)
-            status = self.ledger.status(dependency.packet_id)
-            if status.result is None:
-                raise IntegrityError("COPRO proposal dependency is not persisted")
-            work_dependencies.append(status.result.outputs[0].content_id)
+        packet_dependencies.extend(item.packet_id for item in dependencies)
         return self._packet(
             run_id,
             lock,
@@ -4172,19 +4186,17 @@ class StageCoordinator:
             work_spec={
                 "strategy": "copro",
                 "operation": "propose",
-                "scope": scope,
-                "round": round_number,
                 "target": {"kind": target_kind, "id": target_id},
-                "parent_bundle_hash": content_hash(bundle),
                 "current_target_hash": content_hash(
                     {"text": current_text, "output_prefix": current_prefix}
                 ),
                 "history": safe_history,
+                "requirements": requirements,
                 "breadth": optimizer.breadth,
                 "init_temperature": optimizer.init_temperature,
-                "fitting_corpus_hash": optimizer_context["fitting_corpus_hash"],
+                "optimizer_program_hash": program_hash(create_copro_proposal_program()),
             },
-            work_dependencies=tuple(work_dependencies),
+            work_dependencies=(),
         )
 
     def _copro_candidate_bundles(
@@ -4258,12 +4270,10 @@ class StageCoordinator:
         )
         proposal_accounting = proposal_output.get("proposal_accounting")
         results = []
-        output_ids = []
         for judge in sorted(judges, key=self._judge_packet_key):
             status = self.ledger.status(judge.packet_id)
             if status.result is None:
                 raise IntegrityError("COPRO selection requires persisted judgments")
-            output_ids.append(status.result.outputs[0].content_id)
             output = _mapping(self.ledger.read_output(status.result), "COPRO judgment")
             results.append(
                 {
@@ -4303,52 +4313,25 @@ class StageCoordinator:
                 *(item.packet_id for item in judges),
             ),
             output_schema="copro-selection-v1",
-            work_spec=selection,
-            work_dependencies=tuple(output_ids),
-        )
-
-    def _copro_cross_validation_packet(
-        self,
-        run_id: str,
-        lock: ExperimentLock,
-        judge_validation: StagePacket,
-        judges: Sequence[StagePacket],
-    ) -> StagePacket:
-        results = []
-        output_ids = []
-        for judge in sorted(judges, key=self._judge_packet_key):
-            status = self.ledger.status(judge.packet_id)
-            if status.result is None:
-                raise IntegrityError("cross-validation summary requires persisted judgments")
-            output_ids.append(status.result.outputs[0].content_id)
-            output = _mapping(self.ledger.read_output(status.result), "COPRO held-out judgment")
-            results.append(
-                {
-                    "candidate_id": output["candidate_id"],
-                    "fold": output["fold"],
-                    "case_id": output["case_id"],
-                    "score": output["score"],
-                }
-            )
-        _, assignment_hash = self._fold_assignment(lock)
-        value = {
-            "operation": "cross_validation_summary",
-            "strategy": "copro",
-            "metric": "mean_score",
-            "fold_assignment_hash": assignment_hash,
-            "training_case_ids": [case.id for case in self._cases_by_split()["train"]],
-            "results": results,
-        }
-        return self._packet(
-            run_id,
-            lock,
-            StageKind.SELECT,
-            inputs=(self.ledger.put_json("cross_validation", value),),
-            instructions={"task": "Aggregate COPRO out-of-fold diagnostics."},
-            dependencies=(judge_validation.packet_id, *(item.packet_id for item in judges)),
-            output_schema="cross-validation-selection-v1",
-            work_spec=value,
-            work_dependencies=tuple(output_ids),
+            work_spec={
+                "operation": "copro_round",
+                "metric": selection["metric"],
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "current_candidate_id": current_candidate_id,
+                "expected_case_ids": selection["expected_case_ids"],
+                "candidates": selection["candidates"],
+                "results": selection["results"],
+                **(
+                    {"proposal_accounting": selection["proposal_accounting"]}
+                    if "proposal_accounting" in selection
+                    else {}
+                ),
+            },
+            # Candidate scores and bundle contents are already normalized into
+            # work_spec. Run-specific judge-result artifacts must not make an
+            # otherwise identical deterministic selection a new work node.
+            work_dependencies=(),
         )
 
     def _run_copro_search(
@@ -4358,20 +4341,22 @@ class StageCoordinator:
         judge_validation: StagePacket,
         session: _ExecutionSession,
         *,
-        fitting_cases: Sequence[object],
+        training_cases: Sequence[CaseDefinition],
+        validation_cases: Sequence[CaseDefinition],
         scope: str,
-        fold: int | None,
-        fold_assignment_hash: str,
+        partition: int,
+        validation_assignment_hash: str,
+        initial_bundle: Mapping[str, object],
         initial_dependency: StagePacket | None = None,
     ) -> StagePacket | RunProgress:
         optimizer = lock.configuration.optimizer
         if not isinstance(optimizer, CoproConfiguration):
             raise IntegrityError("COPRO search requires COPRO configuration")
-        bundle: Mapping[str, object] = self._base_copro_bundle()
+        bundle: Mapping[str, object] = initial_bundle
         dependencies: tuple[StagePacket, ...] = (
             () if initial_dependency is None else (initial_dependency,)
         )
-        history_by_target: dict[str, list[Mapping[str, object]]] = {}
+        history_by_target = self._copro_history_before_partition(run_id, partition)
         for round_number in range(1, optimizer.depth + 1):
             targets = self._copro_targets(optimizer)
             target_batches = (
@@ -4382,20 +4367,36 @@ class StageCoordinator:
                 if not target_batch:
                     continue
 
-                # The prompt is selected first. All skills then start from the
-                # same frozen bundle and share the bounded execution queues.
+                # Freeze the selected global prompt before scheduling skills.
+                # Every skill in the second batch is independent and starts
+                # from this exact bundle.
                 frozen_bundle = bundle
-                target_inputs: list[tuple[str, str, tuple[CaseDefinition, ...], StagePacket]] = []
+                target_inputs: list[
+                    tuple[
+                        str,
+                        str,
+                        tuple[CaseDefinition, ...],
+                        tuple[CaseDefinition, ...],
+                        StagePacket,
+                    ]
+                ] = []
                 proposals: list[StagePacket] = []
                 for target_kind, target_id in target_batch:
-                    target_cases = (
-                        tuple(fitting_cases)
+                    target_training_cases = (
+                        tuple(training_cases)
                         if target_kind == "solver_prompt"
-                        else tuple(case for case in fitting_cases if case.skill == target_id)
+                        else tuple(case for case in training_cases if case.skill == target_id)
                     )
-                    if not target_cases:
+                    if not target_training_cases:
+                        continue
+                    target_validation_cases = (
+                        tuple(validation_cases)
+                        if target_kind == "solver_prompt"
+                        else tuple(case for case in validation_cases if case.skill == target_id)
+                    )
+                    if not target_validation_cases:
                         raise PreflightError(
-                            f"COPRO target {target_id!r} has no permitted training cases in {scope}"
+                            f"COPRO target {target_id!r} has no fixed validation cases"
                         )
                     proposal = self._copro_proposal_packet(
                         run_id,
@@ -4406,13 +4407,23 @@ class StageCoordinator:
                         target_id=target_id,
                         round_number=round_number,
                         scope=scope,
-                        fitting_cases=target_cases,
+                        fitting_cases=target_training_cases,
                         history=history_by_target.get(target_id, ()),
                         dependencies=dependencies,
                     )
                     proposal = self._retry_legacy_copro_exhaustion(proposal)
                     proposals.append(proposal)
-                    target_inputs.append((target_kind, target_id, target_cases, proposal))
+                    target_inputs.append(
+                        (
+                            target_kind,
+                            target_id,
+                            target_training_cases,
+                            target_validation_cases,
+                            proposal,
+                        )
+                    )
+                if not target_inputs:
+                    continue
 
                 pending = self._execute_all(tuple(proposals), lock, session)
                 if pending is not None:
@@ -4423,6 +4434,7 @@ class StageCoordinator:
                         str,
                         str,
                         tuple[CaseDefinition, ...],
+                        tuple[CaseDefinition, ...],
                         StagePacket,
                         tuple[Mapping[str, object], ...],
                         str,
@@ -4430,7 +4442,13 @@ class StageCoordinator:
                     ]
                 ] = []
                 all_fits: list[StagePacket] = []
-                for target_kind, target_id, target_cases, proposal in target_inputs:
+                for (
+                    target_kind,
+                    target_id,
+                    target_training_cases,
+                    target_validation_cases,
+                    proposal,
+                ) in target_inputs:
                     candidates = self._copro_candidate_bundles(frozen_bundle, proposal)
                     current_id = _string(candidates[0].get("id"), "current candidate id")
                     fits = tuple(
@@ -4438,11 +4456,11 @@ class StageCoordinator:
                             run_id,
                             lock,
                             judge_validation,
-                            cases=target_cases,
+                            cases=target_training_cases,
                             candidate=candidate,
                             phase="copro_candidate",
-                            fold=fold,
-                            fold_assignment_hash=fold_assignment_hash,
+                            partition=partition,
+                            validation_assignment_hash=validation_assignment_hash,
                             selection=proposal,
                         )
                         for candidate in candidates
@@ -4452,7 +4470,8 @@ class StageCoordinator:
                         (
                             target_kind,
                             target_id,
-                            target_cases,
+                            target_training_cases,
+                            target_validation_cases,
                             proposal,
                             candidates,
                             current_id,
@@ -4468,7 +4487,8 @@ class StageCoordinator:
                 for (
                     target_kind,
                     target_id,
-                    target_cases,
+                    target_training_cases,
+                    target_validation_cases,
                     proposal,
                     candidates,
                     current_id,
@@ -4481,10 +4501,10 @@ class StageCoordinator:
                             run_id,
                             lock,
                             judge_validation,
-                            selected_case_ids=[case.id for case in target_cases],
+                            selected_case_ids=[case.id for case in target_validation_cases],
                             program_dependency=fit,
-                            evaluation_phase="copro_search",
-                            fold=fold,
+                            evaluation_phase="validation",
+                            partition=partition,
                         )
                     )
                     all_solves.extend(solves)
@@ -4492,8 +4512,8 @@ class StageCoordinator:
                         _CoproTargetPlan(
                             target_kind=target_kind,
                             target_id=target_id,
-                            training_cases=target_cases,
-                            validation_cases=target_cases,
+                            training_cases=target_training_cases,
+                            validation_cases=target_validation_cases,
                             proposal=proposal,
                             candidates=candidates,
                             current_candidate_id=current_id,
@@ -4585,16 +4605,45 @@ class StageCoordinator:
             run_id,
             lock,
             judge_validation,
-            cases=fitting_cases,
+            cases=training_cases,
             candidate=final_candidate,
-            phase="final_fit" if fold is None else "cross_validation",
-            fold=fold,
-            fold_assignment_hash=fold_assignment_hash,
+            phase="optimization_partition",
+            partition=partition,
+            validation_assignment_hash=validation_assignment_hash,
             upstream_dependencies=dependencies,
         )
         if not self._ensure_executed(final_fit, lock, session):
             return self._blocked_progress(run_id, lock.configuration.id, final_fit)
         return final_fit
+
+    def _copro_history_before_partition(
+        self, run_id: str, partition: int
+    ) -> dict[str, list[Mapping[str, object]]]:
+        history: dict[str, list[Mapping[str, object]]] = {}
+        for item in self.ledger.list(run_id):
+            if (
+                item.packet.output_schema != "copro-selection-v1"
+                or item.state is not StageState.PERSISTED
+                or item.result is None
+            ):
+                continue
+            output = _mapping(self.ledger.read_output(item.result), "COPRO selection")
+            scope = str(output.get("scope", ""))
+            prefix = "optimization/partition-"
+            if not scope.startswith(prefix):
+                continue
+            try:
+                source_partition = int(scope.removeprefix(prefix))
+            except ValueError:
+                continue
+            if source_partition >= partition:
+                continue
+            target_id = _string(output.get("target_id"), "COPRO target id")
+            history.setdefault(target_id, []).extend(
+                _mapping(candidate, "COPRO candidate summary")
+                for candidate in _list(output.get("candidates"), "COPRO candidates")
+            )
+        return history
 
     def _advance_copro(
         self,
@@ -4605,78 +4654,106 @@ class StageCoordinator:
         *,
         through: str | None,
     ) -> StagePacket | RunProgress:
-        train = self._cases_by_split()["train"]
-        fold_by_group, assignment_hash = self._fold_assignment(lock)
-        cross_validation = lock.configuration.cross_validation
-        assert cross_validation is not None
-        held_out_judges: list[StagePacket] = []
-        for fold in range(cross_validation.folds):
-            fitting_cases = tuple(case for case in train if fold_by_group[case.group] != fold)
+        training, validation, validation_assignment_hash = self._optimization_cases(lock)
+        partition_by_group, _ = self._training_partition_assignment(lock, training)
+        optimizer = lock.configuration.optimizer
+        assert isinstance(optimizer, CoproConfiguration)
+        bundle: Mapping[str, object] = self._base_copro_bundle()
+        dependency: StagePacket | None = None
+        for partition in range(optimizer.partitions):
+            partition_cases = tuple(
+                case for case in training if partition_by_group[case.group] == partition
+            )
+            active_targets = optimizer.optimize_prompt or any(
+                case.skill in optimizer.skills for case in partition_cases
+            )
+            if not active_targets:
+                continue
             fit = self._run_copro_search(
                 run_id,
                 lock,
                 judge_validation,
                 session,
-                fitting_cases=fitting_cases,
-                scope=f"cross_validation/fold-{fold}",
-                fold=fold,
-                fold_assignment_hash=assignment_hash,
+                training_cases=partition_cases,
+                validation_cases=validation,
+                scope=f"optimization/partition-{partition}",
+                partition=partition,
+                validation_assignment_hash=validation_assignment_hash,
+                initial_bundle=bundle,
+                initial_dependency=dependency,
             )
             if isinstance(fit, RunProgress):
                 return fit
-            held_out = [case.id for case in train if fold_by_group[case.group] == fold]
-            solves = self._solve_packets(
-                run_id,
-                lock,
-                judge_validation,
-                selected_case_ids=held_out,
-                program_dependency=fit,
-                evaluation_phase="cross_validation",
-                fold=fold,
-            )
-            judges, pending = self._execute_solve_judge_pipeline(
-                solves,
-                lock,
-                session,
-                judge_validation,
-            )
-            if pending is not None:
-                return self._blocked_progress(run_id, lock.configuration.id, pending)
-            held_out_judges.extend(judges)
-        summary = self._copro_cross_validation_packet(
-            run_id, lock, judge_validation, held_out_judges
-        )
-        if not self._ensure_executed(summary, lock, session):
-            return self._blocked_progress(run_id, lock.configuration.id, summary)
-        final_fit = self._run_copro_search(
+            status = self.ledger.status(fit.packet_id)
+            assert status.result is not None
+            output = _mapping(self.ledger.read_output(status.result), "COPRO partition fit")
+            bundle = {
+                "instruction": _string(output.get("solver_instruction"), "solver instruction"),
+                "output_prefix": _string(output.get("output_prefix"), "solver output prefix"),
+                "skills": dict(_mapping(output.get("skill_overlays", {}), "skill overlays")),
+            }
+            dependency = fit
+        if dependency is None:
+            raise IntegrityError("COPRO optimization produced no training partition")
+        final_fit = self._fit_packet(
             run_id,
             lock,
             judge_validation,
-            session,
-            fitting_cases=train,
-            scope="final_search",
-            fold=None,
-            fold_assignment_hash=assignment_hash,
-            initial_dependency=summary,
+            cases=training,
+            candidate=self._copro_candidate(bundle),
+            phase="final_fit",
+            partition=None,
+            validation_assignment_hash=validation_assignment_hash,
+            selection=dependency,
         )
-        if isinstance(final_fit, RunProgress):
-            return final_fit
+        if not self._ensure_executed(final_fit, lock, session):
+            return self._blocked_progress(run_id, lock.configuration.id, final_fit)
         if through in {StageKind.OPTIMIZE.value, StageKind.SELECT.value, StageKind.FIT.value}:
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.FIT)
         return final_fit
 
-    def _fold_assignment(self, lock: ExperimentLock) -> tuple[Mapping[str, int], str]:
-        cross_validation = lock.configuration.cross_validation
-        if cross_validation is None:
-            raise IntegrityError("optimization experiment has no cross-validation configuration")
+    def _validation_assignment(self, lock: ExperimentLock) -> tuple[Mapping[str, str], str]:
+        validation = lock.configuration.validation
+        if validation is None:
+            raise IntegrityError("optimization experiment has no validation configuration")
         train = self._cases_by_split()["train"]
-        assignments = deterministic_group_k_fold(
+        assignments = deterministic_group_validation_split(
             train,
-            folds=cross_validation.folds,
-            seed=cross_validation.seed,
+            fraction=validation.fraction,
+            seed=validation.seed,
         )
-        mapping = {item.group: item.fold for item in assignments}
+        mapping = {item.group: item.split for item in assignments}
         return mapping, content_hash(assignments)
+
+    def _optimization_cases(
+        self, lock: ExperimentLock
+    ) -> tuple[tuple[CaseDefinition, ...], tuple[CaseDefinition, ...], str]:
+        assignment, assignment_hash = self._validation_assignment(lock)
+        permanent_train = self._cases_by_split()["train"]
+        training = tuple(case for case in permanent_train if assignment[case.group] == "training")
+        validation = tuple(
+            case for case in permanent_train if assignment[case.group] == "validation"
+        )
+        return training, validation, assignment_hash
+
+    def _training_partition_assignment(
+        self, lock: ExperimentLock, training: Sequence[CaseDefinition]
+    ) -> tuple[Mapping[str, int], str]:
+        optimizer = lock.configuration.optimizer
+        if not isinstance(optimizer, CoproConfiguration):
+            raise IntegrityError("training partitions are valid only for COPRO")
+        validation = lock.configuration.validation
+        if validation is None:
+            raise IntegrityError("optimization experiment has no validation configuration")
+        assignments = deterministic_group_training_partitions(
+            training,
+            partitions=optimizer.partitions,
+            seed=validation.seed,
+        )
+        return (
+            {item.group: item.partition for item in assignments},
+            content_hash(assignments),
+        )
 
     def _fit_packet(
         self,
@@ -4687,8 +4764,8 @@ class StageCoordinator:
         cases: Sequence[object],
         candidate: Mapping[str, object],
         phase: str,
-        fold: int | None,
-        fold_assignment_hash: str,
+        partition: int | None,
+        validation_assignment_hash: str,
         selection: StagePacket | None = None,
         upstream_dependencies: Sequence[StagePacket] = (),
     ) -> StagePacket:
@@ -4718,26 +4795,29 @@ class StageCoordinator:
                 for case in cases
             ]
         dependencies = [judge_validation.packet_id]
-        work_dependencies: list[str] = []
         if selection is not None:
             dependencies.append(selection.packet_id)
-            selection_status = self.ledger.status(selection.packet_id)
-            assert selection_status.result is not None
-            work_dependencies.append(selection_status.result.outputs[0].content_id)
-        for upstream in upstream_dependencies:
-            dependencies.append(upstream.packet_id)
-            upstream_status = self.ledger.status(upstream.packet_id)
-            assert upstream_status.result is not None
-            work_dependencies.append(upstream_status.result.outputs[0].content_id)
+        dependencies.extend(item.packet_id for item in upstream_dependencies)
         return self._packet(
             run_id,
             lock,
             StageKind.FIT,
-            inputs=(self.ledger.put_json("training_set", {"cases": train}),),
+            inputs=(
+                self.ledger.put_json(
+                    "training_set",
+                    {
+                        "cases": train,
+                        "context": {
+                            "phase": phase,
+                            "partition": partition,
+                            "validation_assignment_hash": validation_assignment_hash,
+                        },
+                    },
+                ),
+            ),
             instructions={
                 "task": "Fit a state-only DSPy program using only the supplied training cases.",
                 "candidate": dict(candidate),
-                "phase": phase,
                 "forbidden_splits": ["test", "challenge"],
             },
             dependencies=tuple(dependencies),
@@ -4745,70 +4825,55 @@ class StageCoordinator:
             work_spec={
                 "training_cases": [(case.id, case.content_hash) for case in cases],
                 "candidate": dict(candidate),
-                "phase": phase,
-                "fold": fold,
-                "fold_assignment_hash": fold_assignment_hash,
-                "selection": work_dependencies[0] if work_dependencies else None,
-                "additional_selections": work_dependencies[1:],
+                "materialize_final_artifacts": phase == "final_fit",
             },
-            work_dependencies=tuple(work_dependencies),
+            work_dependencies=(),
         )
 
-    def _cross_validation_fit_packets(
+    def _validation_fit_packets(
         self, run_id: str, lock: ExperimentLock, judge_validation: StagePacket
     ) -> tuple[StagePacket, ...]:
-        train = self._cases_by_split()["train"]
-        fold_by_group, assignment_hash = self._fold_assignment(lock)
-        folds = lock.configuration.cross_validation
-        assert folds is not None
+        training, _, assignment_hash = self._optimization_cases(lock)
         packets = []
         for candidate in self._candidate_configurations(lock):
-            for fold in range(folds.folds):
-                fit_cases = (
-                    ()
-                    if candidate["k"] == 0
-                    else tuple(case for case in train if fold_by_group[case.group] != fold)
+            fit_cases = () if candidate["k"] == 0 else training
+            packets.append(
+                self._fit_packet(
+                    run_id,
+                    lock,
+                    judge_validation,
+                    cases=fit_cases,
+                    candidate=candidate,
+                    phase="validation",
+                    partition=None,
+                    validation_assignment_hash=assignment_hash,
                 )
-                packets.append(
-                    self._fit_packet(
-                        run_id,
-                        lock,
-                        judge_validation,
-                        cases=fit_cases,
-                        candidate=candidate,
-                        phase="cross_validation",
-                        fold=fold,
-                        fold_assignment_hash=assignment_hash,
-                    )
-                )
+            )
         return tuple(packets)
 
-    def _cross_validation_solve_packets(
+    def _validation_solve_packets(
         self,
         run_id: str,
         lock: ExperimentLock,
         judge_validation: StagePacket,
         fits: Sequence[StagePacket],
     ) -> tuple[StagePacket, ...]:
-        train = self._cases_by_split()["train"]
-        fold_by_group, _ = self._fold_assignment(lock)
+        _, validation, _ = self._optimization_cases(lock)
         packets = []
         for fit in fits:
             status = self.ledger.status(fit.packet_id)
             assert status.result is not None
             output = _mapping(self.ledger.read_output(status.result), "fitted program")
-            fold = _integer(output.get("fold"), "fitted program fold")
             candidate_id = _string(output.get("candidate_id"), "fitted program candidate_id")
-            held_out = tuple(case.id for case in train if fold_by_group[case.group] == fold)
             packets.extend(
                 self._solve_packets(
                     run_id,
                     lock,
                     judge_validation,
-                    selected_case_ids=held_out,
+                    selected_case_ids=tuple(case.id for case in validation),
                     program_dependency=fit,
-                    evaluation_phase="cross_validation",
-                    fold=fold,
+                    evaluation_phase="validation",
+                    partition=None,
                     candidate_id=candidate_id,
                 )
             )
@@ -4822,41 +4887,41 @@ class StageCoordinator:
         judges: Sequence[StagePacket],
     ) -> StagePacket:
         results = []
-        output_ids = []
         for judge in sorted(judges, key=self._judge_packet_key):
             status = self.ledger.status(judge.packet_id)
             assert status.result is not None
-            output_ids.append(status.result.outputs[0].content_id)
-            output = _mapping(self.ledger.read_output(status.result), "cross-validation judgment")
+            output = _mapping(self.ledger.read_output(status.result), "validation judgment")
             results.append(
                 {
                     "candidate_id": _string(output.get("candidate_id"), "candidate_id"),
                     "k": _integer(output.get("candidate_k"), "candidate_k"),
-                    "fold": _integer(output.get("fold"), "fold"),
                     "case_id": _string(output.get("case_id"), "case_id"),
                     "score": _number(output.get("score"), "score"),
                 }
             )
-        _, assignment_hash = self._fold_assignment(lock)
+        _, validation, assignment_hash = self._optimization_cases(lock)
         selection_input = {
             "metric": "mean_score",
-            "fold_assignment_hash": assignment_hash,
-            "training_case_ids": [case.id for case in self._cases_by_split()["train"]],
+            "validation_assignment_hash": assignment_hash,
+            "validation_case_ids": [case.id for case in validation],
             "results": results,
         }
         return self._packet(
             run_id,
             lock,
             StageKind.SELECT,
-            inputs=(self.ledger.put_json("cross_validation", selection_input),),
+            inputs=(self.ledger.put_json("validation", selection_input),),
             instructions={
-                "task": "Select the candidate with the highest mean out-of-fold score.",
+                "task": "Select the candidate with the highest mean validation score.",
                 "tie_break": "prefer smaller k, then candidate id",
             },
             dependencies=(judge_validation.packet_id, *(item.packet_id for item in judges)),
-            output_schema="cross-validation-selection-v1",
+            output_schema="validation-selection-v1",
             work_spec=selection_input,
-            work_dependencies=tuple(output_ids),
+            # The normalized validation results in work_spec are the complete
+            # semantic input; judge output artifacts also contain reporting
+            # coordinates and are attempt provenance only.
+            work_dependencies=(),
         )
 
     def _final_fit_packet(
@@ -4868,12 +4933,12 @@ class StageCoordinator:
     ) -> StagePacket:
         status = self.ledger.status(selection.packet_id)
         assert status.result is not None
-        selected = _mapping(self.ledger.read_output(status.result), "cross-validation selection")
+        selected = _mapping(self.ledger.read_output(status.result), "validation selection")
         candidate = {
             "id": _string(selected.get("selected_candidate_id"), "selected candidate id"),
             "k": _integer(selected.get("selected_k"), "selected k"),
         }
-        _, assignment_hash = self._fold_assignment(lock)
+        _, _, assignment_hash = self._optimization_cases(lock)
         return self._fit_packet(
             run_id,
             lock,
@@ -4881,8 +4946,8 @@ class StageCoordinator:
             cases=self._cases_by_split()["train"] if candidate["k"] else (),
             candidate=candidate,
             phase="final_fit",
-            fold=None,
-            fold_assignment_hash=assignment_hash,
+            partition=None,
+            validation_assignment_hash=assignment_hash,
             selection=selection,
         )
 
@@ -4897,7 +4962,7 @@ class StageCoordinator:
         selected_case_ids: Sequence[str] | None = None,
         program_dependency: StagePacket | None = None,
         evaluation_phase: str = "test",
-        fold: int | None = None,
+        partition: int | None = None,
         candidate_id: str | None = None,
         gate_dependency: StagePacket | None = None,
     ) -> tuple[StagePacket, ...]:
@@ -4996,7 +5061,7 @@ class StageCoordinator:
                             "solver_attachments": dict(case.solver_attachments()),
                             "program_hash": solver_program_hash,
                             "evaluation_phase": evaluation_phase,
-                            "fold": fold,
+                            "partition": partition,
                             "candidate_id": candidate_id or "baseline",
                             "candidate_k": candidate_k,
                             "strategy": strategy,
@@ -5014,11 +5079,6 @@ class StageCoordinator:
                     "solver_attachments": dict(case.solver_attachments()),
                     "program_hash": solver_program_hash,
                     "fitted_state": (None if state_artifact is None else state_artifact.content_id),
-                    "evaluation_phase": evaluation_phase,
-                    "fold": fold,
-                    "candidate_id": candidate_id or "baseline",
-                    "candidate_k": candidate_k,
-                    "strategy": strategy,
                     "runtime": content_hash(
                         self.workspace.repository.workspace.runtime(lock.configuration.id)
                     ),
@@ -5072,7 +5132,7 @@ class StageCoordinator:
                 "split": candidate["split"],
                 "repetition": candidate["repetition"],
                 "evaluation_phase": candidate["evaluation_phase"],
-                "fold": candidate["fold"],
+                "partition": candidate["partition"],
                 "candidate_id": candidate["candidate_id"],
                 "candidate_k": candidate["candidate_k"],
                 "strategy": candidate["strategy"],
@@ -5080,9 +5140,6 @@ class StageCoordinator:
                 "solver_work_id": solve.work_id,
                 "solver_packet_id": solve.packet_id,
             }
-            judge_validation_status = self.ledger.status(judge_validation.packet_id)
-            assert judge_validation_status.result is not None
-            judge_validation_output = judge_validation_status.result.outputs[0].content_id
             response_hash = content_hash(candidate["response"])
             judge_view = {
                 "case_judge_view_hash": case.judge_view_hash,
@@ -5107,17 +5164,10 @@ class StageCoordinator:
                     work_spec={
                         "judge_view": judge_view,
                         "candidate_response_hash": response_hash,
-                        "producer_work_id": solve.work_id,
-                        "producer_model_hash": solve.model.configuration_hash,
-                        "judge_validation_result": judge_validation_output,
                         "judge_program_hash": lock.judge_program_hash,
                         "repetitions": self._judge_repetitions(run_id),
                     },
-                    work_dependencies=(
-                        judge_validation_output,
-                        solve.work_id,
-                        response_hash,
-                    ),
+                    work_dependencies=(response_hash,),
                 )
             )
         return tuple(packets)
@@ -5298,7 +5348,7 @@ class StageCoordinator:
         value = _mapping(self._input(packet, "evaluation"), "judge input")
         return (
             _string(value.get("candidate_id", "baseline"), "judge candidate id"),
-            int(value.get("fold") if value.get("fold") is not None else -1),
+            int(value.get("partition") if value.get("partition") is not None else -1),
             _string(value.get("case_id"), "judge case_id"),
             _string(value.get("split"), "judge split"),
             int(value.get("repetition", 0)),
@@ -5323,7 +5373,11 @@ class StageCoordinator:
         role = (
             "judge"
             if stage in {StageKind.VALIDATE_JUDGE, StageKind.JUDGE}
-            else ("solver" if stage is StageKind.SOLVE else ("optimizer" if stage is StageKind.OPTIMIZE else stage.value))
+            else (
+                "solver"
+                if stage is StageKind.SOLVE
+                else ("optimizer" if stage is StageKind.OPTIMIZE else stage.value)
+            )
         )
         model = lock.models.get(role) or resolve_stage_model(
             workspace,
@@ -5460,9 +5514,7 @@ class StageCoordinator:
             _string(payload.get("proposal_hash"), "COPRO proposal hash")
             candidates = _list(payload.get("candidates"), "COPRO proposal candidates")
             context = _mapping(self._input(packet, "optimizer_context"), "optimizer context")
-            expected_count = _integer(
-                context.get("candidate_count"), "optimizer candidate_count"
-            )
+            expected_count = _integer(context.get("candidate_count"), "optimizer candidate_count")
             proposal_accounting = payload.get("proposal_accounting")
             if proposal_accounting is None:
                 # Proposal results persisted before shortfall accounting was added
@@ -5562,7 +5614,7 @@ class StageCoordinator:
                 "repetition",
                 "program_hash",
                 "evaluation_phase",
-                "fold",
+                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
@@ -5585,7 +5637,7 @@ class StageCoordinator:
                 "split",
                 "repetition",
                 "evaluation_phase",
-                "fold",
+                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
@@ -5609,7 +5661,7 @@ class StageCoordinator:
                 raise IntegrityError("COPRO fitted programs must have zero demonstrations")
             if strategy == "labeled_few_shot" and overlays:
                 raise IntegrityError("labeled_few_shot programs cannot contain skill overlays")
-            if packet.work_spec.get("phase") == "final_fit":
+            if packet.work_spec.get("materialize_final_artifacts") is True:
                 manifest = _mapping(
                     payload.get("compiled_manifest_artifact"), "compiled manifest artifact"
                 )
@@ -5652,7 +5704,7 @@ class StageCoordinator:
                     )
             if payload.get("tie_break") != "current_then_shorter_then_content_hash":
                 raise IntegrityError("COPRO selection output has the wrong tie-break policy")
-        elif packet.output_schema == "cross-validation-selection-v1":
+        elif packet.output_schema == "validation-selection-v1":
             _string(payload.get("selected_candidate_id"), "selected candidate id")
             _integer(payload.get("selected_k"), "selected k")
             _number(payload.get("selected_mean_score"), "selected mean score")
@@ -5966,7 +6018,7 @@ class StageCoordinator:
 def _upgrade_frozen_workspace_payload(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Upgrade an immutable schema-13 run definition for the current parser.
+    """Upgrade an immutable schema-13 or schema-14 run for the current parser.
 
     This is deliberately not used by ``WorkspaceRepository.from_file``:
     user-authored legacy workspaces remain rejected. It exists only so a run
@@ -5976,13 +6028,53 @@ def _upgrade_frozen_workspace_payload(
     version = payload.get("schema_version")
     if version == WORKSPACE_SCHEMA_VERSION:
         return json.loads(canonical_json_bytes(payload))
-    if version != 13 or WORKSPACE_SCHEMA_VERSION != 14:
+    if WORKSPACE_SCHEMA_VERSION != 15 or version not in {13, 14}:
         raise IntegrityError(
             f"frozen workspace schema_version {version!r} cannot be rehydrated by "
             f"schema {WORKSPACE_SCHEMA_VERSION}"
         )
 
     upgraded = json.loads(canonical_json_bytes(payload))
+    if version == 14:
+        experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
+        upgraded_experiments: dict[str, object] = {}
+        for experiment_id, raw_experiment in experiments.items():
+            experiment = dict(_mapping(raw_experiment, f"frozen experiment {experiment_id}"))
+            cross_validation = experiment.pop("cross_validation", None)
+            if experiment.get("mode") == "optimize":
+                legacy_validation = _mapping(
+                    cross_validation,
+                    f"frozen experiment {experiment_id} cross_validation",
+                )
+                optimizer = dict(
+                    _mapping(
+                        experiment.get("optimizer"),
+                        f"frozen experiment {experiment_id} optimizer",
+                    )
+                )
+                if optimizer.get("strategy") == "copro":
+                    search = dict(
+                        _mapping(
+                            optimizer.get("search"),
+                            f"frozen experiment {experiment_id} search",
+                        )
+                    )
+                    search["partitions"] = _integer(
+                        legacy_validation.get("folds"),
+                        "frozen cross-validation folds",
+                    )
+                    optimizer["search"] = search
+                    experiment["optimizer"] = optimizer
+                experiment["validation"] = {
+                    "strategy": "holdout",
+                    "fraction": 0.2,
+                    "seed": legacy_validation.get("seed", 0),
+                }
+            upgraded_experiments[experiment_id] = experiment
+        upgraded["schema_version"] = WORKSPACE_SCHEMA_VERSION
+        upgraded["experiments"] = upgraded_experiments
+        return upgraded
+
     stages = _mapping(upgraded.get("stages"), "frozen workspace stages")
     models = _mapping(upgraded.get("models"), "frozen workspace models")
     experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
@@ -5998,9 +6090,7 @@ def _upgrade_frozen_workspace_payload(
         executor_id = _string(stage.get("executor"), f"frozen stage {stage_id} executor")
         previous = model_executors.setdefault(model_id, executor_id)
         if previous != executor_id:
-            raise IntegrityError(
-                f"frozen model {model_id!r} was bound to multiple executors"
-            )
+            raise IntegrityError(f"frozen model {model_id!r} was bound to multiple executors")
 
     deployments: dict[str, object] = {}
     upgraded_models: dict[str, object] = {}
@@ -6085,9 +6175,7 @@ def _upgrade_frozen_workspace_payload(
     )
     upgraded_experiments: dict[str, object] = {}
     for experiment_id, raw_experiment in experiments.items():
-        experiment = dict(
-            _mapping(raw_experiment, f"frozen experiment {experiment_id}")
-        )
+        experiment = dict(_mapping(raw_experiment, f"frozen experiment {experiment_id}"))
         roles: dict[str, object] = {
             "solver": solver_profile,
             "judge": judge_profile,
@@ -6095,6 +6183,27 @@ def _upgrade_frozen_workspace_payload(
         optimizer = experiment.get("optimizer")
         if isinstance(optimizer, Mapping) and optimizer.get("strategy") == "copro":
             roles["optimizer"] = optimizer_profile
+            search = dict(
+                _mapping(optimizer.get("search"), f"frozen experiment {experiment_id} search")
+            )
+            cross_validation = _mapping(
+                experiment.get("cross_validation"),
+                f"frozen experiment {experiment_id} cross_validation",
+            )
+            search["partitions"] = _integer(
+                cross_validation.get("folds"), "frozen cross-validation folds"
+            )
+            experiment["optimizer"] = {**dict(optimizer), "search": search}
+        if experiment.get("mode") == "optimize":
+            cross_validation = _mapping(
+                experiment.pop("cross_validation"),
+                f"frozen experiment {experiment_id} cross_validation",
+            )
+            experiment["validation"] = {
+                "strategy": "holdout",
+                "fraction": 0.2,
+                "seed": cross_validation.get("seed", 0),
+            }
         experiment["roles"] = roles
         upgraded_experiments[experiment_id] = experiment
 
@@ -6172,9 +6281,7 @@ def _rehydrate_historical_experiment_lock(
         }
         for field, value in expected.items():
             if raw.get(field) != value:
-                raise IntegrityError(
-                    f"historical {role} model changed frozen field {field!r}"
-                )
+                raise IntegrityError(f"historical {role} model changed frozen field {field!r}")
         models[role] = ResolvedRoleModel(
             role=current.role,
             profile_id=current.profile_id,

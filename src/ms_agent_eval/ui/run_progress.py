@@ -16,7 +16,7 @@ _STAGE_LABELS = {
     "solve": ("Solving cases", "Solving"),
     "judge": ("Judging responses", "Judging"),
     "fit": ("Fitting DSPy programs", "Fitting"),
-    "select": ("Selecting by cross-validation", "Selecting"),
+    "select": ("Selecting on validation cases", "Selecting"),
     "aggregate": ("Aggregating results", "Aggregating"),
 }
 
@@ -25,7 +25,7 @@ _STAGE_SUBJECTS = {
     "validate_judge": "judge validation",
     "optimize": "optimizer candidate set",
     "fit": "DSPy program",
-    "select": "cross-validation candidate",
+    "select": "validation candidate",
     "aggregate": "results",
 }
 
@@ -95,6 +95,54 @@ class TerminalRunReporter:
                     f"breadth {optimization.get('breadth')} × depth {optimization.get('depth')} "
                     f"· prompt {optimization.get('optimize_prompt')} · skills {targets}[/]"
                 )
+        workload = event.details.get("workload")
+        if isinstance(workload, Mapping):
+            self._workload_summary(workload)
+
+    def _workload_summary(self, workload: Mapping[str, object]) -> None:
+        inventory = workload.get("case_inventory")
+        if isinstance(inventory, Mapping):
+            permanent = inventory.get("permanent_splits")
+            derived = inventory.get("derived")
+            execution = inventory.get("execution")
+            if isinstance(permanent, Mapping):
+                detail = (
+                    f"train {permanent.get('train', 0)} · test {permanent.get('test', 0)} · "
+                    f"challenge {permanent.get('challenge', 0)}"
+                )
+                if isinstance(derived, Mapping):
+                    detail += (
+                        " · derived optimization training "
+                        f"{derived.get('optimization_training_cases', 0)} + validation "
+                        f"{derived.get('validation_cases', 0)}"
+                    )
+                if isinstance(execution, Mapping):
+                    detail += f" · final arms {execution.get('arms', 1)}"
+                self.console.print(f"[dim]Case plan: {detail}[/]")
+        totals = workload.get("totals")
+        if isinstance(totals, Mapping):
+            by_role = totals.get("by_role")
+            roles = (
+                " · ".join(f"{role} {calls}" for role, calls in by_role.items())
+                if isinstance(by_role, Mapping)
+                else ""
+            )
+            self.console.print(
+                f"[bold]Fresh upper bound: {totals.get('logical_model_calls', 0)} model calls[/]"
+                + (f" [dim]· {roles}[/]" if roles else "")
+            )
+        partitions = workload.get("partitions")
+        if (
+            isinstance(partitions, list)
+            and partitions
+            and all(isinstance(item, Mapping) for item in partitions)
+        ):
+            details = " · ".join(
+                f"P{item.get('partition')} {item.get('training_cases')} train / "
+                f"{item.get('target_count')} targets / {item.get('candidate_solver_calls')} solves"
+                for item in partitions
+            )
+            self.console.print(f"[dim]Stateful partitions: {details}[/]")
 
     def _packet_started(self, event: ProgressEvent) -> None:
         self._stop_status()

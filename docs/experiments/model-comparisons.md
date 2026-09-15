@@ -113,7 +113,7 @@ experiments:
       optimizer: qwen-optimizer
       judge: fixed-judge
     optimizer: # COPRO configuration
-    cross_validation: {folds: 5, seed: 0}
+    validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget: # role budgets
 
   qwen-copro-glm-optimizer:
@@ -124,7 +124,7 @@ experiments:
       optimizer: glm-optimizer
       judge: fixed-judge
     optimizer: # identical COPRO search protocol
-    cross_validation: {folds: 5, seed: 0}
+    validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget: # role budgets
 
 comparisons:
@@ -142,7 +142,7 @@ An optimization arm must keep the same solver and judge profiles as its
 “which model proposes better instructions?” from “which model solves the case?”
 The named comparison must include that `based_on` experiment in
 `baseline_experiments`, all listed arms must use one fixed judge profile, and
-schema 14 currently supports `score.mean` as its primary metric. Grouping is a
+schema 15 currently supports `score.mean` as its primary metric. Grouping is a
 unique subset of `solver` and `optimizer`.
 
 ## Execute arms

@@ -21,6 +21,7 @@ from .evaluation import CaseDefinition
 from .hashing import content_hash
 from .planning import CompiledWorkspace
 from .token_preflight import EndpointTokenPreflight, TokenPreflightResult
+from .workload import calculate_workload
 from .workspace import (
     EndpointConfiguration,
     ExecutorConfiguration,
@@ -64,6 +65,12 @@ def calculate_preflight(
     selected_stages = _normalize_stages(stages)
     lock = workspace.experiment_lock(experiment_id, environment=environment)
     cases = _select_cases(workspace, case_ids=case_ids, pilot=pilot)
+    workload = calculate_workload(
+        workspace,
+        experiment_id,
+        environment=environment,
+        pilot=pilot,
+    )
     checker = token_preflight or EndpointTokenPreflight()
     reports: list[Mapping[str, object]] = []
 
@@ -75,9 +82,7 @@ def calculate_preflight(
                     stage,
                     role,
                     lock.models["solver"],
-                    workspace.repository.workspace.executors[
-                        lock.models["solver"].executor_id
-                    ],
+                    workspace.repository.workspace.executors[lock.models["solver"].executor_id],
                     request_count=0,
                     reason="strategy_does_not_use_optimizer_calls",
                     detail="labeled_few_shot compiles demonstrations locally.",
@@ -150,7 +155,6 @@ def calculate_preflight(
                 _optimizer_requests(
                     workspace,
                     lock.configuration.optimizer,
-                    folds=lock.configuration.cross_validation.folds,  # type: ignore[union-attr]
                 )
                 if stage == "optimize"
                 else _solver_requests(
@@ -196,6 +200,7 @@ def calculate_preflight(
         "execution_mode": "pilot" if pilot else "benchmark",
         "selected_case_count": len(cases),
         "selected_case_ids": [case.id for case in cases],
+        "workload": workload,
         "optimization_plan": workspace.validation.get("optimization", {}).get(experiment_id),
         "stages": reports,
         "summary": {
@@ -273,8 +278,6 @@ def _solver_requests(
 def _optimizer_requests(
     workspace: CompiledWorkspace,
     optimizer: object,
-    *,
-    folds: int,
 ) -> tuple[_RenderedRequest, ...]:
     if not isinstance(optimizer, CoproConfiguration):
         return ()
@@ -289,7 +292,7 @@ def _optimizer_requests(
     if optimizer.optimize_prompt:
         targets.append(("solver_prompt", "solver", instruction, prefix))
     targets.extend(("skill", skill, workspace.context.skill(skill), "") for skill in skills)
-    multiplicity = optimizer.depth * (folds + 1)
+    multiplicity = optimizer.depth * optimizer.partitions
     return tuple(
         _RenderedRequest(
             id=f"optimize:{kind}:{target_id}",
@@ -663,8 +666,7 @@ def _deferred_stage_report(
         "reasoning_effort": model.reasoning_effort,
         "executor": executor.id,
         "configured_capacity": sum(
-            endpoint.max_concurrent_requests
-            for endpoint in model.eligible_endpoints(executor)
+            endpoint.max_concurrent_requests for endpoint in model.eligible_endpoints(executor)
         ),
         "logical_request_count": request_count,
         "unique_rendered_request_count": 0,

@@ -164,6 +164,65 @@ def test_work_identity_is_reusable_across_runs_but_attempt_identity_is_not(
     assert ledger.reusable_result(refreshed) is None
 
 
+def test_orchestration_metadata_does_not_change_semantic_work_identity(
+    tmp_path: Path,
+) -> None:
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    instructions = ledger.put_json("instructions", {"task": "solve"})
+    executor = StageExecutorIdentity("remote", "openai_compatible", f"sha256:{'1' * 64}")
+    model = StageModelIdentity("shared-model", f"sha256:{'2' * 64}")
+    budget = StageBudget(1, 1000, 60)
+    semantic_request = {
+        "task": "answer",
+        "global_context": "global",
+        "skill_context": "skill",
+        "program_hash": f"sha256:{'4' * 64}",
+    }
+    first = StagePacket.create(
+        run_id="run-1",
+        experiment_id="optimize",
+        experiment_revision_id=f"sha256:{'3' * 64}",
+        stage=StageKind.SOLVE,
+        attempt=1,
+        dependencies=(f"sha256:{'5' * 64}",),
+        inputs=(
+            ledger.put_json(
+                "case",
+                {**semantic_request, "phase": "validation", "partition": 0},
+            ),
+        ),
+        work_spec=semantic_request,
+        instructions=instructions,
+        output_schema="solver-response-v1",
+        executor=executor,
+        model=model,
+        budget=budget,
+    )
+    second = StagePacket.create(
+        run_id="run-2",
+        experiment_id="optimize",
+        experiment_revision_id=f"sha256:{'6' * 64}",
+        stage=StageKind.SOLVE,
+        attempt=1,
+        dependencies=(f"sha256:{'7' * 64}",),
+        inputs=(
+            ledger.put_json(
+                "case",
+                {**semantic_request, "phase": "test", "partition": 1},
+            ),
+        ),
+        work_spec=semantic_request,
+        instructions=instructions,
+        output_schema="solver-response-v1",
+        executor=executor,
+        model=model,
+        budget=budget,
+    )
+
+    assert first.work_id == second.work_id
+    assert first.attempt_id != second.attempt_id
+
+
 def test_failed_result_records_normalized_error(tmp_path: Path) -> None:
     ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
     packet = ledger.prepare(_packet(ledger))

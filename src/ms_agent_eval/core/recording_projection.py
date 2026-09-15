@@ -35,6 +35,7 @@ from .recorder import (
 from .stages import StageArtifact, StageKind, StageLedger, StageState, StageStatus
 from .storage import FilesystemArtifactStore
 from .workspace import (
+    WORKSPACE_SCHEMA_VERSION,
     RecorderConfiguration,
     RecordingArtifactPolicy,
     RecordingConfiguration,
@@ -540,14 +541,27 @@ class RecorderProjector:
                 add(scope, "Validate judge", None, stage=stage.value)
             elif stage is StageKind.OPTIMIZE:
                 add("optimize", "Optimize", None, stage="optimize")
-                target = _mapping(packet.work_spec.get("target", {}), "optimizer target")
-                target_id = str(target.get("id", "unknown"))
-                round_number = packet.work_spec.get("round", "unknown")
-                scope = f"optimize/propose/{target_id}/round-{round_number}"
+                context = self._failure_context(status)
+                target_id = str(context.get("target_id", "unknown"))
+                round_number = context.get("round", "unknown")
+                search_scope = str(context.get("scope", "optimization"))
+                partition_match = re.fullmatch(r"optimization/partition-(\d+)", search_scope)
+                parent = "optimize"
+                if partition_match is not None:
+                    partition = int(partition_match.group(1))
+                    parent = f"optimize/partition-{partition}"
+                    add(
+                        parent,
+                        f"Partition {partition}",
+                        "optimize",
+                        stage="partition",
+                        partition=partition,
+                    )
+                scope = f"{parent}/propose/{target_id}/round-{round_number}"
                 add(
                     scope,
                     f"Propose {target_id} round {round_number}",
-                    "optimize",
+                    parent,
                     stage=stage.value,
                     target_id=target_id,
                     round=round_number,
@@ -557,10 +571,32 @@ class RecorderProjector:
                 add(scope, "Aggregate", None, stage=stage.value)
             elif stage is StageKind.SELECT:
                 add("optimize", "Optimize", None, stage="optimize")
-                scope = "optimize/select"
-                add(scope, "Select", "optimize", stage=stage.value)
+                context = self._failure_context(status)
+                selection_scope = str(context.get("scope", "validation"))
+                round_number = context.get("round")
+                if selection_scope.startswith("optimization/partition-"):
+                    partition = int(selection_scope.removeprefix("optimization/partition-"))
+                    parent = f"optimize/partition-{partition}"
+                    add(
+                        parent,
+                        f"Partition {partition}",
+                        "optimize",
+                        stage="partition",
+                        partition=partition,
+                    )
+                    target_id = str(context.get("target_id", "unknown"))
+                    scope = f"{parent}/select/{target_id}/round-{round_number}"
+                    add(
+                        scope,
+                        f"Select {target_id} round {round_number}",
+                        parent,
+                        stage=stage.value,
+                    )
+                else:
+                    scope = "optimize/select-validation"
+                    add(scope, "Select validation winner", "optimize", stage=stage.value)
             elif stage is StageKind.FIT:
-                phase, candidate, fold = self._stage_coordinates(status)
+                phase, candidate, partition = self._stage_coordinates(status)
                 add("optimize", "Optimize", None, stage="optimize")
                 if phase == "final_fit":
                     scope = "optimize/final_fit"
@@ -574,19 +610,23 @@ class RecorderProjector:
                         stage="candidate",
                         candidate_id=candidate,
                     )
-                    fold_scope = f"{candidate_scope}/fold-{fold}"
-                    add(
-                        fold_scope,
-                        f"Fold {fold}",
-                        candidate_scope,
-                        stage="fold",
-                        fold=fold,
-                    )
-                    scope = f"{fold_scope}/fit"
-                    add(scope, "Fit", fold_scope, stage=stage.value)
+                    if partition is None:
+                        scope = f"{candidate_scope}/fit"
+                        add(scope, "Fit", candidate_scope, stage=stage.value)
+                    else:
+                        partition_scope = f"{candidate_scope}/partition-{partition}"
+                        add(
+                            partition_scope,
+                            f"Partition {partition}",
+                            candidate_scope,
+                            stage="partition",
+                            partition=partition,
+                        )
+                        scope = f"{partition_scope}/fit"
+                        add(scope, "Fit", partition_scope, stage=stage.value)
             elif stage in {StageKind.SOLVE, StageKind.JUDGE}:
-                phase, candidate, fold = self._stage_coordinates(status)
-                if phase in {"cross_validation", "copro_search"}:
+                phase, candidate, partition = self._stage_coordinates(status)
+                if phase == "validation":
                     add("optimize", "Optimize", None, stage="optimize")
                     candidate_scope = f"optimize/{candidate}"
                     add(
@@ -596,16 +636,20 @@ class RecorderProjector:
                         stage="candidate",
                         candidate_id=candidate,
                     )
-                    fold_scope = f"{candidate_scope}/fold-{fold}"
-                    add(
-                        fold_scope,
-                        f"Fold {fold}",
-                        candidate_scope,
-                        stage="fold",
-                        fold=fold,
-                    )
-                    scope = f"{fold_scope}/{stage.value}"
-                    add(scope, stage.value.title(), fold_scope, stage=stage.value)
+                    if partition is None:
+                        scope = f"{candidate_scope}/{stage.value}"
+                        add(scope, stage.value.title(), candidate_scope, stage=stage.value)
+                    else:
+                        partition_scope = f"{candidate_scope}/partition-{partition}"
+                        add(
+                            partition_scope,
+                            f"Partition {partition}",
+                            candidate_scope,
+                            stage="partition",
+                            partition=partition,
+                        )
+                        scope = f"{partition_scope}/{stage.value}"
+                        add(scope, stage.value.title(), partition_scope, stage=stage.value)
                 else:
                     scope = f"{stage.value}.{phase or 'test'}"
                     add(
@@ -626,7 +670,7 @@ class RecorderProjector:
         packet = status.packet
         phase: str | None = None
         candidate = "baseline"
-        fold: int | None = None
+        partition: int | None = None
         if status.result is not None:
             try:
                 output = _mapping(self.ledger.read_output(status.result), "stage output")
@@ -638,18 +682,14 @@ class RecorderProjector:
                 phase = str(output["evaluation_phase"])
             if isinstance(output.get("candidate_id"), str):
                 candidate = str(output["candidate_id"])
-            if isinstance(output.get("fold"), int) and not isinstance(output.get("fold"), bool):
-                fold = int(output["fold"])
+            if isinstance(output.get("partition"), int) and not isinstance(
+                output.get("partition"), bool
+            ):
+                partition = int(output["partition"])
         configuration = packet.work_spec.get("configuration")
         if isinstance(configuration, Mapping) and isinstance(configuration.get("id"), str):
             candidate = str(configuration["id"])
-        if isinstance(packet.work_spec.get("phase"), str):
-            phase = str(packet.work_spec["phase"])
-        if isinstance(packet.work_spec.get("fold"), int) and not isinstance(
-            packet.work_spec.get("fold"), bool
-        ):
-            fold = int(packet.work_spec["fold"])
-        return phase, candidate, fold
+        return phase, candidate, partition
 
     def _metrics(
         self,
@@ -858,20 +898,14 @@ class RecorderProjector:
     ) -> tuple[TableArtifact, ...]:
         stage_rows = tuple(self._stage_row(item) for item in statuses)
         call_rows = tuple(self._model_call_row(item) for item in model_calls)
-        stage_failure_rows = self._stage_failure_rows(
-            statuses, model_calls, scope_by_packet
-        )
-        call_failure_rows = self._model_call_failure_rows(
-            statuses, model_calls, scope_by_packet
-        )
-        failure_summary_rows = _failure_summary_rows(
-            stage_failure_rows, call_failure_rows
-        )
+        stage_failure_rows = self._stage_failure_rows(statuses, model_calls, scope_by_packet)
+        call_failure_rows = self._model_call_failure_rows(statuses, model_calls, scope_by_packet)
+        failure_summary_rows = _failure_summary_rows(stage_failure_rows, call_failure_rows)
         cases = tuple(self._case_row(item) for item in _report_cases(report))
         criteria = tuple(self._criterion_rows(_report_cases(report)))
         endpoint_rows = self._endpoint_rows(statuses)
         calibration_rows = self._calibration_rows(statuses)
-        optimization_rows, fold_rows = self._optimization_rows(report)
+        optimization_rows, validation_rows = self._optimization_rows(report)
         comparison = report.get("test_comparison") if report is not None else None
         comparison_cases = _comparison_rows(comparison, "cases")
         comparison_skills = _comparison_rows(comparison, "skills")
@@ -889,7 +923,7 @@ class RecorderProjector:
             "endpoint-usage": endpoint_rows,
             "judge-calibration": calibration_rows,
             "optimization-candidates": optimization_rows,
-            "optimization-folds": fold_rows,
+            "optimization-validation": validation_rows,
             "copro-case-comparison": comparison_cases,
             "copro-skill-comparison": comparison_skills,
             "copro-token-band-comparison": comparison_bands,
@@ -954,6 +988,7 @@ class RecorderProjector:
         usage = _mapping(item.get("usage", {}), "model call usage")
         error = self._model_call_error(item)
         parameters = _mapping(item.get("parameters", {}), "model call parameters")
+        error_kind = item.get("error_kind")
         return {
             "call_id": item.get("call_id"),
             "packet_id": item.get("packet_id"),
@@ -964,16 +999,19 @@ class RecorderProjector:
             "provider": item.get("provider_id"),
             "model": item.get("model"),
             "status": item.get("status"),
-            "error_kind": item.get("error_kind"),
+            "error_kind": error_kind,
             "error_message": error.get("message"),
             "root_exception_type": error.get("root_exception_type"),
-            "root_error_message": error.get("root_message"),
+            "root_error_message": error.get("root_message") or error.get("message"),
             "http_status": error.get("status_code"),
             "error_code": error.get("error_code"),
             "errno": error.get("errno"),
-            "retryable": error.get("retryable"),
-            "endpoint_base_url": error.get("endpoint_base_url")
-            or parameters.get("api_base"),
+            "retryable": (
+                error.get("retryable")
+                if isinstance(error.get("retryable"), bool)
+                else _retryable_failure(error_kind if isinstance(error_kind, str) else None)
+            ),
+            "endpoint_base_url": error.get("endpoint_base_url") or parameters.get("api_base"),
             "recorded_at": item.get("recorded_at"),
             "input_tokens": _usage_token(item, "prompt_tokens", "input_tokens"),
             "output_tokens": _usage_token(item, "completion_tokens", "output_tokens"),
@@ -1069,9 +1107,7 @@ class RecorderProjector:
                     **context,
                     "state": status.state.value,
                     "error_kind": None if stage_error is None else stage_error.kind,
-                    "stage_error_message": (
-                        None if stage_error is None else stage_error.message
-                    ),
+                    "stage_error_message": (None if stage_error is None else stage_error.message),
                     "root_exception_type": root.get("root_exception_type")
                     or root.get("exception_type"),
                     "root_error_message": root.get("root_message") or root.get("message"),
@@ -1085,9 +1121,7 @@ class RecorderProjector:
                     "endpoint_ids": base.get("endpoint_ids"),
                     "endpoint_base_urls": base_urls,
                     "failed_model_calls": len(failed_calls),
-                    "model_call_ids": tuple(
-                        str(call.get("call_id")) for call in failed_calls
-                    ),
+                    "model_call_ids": tuple(str(call.get("call_id")) for call in failed_calls),
                     "attempt": status.packet.attempt,
                     "worker_id": None if result is None else result.executor.get("worker_id"),
                     "started_at": base.get("started_at"),
@@ -1128,11 +1162,10 @@ class RecorderProjector:
             error = self._model_call_error(call)
             parameters = _mapping(call.get("parameters", {}), "model call parameters")
             context = self._failure_context(status) if status is not None else {}
-            endpoint_ids = (
-                self._stage_row(status).get("endpoint_ids") if status is not None else ()
-            )
+            endpoint_ids = self._stage_row(status).get("endpoint_ids") if status is not None else ()
             work_id = call.get("work_id")
             recovered = isinstance(work_id, str) and work_id in persisted_work
+            error_kind = call.get("error_kind") or error.get("category")
             rows.append(
                 {
                     "stage": call.get("stage"),
@@ -1144,15 +1177,19 @@ class RecorderProjector:
                     "endpoint_ids": endpoint_ids,
                     "endpoint_base_url": error.get("endpoint_base_url")
                     or parameters.get("api_base"),
-                    "error_kind": call.get("error_kind") or error.get("category"),
+                    "error_kind": error_kind,
                     "exception_type": error.get("exception_type"),
                     "error_message": error.get("message"),
                     "root_exception_type": error.get("root_exception_type"),
-                    "root_error_message": error.get("root_message"),
+                    "root_error_message": error.get("root_message") or error.get("message"),
                     "http_status": error.get("status_code"),
                     "error_code": error.get("error_code"),
                     "errno": error.get("errno"),
-                    "retryable": error.get("retryable"),
+                    "retryable": (
+                        error.get("retryable")
+                        if isinstance(error.get("retryable"), bool)
+                        else _retryable_failure(error_kind if isinstance(error_kind, str) else None)
+                    ),
                     "recovered_by_retry": recovered,
                     "recorded_at": call.get("recorded_at"),
                     "latency_seconds": call.get("latency_seconds"),
@@ -1196,11 +1233,13 @@ class RecorderProjector:
                 "split",
                 "repetition",
                 "evaluation_phase",
-                "fold",
+                "partition",
                 "candidate_id",
                 "round",
                 "scope",
                 "strategy",
+                "target_kind",
+                "target_id",
             ):
                 if context.get(field) is None and value.get(field) is not None:
                     context[field] = value[field]
@@ -1336,15 +1375,85 @@ class RecorderProjector:
             scores = output.get("fixture_scores")
             if not isinstance(scores, Mapping):
                 return ()
+            fixture_metadata = self._judge_validation_fixture_metadata(status)
+            repetitions = _int_or(status.packet.work_spec.get("repetitions"), 1)
             return tuple(
                 {
-                    "fixture_id": key,
-                    "score": value,
+                    "fixture_id": fixture_id,
+                    **fixture_metadata.get(str(fixture_id), {}),
+                    "repetitions": repetitions,
+                    "score_aggregation": (
+                        "median score per rubric criterion across repetitions, "
+                        "then rubric-weighted sum"
+                    ),
+                    "aggregate_score": score,
                     "ordering_consistent": output.get("ordering_consistent"),
                 }
-                for key, value in sorted(scores.items(), key=lambda item: str(item[0]))
+                for fixture_id, score in sorted(scores.items(), key=lambda item: str(item[0]))
             )
         return ()
+
+    def _judge_validation_fixture_metadata(
+        self, status: StageStatus
+    ) -> Mapping[str, Mapping[str, object]]:
+        """Read reporting-only calibration labels from the frozen experiment definition.
+
+        Quality labels deliberately do not appear in the judge work packet because they
+        would reveal the expected ranking to the model. The immutable experiment
+        definition retains those labels for provenance and reporting after execution.
+        """
+
+        try:
+            run = self.ledger.load_run(status.packet.run_id)
+            reference = self._stored_reference(run.get("experiment_definition_artifact"))
+            with self.store.get_blob(reference) as handle:
+                definition = json.load(handle)
+        except (IntegrityError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(definition, Mapping):
+            return {}
+        raw_cases = definition.get("cases", ())
+        cases: dict[str, Mapping[str, object]] = {}
+        if isinstance(raw_cases, Sequence) and not isinstance(raw_cases, (str, bytes)):
+            cases = {
+                str(item["id"]): item
+                for item in raw_cases
+                if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+            }
+        validation = definition.get("judge_validation")
+        if not isinstance(validation, Mapping):
+            return {}
+        raw_fixtures = validation.get("fixtures", ())
+        if not isinstance(raw_fixtures, Sequence) or isinstance(raw_fixtures, (str, bytes)):
+            return {}
+        metadata: dict[str, Mapping[str, object]] = {}
+        for raw_fixture in raw_fixtures:
+            if not isinstance(raw_fixture, Mapping):
+                continue
+            fixture_id = raw_fixture.get("id")
+            case_id = raw_fixture.get("case_id")
+            label = raw_fixture.get("label")
+            if not isinstance(fixture_id, str):
+                continue
+            case = cases.get(str(case_id), {})
+            rubric = case.get("rubric") if isinstance(case, Mapping) else None
+            criteria = rubric.get("criteria") if isinstance(rubric, Mapping) else None
+            criterion_ids: tuple[str, ...] = ()
+            if isinstance(criteria, Sequence) and not isinstance(criteria, (str, bytes)):
+                criterion_ids = tuple(
+                    str(item["id"])
+                    for item in criteria
+                    if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+                )
+            metadata[fixture_id] = {
+                "case_id": case_id,
+                "case_title": case.get("title") if isinstance(case, Mapping) else None,
+                "skill": case.get("skill") if isinstance(case, Mapping) else None,
+                "quality_label": label,
+                "rubric_hash": content_hash(rubric) if isinstance(rubric, Mapping) else None,
+                "rubric_criteria": criterion_ids,
+            }
+        return metadata
 
     @staticmethod
     def _optimization_rows(
@@ -1352,23 +1461,16 @@ class RecorderProjector:
     ) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]]:
         if report is None:
             return (), ()
-        cross_validation = report.get("cross_validation")
-        if not isinstance(cross_validation, Mapping):
+        validation = report.get("validation")
+        if not isinstance(validation, Mapping):
             return (), ()
-        candidates = cross_validation.get("candidates", [])
+        candidates = validation.get("candidates", [])
         candidate_rows = (
             tuple(dict(item) for item in candidates if isinstance(item, Mapping))
             if isinstance(candidates, Sequence) and not isinstance(candidates, (str, bytes))
             else ()
         )
-        folds: list[Mapping[str, object]] = []
-        for candidate in candidate_rows:
-            raw_folds = candidate.get("folds", [])
-            if not isinstance(raw_folds, Sequence) or isinstance(raw_folds, (str, bytes)):
-                continue
-            for fold in raw_folds:
-                if isinstance(fold, Mapping):
-                    folds.append({"candidate_id": candidate.get("candidate_id"), **dict(fold)})
+        validation_rows: list[Mapping[str, object]] = []
         optimization = report.get("optimization")
         if isinstance(optimization, Mapping):
             raw_rounds = optimization.get("rounds", [])
@@ -1384,7 +1486,7 @@ class RecorderProjector:
                     )
                     for raw_candidate in raw_round.get("candidates", []):
                         if isinstance(raw_candidate, Mapping):
-                            folds.append(
+                            validation_rows.append(
                                 {
                                     "scope": raw_round.get("scope"),
                                     "round": raw_round.get("round"),
@@ -1395,7 +1497,7 @@ class RecorderProjector:
                                     **dict(raw_candidate),
                                 }
                             )
-        return candidate_rows, tuple(folds)
+        return candidate_rows, tuple(validation_rows)
 
     def _traces(
         self,
@@ -1537,7 +1639,7 @@ class RecorderProjector:
         for status in statuses:
             attempts_by_work[status.packet.work_id].append(status)
             result = status.result
-            phase, candidate, fold = self._stage_coordinates(status)
+            phase, candidate, partition = self._stage_coordinates(status)
             work_node_id = f"work:{status.packet.work_id}"
             attempt_node_id = f"attempt:{status.packet.packet_id}"
             nodes.append(
@@ -1559,7 +1661,7 @@ class RecorderProjector:
                     ),
                     "phase": phase,
                     "candidate_id": candidate,
-                    "fold": fold,
+                    "partition": partition,
                     "work_id": status.packet.work_id,
                     "attempt_id": status.packet.attempt_id,
                     "attempt": status.packet.attempt,
@@ -1991,7 +2093,7 @@ class RecorderProjector:
             "schema_version": 1,
             "python_requirement": ">=3.12",
             "framework": "ms-agent-eval",
-            "workspace_schema_version": 14,
+            "workspace_schema_version": WORKSPACE_SCHEMA_VERSION,
         }
         values.append(
             self._artifact(
@@ -2274,7 +2376,9 @@ def _failure_summary_rows(
         if isinstance(timestamp, str) and timestamp:
             first = common.get("first_seen")
             last = common.get("last_seen")
-            common["first_seen"] = timestamp if not isinstance(first, str) else min(first, timestamp)
+            common["first_seen"] = (
+                timestamp if not isinstance(first, str) else min(first, timestamp)
+            )
             common["last_seen"] = timestamp if not isinstance(last, str) else max(last, timestamp)
 
     for row in stage_failures:
@@ -3163,10 +3267,8 @@ def _interactive_plotly_charts(
         cache.update_layout(barmode="stack")
         add("cache-reuse-by-stage.svg", cache)
 
-    cross_validation = report.get("cross_validation") if report is not None else None
-    raw_candidates = (
-        cross_validation.get("candidates", []) if isinstance(cross_validation, Mapping) else ()
-    )
+    validation = report.get("validation") if report is not None else None
+    raw_candidates = validation.get("candidates", []) if isinstance(validation, Mapping) else ()
     candidates = (
         tuple(item for item in raw_candidates if isinstance(item, Mapping))
         if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, (str, bytes))
@@ -3856,8 +3958,8 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
         'stroke-dasharray="7 5" marker-end="url(#dag-retry-arrow)"/>'
         '<text x="332" y="116" font-size="11">Dashed purple arrow — retry</text>',
         '<text x="558" y="116" font-size="11" fill="#475569">'
-        'Attempts = recorded executions; reused = cache hits</text>',
-        '</g>',
+        "Attempts = recorded executions; reused = cache hits</text>",
+        "</g>",
     ]
     positions: dict[str, tuple[float, float]] = {}
     for column, stage in enumerate(stages):
@@ -3903,10 +4005,7 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
             color = "#dc2626" if failed else "#d97706" if unfinished else "#15803d"
             scope = str(item.get("scope", stage))
             label = scope.replace("optimize/", "").replace("/", " › ")
-            summary = (
-                f"{attempts} attempts · "
-                f"{_int_or(item.get('reused'), 0)} reused"
-            )
+            summary = f"{attempts} attempts · {_int_or(item.get('reused'), 0)} reused"
             state_order = (
                 "failed",
                 "rejected",
@@ -3916,11 +4015,14 @@ def _dag_svg(dag: Mapping[str, object]) -> bytes:
                 "validated",
                 "persisted",
             )
-            state_summary = " · ".join(
-                f"{_int_or(states.get(state), 0)} {state}"
-                for state in state_order
-                if _int_or(states.get(state), 0)
-            ) or "no recorded state"
+            state_summary = (
+                " · ".join(
+                    f"{_int_or(states.get(state), 0)} {state}"
+                    for state in state_order
+                    if _int_or(states.get(state), 0)
+                )
+                or "no recorded state"
+            )
             body.extend(
                 (
                     f'<g class="dag-node" data-stage="{html.escape(stage)}">'
@@ -4783,6 +4885,12 @@ def _table_index_html(tables: Sequence[TableArtifact]) -> bytes:
 body { margin: 0; padding: 24px; line-height: 1.4; }
 h1 { margin: 0 0 4px; }
 .muted { color: #64748b; }
+.explanation { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; margin: 18px 0; padding: 16px 18px; }
+.explanation h2 { font-size: 18px; margin: 0 0 8px; }
+.explanation p { margin: 8px 0; }
+.explanation ul { margin: 8px 0; padding-left: 22px; }
+.explanation .warning { color: #b45309; font-weight: 700; }
+.formula { background: #e2e8f0; border-radius: 6px; display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 5px 8px; }
 .controls { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
 label { display: grid; gap: 4px; color: #64748b; font-size: 12px; }
 select, input, button { font: inherit; padding: 8px; }
@@ -4796,6 +4904,9 @@ td { overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) {
   body { background: #0f172a; color: #e2e8f0; }
   .muted, label { color: #94a3b8; }
+  .explanation { background: #111827; border-color: #334155; }
+  .explanation .warning { color: #fbbf24; }
+  .formula { background: #1e293b; }
   .viewport, th, td { border-color: #334155; }
   th { background: #111827; }
 }
@@ -4803,7 +4914,11 @@ td { overflow-wrap: anywhere; }
 </head>
 <body>
 <h1>Experiment tables</h1>
-<p class="muted">These are the human-readable views. The JSON artifacts are MLflow's canonical machine representation.</p>
+<p class="muted">These are the human-readable views. Failure summary groups incidents by stage,
+error kind, and endpoint; stage failures identify affected cases and retry outcomes; model-call
+failures preserve the provider message, root exception, endpoint URL, status or errno, and
+retryability. The JSON artifacts are MLflow's canonical machine representation.</p>
+<section id="explanation" class="explanation" aria-live="polite"></section>
 <div class="controls">
   <label>Table<select id="table"></select></label>
   <label>Search<input id="search" type="search" placeholder="Filter any visible column"></label>
@@ -4824,9 +4939,48 @@ for (const table of tables) {
 let page = 0, sortColumn = '', sortDirection = 1;
 const selected = () => tables.find(table => table.name === tableSelect.value) || tables[0];
 const printable = value => value == null ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
+const appendText = (parent, tag, text, className = '') => {
+  const element = document.createElement(tag); element.textContent = text;
+  if (className) element.className = className;
+  parent.appendChild(element); return element;
+};
+function renderExplanation(table) {
+  const panel = document.getElementById('explanation'); panel.replaceChildren();
+  if (table.name !== 'judge-calibration') {
+    appendText(panel, 'h2', table.name);
+    appendText(panel, 'p', 'Select a column heading to sort. Search filters across every column in this table.');
+    return;
+  }
+  appendText(panel, 'h2', 'How to read judge calibration');
+  appendText(panel, 'p', 'Each row is one controlled candidate response whose expected quality is known. It is not a benchmark solver response. The fixture checks whether the judge ranks known-good and known-bad answers sensibly before solver answers are judged.');
+  const skills = new Set(table.rows.map(row => row.skill).filter(Boolean));
+  const cases = new Set(table.rows.map(row => row.case_id).filter(Boolean));
+  const rubrics = new Set(table.rows.map(row => row.rubric_hash).filter(Boolean));
+  appendText(panel, 'p', `Coverage in this calibration corpus: ${table.rows.length} fixtures, ${cases.size} cases, ${skills.size} skills, ${rubrics.size} rubrics.`);
+  if (skills.size === 1) {
+    appendText(panel, 'p', `Scope warning: every fixture uses only ${[...skills][0]}. This proves ranking behavior for that one rubric only; it does not prove that the judge is calibrated across the full skill bank.`, 'warning');
+  }
+  const repetitions = [...new Set(table.rows.map(row => Number(row.repetitions || 1)))];
+  appendText(panel, 'p', `Repetitions: ${repetitions.join(', ')}. The same candidate is scored independently that many times. For each rubric criterion, the median repetition score is taken; aggregate_score is then the rubric-weighted sum of those criterion medians. Repetitions therefore do not create additional fixture rows.`);
+  appendText(panel, 'p', 'quality_label meanings: strong = complete and correct; partial = useful but missing important requirements; incorrect = materially wrong; contradictory = internally incompatible claims; adversarial = attempts to manipulate the judge instead of answering.');
+  appendText(panel, 'p', 'The labels do not prescribe exact numeric scores. incorrect, contradictory, and adversarial form one negative group, so they are not required to be ordered relative to one another.');
+  const formula = appendText(panel, 'p', 'Current pass rule: ');
+  appendText(formula, 'span', 'minimum(strong) > maximum(partial) AND minimum(partial) > maximum(all negative labels)', 'formula');
+  appendText(panel, 'p', 'Important limitation: the current validator puts fixtures from every skill into those same global label buckets. For example, if Skill A has strong 0.80 and partial 0.60 while Skill B has strong 0.55 and partial 0.40, both skills are correctly ordered on their own, but the global check fails because 0.55 is not greater than 0.60. Proper multi-skill calibration therefore needs separate ordering ladders per skill/rubric, followed by an explicit aggregate policy.');
+  const labelOrder = ['strong', 'partial', 'incorrect', 'contradictory', 'adversarial'];
+  const scoreList = document.createElement('ul');
+  for (const label of labelOrder) {
+    const rows = table.rows.filter(row => row.quality_label === label);
+    if (!rows.length) continue;
+    const scores = rows.map(row => Number(row.aggregate_score));
+    appendText(scoreList, 'li', `${label}: ${scores.map(score => score.toFixed(3)).join(', ')}`);
+  }
+  panel.appendChild(scoreList);
+}
 function render() {
   const table = selected();
   if (!table) return;
+  renderExplanation(table);
   const columns = [...new Set(table.rows.flatMap(row => Object.keys(row)))].sort();
   const query = document.getElementById('search').value.toLowerCase();
   let rows = table.rows.filter(row => !query || columns.some(column => printable(row[column]).toLowerCase().includes(query)));
@@ -4939,7 +5093,7 @@ def _chart_index_html(
         '<section class="comparison-status pending"><h2>Baseline versus optimized</h2>'
         "<strong>Waiting for the paired untouched-test evaluation.</strong>"
         "<p>The optimizer has not produced a final aggregate yet. No benchmark score is "
-        "invented from training or development cases.</p></section>"
+        "invented from optimization-training or validation cases.</p></section>"
     )
     if isinstance(charts, Sequence) and not isinstance(charts, (str, bytes)):
         for item in charts:
@@ -4985,7 +5139,7 @@ def _chart_index_html(
                 if static_artifact == "copro-case-paired-score.svg":
                     comparison_notice = (
                         '<section class="comparison-status ready"><h2>Baseline versus optimized</h2>'
-                        '<strong>The paired untouched-test comparison is ready.</strong>'
+                        "<strong>The paired untouched-test comparison is ready.</strong>"
                         f'<p><a href="{html.escape(name)}">Open the per-case comparison</a>.</p>'
                         "</section>"
                     )
@@ -4996,7 +5150,7 @@ def _chart_index_html(
                 omitted_panels.append(
                     '<section class="omitted-panel">'
                     f"<h3>{title}</h3><p>{question}</p>"
-                    f'<p><strong>Unavailable:</strong> {reason}.</p>'
+                    f"<p><strong>Unavailable:</strong> {reason}.</p>"
                     f'<p class="provenance">Expected source: {source} · unit: {unit}</p>'
                     "</section>"
                 )

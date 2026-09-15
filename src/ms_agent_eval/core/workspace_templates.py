@@ -166,7 +166,7 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 14,
+        "schema_version": 15,
         "workspace": workspace,
         "recording": {
             "enabled": recording_enabled,
@@ -340,7 +340,12 @@ def build_workspace_template(
             else {
                 "strategy": "copro",
                 "targets": {"prompt": True, "skills": "all"},
-                "search": {"breadth": 3, "depth": 2, "init_temperature": 1.4},
+                "search": {
+                    "breadth": 3,
+                    "depth": 2,
+                    "partitions": 2,
+                    "init_temperature": 1.4,
+                },
                 "metric": {"name": "rubric_mean_score"},
             }
         )
@@ -353,7 +358,7 @@ def build_workspace_template(
                 "judge": "judge",
             },
             "optimizer": optimizer,
-            "cross_validation": {"folds": 5, "seed": 0},
+            "validation": {"strategy": "holdout", "fraction": 0.2, "seed": 0},
             "budget": {
                 **(
                     {"optimizer": {"model_calls": 1000, "tokens": 4000000}}
@@ -372,9 +377,7 @@ def build_workspace_template(
             "optimization_experiments": ["optimize-solver"],
             "primary_metric": "score.mean",
             "grouping": (
-                ["solver", "optimizer"]
-                if optimization_strategy == "copro"
-                else ["solver"]
+                ["solver", "optimizer"] if optimization_strategy == "copro" else ["solver"]
             ),
         }
     authoring = (

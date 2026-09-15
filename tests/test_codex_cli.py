@@ -86,7 +86,7 @@ def _case_input() -> dict[str, object]:
         "split": "test",
         "repetition": 1,
         "evaluation_phase": "test",
-        "fold": None,
+        "partition": None,
         "candidate_id": "baseline",
         "candidate_k": 0,
         "strategy": "baseline",
@@ -96,6 +96,36 @@ def _case_input() -> dict[str, object]:
         "solver_attachments": {"fixture.txt": "public"},
         "program_hash": f"sha256:{'4' * 64}",
     }
+
+
+def _optimizer_packet(ledger: StageLedger) -> StagePacket:
+    context = {
+        "strategy": "copro",
+        "target_kind": "solver_prompt",
+        "target_id": "solver",
+        "current_text": "Answer precisely.",
+        "current_output_prefix": "Response:",
+        "scored_attempts": [],
+        "requirements": "Preserve the solver contract.",
+        "candidate_count": 2,
+        "round": 2,
+        "scope": "optimization/partition-1",
+        "fitting_corpus_hash": f"sha256:{'8' * 64}",
+    }
+    return StagePacket.create(
+        run_id="run-1",
+        experiment_id="optimize",
+        experiment_revision_id=f"sha256:{'3' * 64}",
+        stage=StageKind.OPTIMIZE,
+        attempt=1,
+        dependencies=(),
+        inputs=(ledger.put_json("optimizer_context", context),),
+        instructions=ledger.put_json("instructions", {"task": "propose"}),
+        output_schema="copro-proposal-v1",
+        executor=StageExecutorIdentity("isolated-codex", "codex_cli", f"sha256:{'1' * 64}"),
+        model=StageModelIdentity("optimizer", f"sha256:{'2' * 64}"),
+        budget=StageBudget(1, 1000, 60),
+    )
 
 
 def test_codex_configuration_requires_subscription_auth_and_digest() -> None:
@@ -150,6 +180,29 @@ def test_solver_stage_view_excludes_judge_material(tmp_path: Path) -> None:
     assert not any("rubric" in path or "expected" in path for path in paths)
     assert not (view.root / "case.yaml").exists()
     assert (view.root / "AGENTS.md").stat().st_mode & 0o222 == 0
+
+
+def test_optimizer_stage_view_contains_only_model_visible_semantics(tmp_path: Path) -> None:
+    ledger = StageLedger(FilesystemArtifactStore(tmp_path / "external"))
+    view = StageViewMaterializer().materialize(
+        _optimizer_packet(ledger),
+        ledger,
+        tmp_path / "view",
+        instruction_policy="controlled",
+    )
+    context = json.loads(
+        (view.root / "input" / "optimizer-context.json").read_text(encoding="utf-8")
+    )
+    assert set(context) == {
+        "target_kind",
+        "target_id",
+        "current_text",
+        "current_output_prefix",
+        "scored_attempts",
+        "requirements",
+        "candidate_count",
+    }
+    assert context["current_text"] == "Answer precisely."
 
 
 def test_solver_stage_view_rejects_hidden_fields_and_instruction_attachments(

@@ -17,6 +17,7 @@ _INSTRUCTION_FILENAMES = {"AGENTS.md", "AGENTS.override.md"}
 _MODEL_DRIVEN_STAGES = {
     StageKind.AUTHOR,
     StageKind.VALIDATE_JUDGE,
+    StageKind.OPTIMIZE,
     StageKind.SOLVE,
     StageKind.JUDGE,
 }
@@ -83,6 +84,8 @@ class StageViewMaterializer:
 
         if packet.stage is StageKind.AUTHOR:
             self._author_files(inputs, files)
+        elif packet.stage is StageKind.OPTIMIZE:
+            self._optimizer_files(inputs, files)
         elif packet.stage is StageKind.SOLVE:
             self._solve_files(inputs, files)
         elif packet.stage is StageKind.JUDGE:
@@ -93,7 +96,7 @@ class StageViewMaterializer:
         inventory = self._write_files(root, files)
         manifest_identity = {
             "schema_version": 1,
-            "packet_id": packet.packet_id,
+            "work_id": packet.work_id,
             "stage": packet.stage.value,
             "instruction_policy": instruction_policy,
             "files": [
@@ -143,6 +146,25 @@ class StageViewMaterializer:
         files["input/authoring-context.json"] = canonical_json_bytes(context)
 
     @staticmethod
+    def _optimizer_files(inputs: Mapping[str, object], files: dict[str, bytes]) -> None:
+        context = _required_mapping(inputs, "optimizer_context")
+        model_fields = (
+            "target_kind",
+            "target_id",
+            "current_text",
+            "current_output_prefix",
+            "scored_attempts",
+            "requirements",
+            "candidate_count",
+        )
+        missing = [field for field in model_fields if field not in context]
+        if missing:
+            raise IntegrityError(f"optimizer stage view is missing fields: {missing}")
+        files["input/optimizer-context.json"] = canonical_json_bytes(
+            {field: context[field] for field in model_fields}
+        )
+
+    @staticmethod
     def _solve_files(inputs: Mapping[str, object], files: dict[str, bytes]) -> None:
         case = _required_mapping(inputs, "case")
         allowed = {
@@ -152,7 +174,7 @@ class StageViewMaterializer:
             "split",
             "repetition",
             "evaluation_phase",
-            "fold",
+            "partition",
             "candidate_id",
             "candidate_k",
             "strategy",
@@ -168,23 +190,6 @@ class StageViewMaterializer:
         files["input/task.md"] = _required_text(case, "task").encode("utf-8")
         files["input/context/global.md"] = _required_text(case, "global_context").encode("utf-8")
         files["input/context/skill.md"] = _required_text(case, "skill_context").encode("utf-8")
-        metadata = {
-            key: case[key]
-            for key in (
-                "case_id",
-                "case_hash",
-                "skill",
-                "split",
-                "repetition",
-                "evaluation_phase",
-                "fold",
-                "candidate_id",
-                "candidate_k",
-                "strategy",
-                "program_hash",
-            )
-        }
-        files["input/metadata.json"] = canonical_json_bytes(metadata)
         _add_text_artifacts(
             files,
             "input/attachments",
@@ -207,7 +212,7 @@ class StageViewMaterializer:
             "split",
             "repetition",
             "evaluation_phase",
-            "fold",
+            "partition",
             "candidate_id",
             "candidate_k",
             "strategy",
@@ -217,27 +222,23 @@ class StageViewMaterializer:
         forbidden = sorted(set(evaluation) - allowed)
         if forbidden:
             raise IntegrityError(f"judge stage view contains forbidden fields: {forbidden}")
-        _add_judge_case(files, evaluation)
-        files["input/candidate.md"] = _required_text(evaluation, "candidate_response").encode(
-            "utf-8"
-        )
-        files["input/metadata.json"] = canonical_json_bytes(
+        _add_judge_case(
+            files,
             {
                 key: evaluation[key]
                 for key in (
                     "case_id",
                     "case_hash",
-                    "split",
-                    "repetition",
-                    "evaluation_phase",
-                    "fold",
-                    "candidate_id",
-                    "candidate_k",
-                    "strategy",
-                    "solver_work_id",
-                    "solver_packet_id",
+                    "task",
+                    "skill_context",
+                    "rubric",
+                    "expected_response",
+                    "expected_artifacts",
                 )
-            }
+            },
+        )
+        files["input/candidate.md"] = _required_text(evaluation, "candidate_response").encode(
+            "utf-8"
         )
 
     @staticmethod

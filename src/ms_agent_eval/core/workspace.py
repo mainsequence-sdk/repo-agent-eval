@@ -28,7 +28,7 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 14
+WORKSPACE_SCHEMA_VERSION = 15
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -843,9 +843,7 @@ class EndpointConfiguration:
                 _mapping(item, f"{field}.routes[{index}]"),
                 field=f"{field}.routes[{index}]",
             )
-            for index, item in enumerate(
-                _sequence(payload.get("routes"), f"{field}.routes")
-            )
+            for index, item in enumerate(_sequence(payload.get("routes"), f"{field}.routes"))
         )
         if not routes:
             raise ConfigurationError(f"{field}.routes must not be empty")
@@ -1080,18 +1078,14 @@ class StageConfiguration:
         _reject_unknown(payload, {"executor", "model", "reuse", "budget"}, field)
         raw_executor = payload.get("executor")
         executor = (
-            _identifier(raw_executor, f"{field}.executor")
-            if raw_executor is not None
-            else None
+            _identifier(raw_executor, f"{field}.executor") if raw_executor is not None else None
         )
         raw_model = payload.get("model")
         model = _identifier(raw_model, f"{field}.model") if raw_model is not None else None
         if stage_id == "author" and (model is None or executor is None):
             raise ConfigurationError(f"{field}.executor and model are required")
         if stage_id in _EXPERIMENT_MODEL_STAGES and (model is not None or executor is not None):
-            raise ConfigurationError(
-                f"{field} resolves executor and model from experiment.roles"
-            )
+            raise ConfigurationError(f"{field} resolves executor and model from experiment.roles")
         if stage_id not in _MODEL_STAGES and model is not None:
             raise ConfigurationError(f"{field}.model is not valid for a deterministic stage")
         if stage_id not in _MODEL_STAGES and executor is None:
@@ -1390,6 +1384,7 @@ class CoproConfiguration:
     skills: str | tuple[str, ...]
     breadth: int
     depth: int
+    partitions: int
     init_temperature: float
     metric: str
 
@@ -1409,7 +1404,11 @@ class CoproConfiguration:
         if raw_skills == "all":
             skills: str | tuple[str, ...] = "all"
         else:
-            skills = _string_list(raw_skills, "experiment.optimizer.targets.skills")
+            skills = _string_list(
+                raw_skills,
+                "experiment.optimizer.targets.skills",
+                allow_empty=optimize_prompt,
+            )
             if any("*" in item or "?" in item or "[" in item for item in skills):
                 raise ConfigurationError(
                     "experiment.optimizer.targets.skills must contain exact skill identifiers, not globs"
@@ -1420,13 +1419,17 @@ class CoproConfiguration:
         search = _mapping(payload.get("search"), "experiment.optimizer.search")
         _reject_unknown(
             search,
-            {"breadth", "depth", "init_temperature"},
+            {"breadth", "depth", "partitions", "init_temperature"},
             "experiment.optimizer.search",
         )
         breadth = _positive_int(search.get("breadth"), "experiment.optimizer.search.breadth")
         if breadth < 2:
             raise ConfigurationError("experiment.optimizer.search.breadth must be at least 2")
         depth = _positive_int(search.get("depth"), "experiment.optimizer.search.depth")
+        partitions = _positive_int(
+            search.get("partitions", 1),
+            "experiment.optimizer.search.partitions",
+        )
         temperature = _positive_number(
             search.get("init_temperature"),
             "experiment.optimizer.search.init_temperature",
@@ -1443,6 +1446,7 @@ class CoproConfiguration:
             skills,
             breadth,
             depth,
+            partitions,
             temperature,
             metric_name,
         )
@@ -1466,20 +1470,24 @@ def _optimizer_configuration(payload: Mapping[str, object]) -> OptimizerConfigur
 
 
 @dataclass(frozen=True)
-class CrossValidationConfiguration:
-    folds: int
+class ValidationConfiguration:
+    strategy: str
+    fraction: float
     seed: int
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> CrossValidationConfiguration:
-        _reject_unknown(payload, {"folds", "seed"}, "experiment.cross_validation")
-        folds = _positive_int(payload.get("folds"), "experiment.cross_validation.folds")
-        if folds < 2:
-            raise ConfigurationError("experiment.cross_validation.folds must be at least 2")
+    def from_mapping(cls, payload: Mapping[str, object]) -> ValidationConfiguration:
+        _reject_unknown(payload, {"strategy", "fraction", "seed"}, "experiment.validation")
+        strategy = _identifier(payload.get("strategy"), "experiment.validation.strategy")
+        if strategy != "holdout":
+            raise ConfigurationError("experiment.validation.strategy must be holdout")
+        fraction = _positive_number(payload.get("fraction"), "experiment.validation.fraction")
+        if fraction >= 1:
+            raise ConfigurationError("experiment.validation.fraction must be less than 1")
         seed = payload.get("seed", 0)
         if not isinstance(seed, int) or isinstance(seed, bool):
-            raise ConfigurationError("experiment.cross_validation.seed must be an integer")
-        return cls(folds, seed)
+            raise ConfigurationError("experiment.validation.seed must be an integer")
+        return cls(strategy, fraction, seed)
 
 
 @dataclass(frozen=True)
@@ -1535,9 +1543,7 @@ class ExperimentRoles:
         _reject_unknown(payload, {"solver", "optimizer", "judge"}, field)
         raw_optimizer = payload.get("optimizer")
         optimizer = (
-            _identifier(raw_optimizer, f"{field}.optimizer")
-            if raw_optimizer is not None
-            else None
+            _identifier(raw_optimizer, f"{field}.optimizer") if raw_optimizer is not None else None
         )
         if requires_optimizer and optimizer is None:
             raise ConfigurationError(f"{field}.optimizer is required for COPRO")
@@ -1560,7 +1566,7 @@ class ExperimentConfiguration:
     runtime: RuntimeConfiguration | None
     repetitions: int
     optimizer: OptimizerConfiguration | None
-    cross_validation: CrossValidationConfiguration | None
+    validation: ValidationConfiguration | None
     budget: OptimizationBudget | None
 
     @classmethod
@@ -1601,7 +1607,7 @@ class ExperimentConfiguration:
             )
         _reject_unknown(
             payload,
-            {"mode", "roles", "based_on", "optimizer", "cross_validation", "budget"},
+            {"mode", "roles", "based_on", "optimizer", "validation", "budget"},
             f"experiments.{experiment_id}",
         )
         optimizer_configuration = _optimizer_configuration(
@@ -1620,8 +1626,8 @@ class ExperimentConfiguration:
             None,
             1,
             optimizer_configuration,
-            CrossValidationConfiguration.from_mapping(
-                _mapping(payload.get("cross_validation"), "experiment.cross_validation")
+            ValidationConfiguration.from_mapping(
+                _mapping(payload.get("validation"), "experiment.validation")
             ),
             OptimizationBudget.from_mapping(_mapping(payload.get("budget"), "experiment.budget")),
         )
@@ -1647,7 +1653,9 @@ class ComparisonConfiguration:
         )
         baselines = tuple(
             _identifier(item, f"{field}.baseline_experiments")
-            for item in _sequence(payload.get("baseline_experiments"), f"{field}.baseline_experiments")
+            for item in _sequence(
+                payload.get("baseline_experiments"), f"{field}.baseline_experiments"
+            )
         )
         optimizations = tuple(
             _identifier(item, f"{field}.optimization_experiments")
@@ -1662,7 +1670,9 @@ class ComparisonConfiguration:
             raise ConfigurationError(f"{field} experiment ids must be unique")
         grouping = tuple(
             _identifier(item, f"{field}.grouping")
-            for item in _sequence(payload.get("grouping", ["solver", "optimizer"]), f"{field}.grouping")
+            for item in _sequence(
+                payload.get("grouping", ["solver", "optimizer"]), f"{field}.grouping"
+            )
         )
         if not grouping or not set(grouping) <= {"solver", "optimizer"}:
             raise ConfigurationError(f"{field}.grouping supports only solver and optimizer")
@@ -1674,7 +1684,7 @@ class ComparisonConfiguration:
         )
         if primary_metric != "score.mean":
             raise ConfigurationError(
-                f"{field}.primary_metric supports only score.mean in schema 14"
+                f"{field}.primary_metric supports only score.mean in schema 15"
             )
         return cls(
             _identifier(comparison_id, "comparison id"),
@@ -1928,13 +1938,11 @@ class WorkspaceConfiguration:
             )
         )
         duplicated_memberships = sorted(
-            experiment_id
-            for experiment_id, count in comparison_memberships.items()
-            if count > 1
+            experiment_id for experiment_id, count in comparison_memberships.items() if count > 1
         )
         if duplicated_memberships:
             raise ConfigurationError(
-                "an experiment may belong to only one comparison in schema 14: "
+                "an experiment may belong to only one comparison in schema 15: "
                 f"{duplicated_memberships}"
             )
         result = cls(
@@ -1999,6 +2007,7 @@ class WorkspaceConfiguration:
             return base.runtime
         assert experiment.runtime is not None
         return experiment.runtime
+
 
 @dataclass(frozen=True)
 class ResolvedRoleModel:
@@ -2128,12 +2137,15 @@ def resolve_stage_model(
     if stage_id in _EXPERIMENT_MODEL_STAGES:
         if experiment_id is None:
             raise ResolutionError(f"stage {stage_id!r} requires an experiment id")
-        mapped_role = role or {
-            "validate_judge": "judge",
-            "optimize": "optimizer",
-            "solve": "solver",
-            "judge": "judge",
-        }[stage_id]
+        mapped_role = (
+            role
+            or {
+                "validate_judge": "judge",
+                "optimize": "optimizer",
+                "solve": "solver",
+                "judge": "judge",
+            }[stage_id]
+        )
         return resolve_role_models(workspace, experiment_id).get(mapped_role)
     if stage.model is None or stage.executor is None:
         return None

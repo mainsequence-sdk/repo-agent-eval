@@ -6,6 +6,8 @@
   semantics, local reports, and MLflow projections
 - Extends: [ADR-007](007-configurable-dspy-optimization-strategies.md)
 - Preserves: [ADR-003](003-content-addressed-experiment-graph.md)
+- Search lifecycle refined by:
+  [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
 
 ## Context
 
@@ -23,7 +25,7 @@ coordinator evaluates two test arms:
 
 ```mermaid
 flowchart LR
-    Train[Grouped train folds] --> Search[COPRO search]
+    Train[Fixed validation plus sequential training partitions] --> Search[Stateful COPRO search]
     Search --> Freeze[Freeze selected program]
     Freeze --> Baseline[Original prompt and source skills]
     Freeze --> Optimized[Selected prompt, prefix, and skill overlays]

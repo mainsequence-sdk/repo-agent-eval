@@ -93,8 +93,14 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
     assert isinstance(experiments, dict)
     for experiment in experiments.values():
         experiment.pop("roles")
+        if experiment.get("mode") == "optimize":
+            validation = experiment.pop("validation")
+            experiment["cross_validation"] = {
+                "folds": 2,
+                "seed": validation["seed"],
+            }
 
-    with pytest.raises(ConfigurationError, match="schema_version must be 14"):
+    with pytest.raises(ConfigurationError, match="schema_version must be 15"):
         WorkspaceConfiguration.from_mapping(legacy)
 
     upgraded = _upgrade_frozen_workspace_payload(legacy)
@@ -103,13 +109,46 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
     upgraded["recorders"] = current["recorders"]
     parsed = WorkspaceConfiguration.from_mapping(upgraded)
 
-    assert parsed.schema_version == 14
+    assert parsed.schema_version == 15
     assert parsed.experiments["baseline"].roles.solver == "solver"
     assert parsed.models["solver"].deployment == "frozen-solver"
     assert {
-        route.deployment
-        for route in parsed.executors["remote-models"].endpoints[0].routes
+        route.deployment for route in parsed.executors["remote-models"].endpoints[0].routes
     } == {"frozen-judge", "frozen-optimizer", "frozen-solver"}
+
+
+def test_schema_v14_is_upgraded_only_for_an_immutable_frozen_run() -> None:
+    frozen = workspace_payload()
+    frozen["schema_version"] = 14
+    experiments = frozen["experiments"]
+    assert isinstance(experiments, dict)
+    optimize = experiments["optimize"]
+    optimize["roles"]["optimizer"] = "optimizer"
+    optimize["optimizer"] = {
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": "all"},
+        "search": {"breadth": 3, "depth": 2, "init_temperature": 1.4},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    optimize["budget"]["optimizer"] = {"model_calls": 20, "tokens": 10000}
+    validation = optimize.pop("validation")
+    optimize["cross_validation"] = {
+        "folds": 2,
+        "seed": validation["seed"],
+    }
+
+    with pytest.raises(ConfigurationError, match="schema_version must be 15"):
+        WorkspaceConfiguration.from_mapping(frozen)
+
+    upgraded = _upgrade_frozen_workspace_payload(frozen)
+    parsed = WorkspaceConfiguration.from_mapping(upgraded)
+
+    assert parsed.schema_version == 15
+    assert parsed.experiments["optimize"].validation is not None
+    assert parsed.experiments["optimize"].validation.seed == 0
+    optimizer = parsed.experiments["optimize"].optimizer
+    assert optimizer is not None
+    assert optimizer.partitions == 2  # type: ignore[union-attr]
 
 
 def test_schema_v7_lock_rehydration_preserves_historical_model_and_run_identity(
@@ -601,7 +640,7 @@ def test_unrelated_experiment_change_does_not_change_baseline_revision(
     original = compiled.experiment_lock("baseline")
     workspace_file = compiled.repository.workspace_file
     payload = yaml.safe_load(workspace_file.read_text(encoding="utf-8"))
-    payload["experiments"]["optimize"]["cross_validation"]["seed"] = 99
+    payload["experiments"]["optimize"]["validation"]["seed"] = 99
     workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(workspace_file)
     changed = compile_workspace(

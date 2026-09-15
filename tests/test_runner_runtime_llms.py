@@ -59,7 +59,12 @@ def _copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     payload["experiments"]["optimize"]["optimizer"] = {
         "strategy": "copro",
         "targets": {"prompt": True, "skills": ["alpha"]},
-        "search": {"breadth": 2, "depth": 2, "init_temperature": 1.0},
+        "search": {
+            "breadth": 2,
+            "depth": 2,
+            "partitions": 2,
+            "init_temperature": 1.0,
+        },
         "metric": {"name": "rubric_mean_score"},
     }
     payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
@@ -108,14 +113,19 @@ def _parallel_copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     payload["experiments"]["optimize"]["optimizer"] = {
         "strategy": "copro",
         "targets": {"prompt": True, "skills": ["alpha", "beta"]},
-        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "search": {
+            "breadth": 2,
+            "depth": 1,
+            "partitions": 1,
+            "init_temperature": 1.0,
+        },
         "metric": {"name": "rubric_mean_score"},
     }
     payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
     payload["experiments"]["optimize"]["budget"] = {
         "optimizer": {"model_calls": 20, "tokens": 100000},
-        "solver": {"model_calls": 500, "tokens": 500000},
-        "judge": {"model_calls": 500, "tokens": 500000},
+        "solver": {"model_calls": 100, "tokens": 300000},
+        "judge": {"model_calls": 100, "tokens": 300000},
         "wall_seconds": 300,
     }
     repository.workspace_file.write_text(
@@ -132,9 +142,8 @@ def _parallel_copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     )
     splits = yaml.safe_load(repository.split_file.read_text(encoding="utf-8"))
     for skill in ("alpha", "beta"):
-        created = 0
         index = 0
-        while created < 4:
+        while True:
             group = f"parallel-{skill}-{index}"
             index += 1
             if (
@@ -144,20 +153,19 @@ def _parallel_copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
                     train=0.7,
                     test=0.2,
                 )
-                != "train"
+                == "train"
             ):
-                continue
-            created += 1
-            create_case(
-                repository.cases_root,
-                case_id=f"parallel-{skill}-{created}",
-                skill=skill,
-                group=group,
-                source_path=f"skills/{skill}/SKILL.md",
-                authoring_instructions_hash=authoring_hash,
-                source_snapshot_hash=lock.content_hash,
-            )
-            splits["groups"][group] = "train"
+                break
+        create_case(
+            repository.cases_root,
+            case_id=f"parallel-{skill}",
+            skill=skill,
+            group=group,
+            source_path=f"skills/{skill}/SKILL.md",
+            authoring_instructions_hash=authoring_hash,
+            source_snapshot_hash=lock.content_hash,
+        )
+        splits["groups"][group] = "train"
     repository.split_file.write_text(
         yaml.safe_dump(splits, sort_keys=False),
         encoding="utf-8",
@@ -831,7 +839,7 @@ def test_failed_judge_validation_is_not_reused(tmp_path: Path) -> None:
     )
 
 
-def test_rubric_change_reuses_solver_work_and_invalidates_judge_view(
+def test_calibration_rubric_change_does_not_invalidate_unrelated_judge_work(
     tmp_path: Path,
 ) -> None:
     compiled = _compiled(tmp_path)
@@ -902,10 +910,10 @@ def test_rubric_change_reuses_solver_work_and_invalidates_judge_view(
 
     assert second.status == "completed"
     assert calls["solver"] == calls_after_first["solver"]
-    assert calls["judge"] == calls_after_first["judge"] + 2
+    assert calls["judge"] == calls_after_first["judge"] + 1
     reused = Counter(event.stage for event in events if event.kind == "packet_reused")
     assert reused["solve"] == 1
-    assert reused["judge"] == 0
+    assert reused["judge"] == 1
 
 
 def test_resume_rehydrates_the_run_revision_after_workspace_changes(
@@ -1065,7 +1073,7 @@ def test_pilot_rejects_optimization_experiment(tmp_path: Path) -> None:
         runner.run("optimize", environment=_environment(), pilot=True)
 
 
-def test_cross_validation_selects_then_refits_before_held_out_test(tmp_path: Path) -> None:
+def test_validation_selects_then_refits_before_held_out_test(tmp_path: Path) -> None:
     compiled = _compiled(tmp_path)
     responses = {
         "solver": [solver_response(), solver_response()],
@@ -1127,19 +1135,19 @@ def test_cross_validation_selects_then_refits_before_held_out_test(tmp_path: Pat
         and runner.coordinator._input(item.packet, "case")["evaluation_phase"] == "test"
     )
     assert final_fit.packet.packet_id in test_solve.dependencies
-    cv_cases = {
+    validation_cases = {
         runner.coordinator._input(item.packet, "case")["case_id"]
         for item in runner.coordinator.ledger.list(run.run_id)
         if item.packet.stage is StageKind.SOLVE
-        and runner.coordinator._input(item.packet, "case")["evaluation_phase"] == "cross_validation"
+        and runner.coordinator._input(item.packet, "case")["evaluation_phase"] == "validation"
     }
-    assert cv_cases == {"case-train", "case-train-two"}
+    assert len(validation_cases) == 1
     report_root = runner.coordinator.artifacts.summary_root / "runs" / run.run_id
     report = json.loads((report_root / "results.json").read_text(encoding="utf-8"))
     assert report["optimization"]["strategy"] == "labeled_few_shot"
     assert "optimizer" not in report["usage_by_role"]
-    assert report["cross_validation"]["selected_candidate_id"] == "baseline"
-    assert report["cross_validation"]["metric"] == "mean_score"
+    assert report["validation"]["selected_candidate_id"] == "baseline"
+    assert report["validation"]["metric"] == "mean_score"
     assert "pass_rate" not in report.get("benchmark_metrics", {})
 
 
@@ -1241,7 +1249,7 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     assert run.status == "completed", run.result
     statuses = runner.coordinator.ledger.list(run.run_id)
     optimizer_packets = [status for status in statuses if status.packet.stage is StageKind.OPTIMIZE]
-    assert len(optimizer_packets) == 12
+    assert len(optimizer_packets) == 8
     assert all(status.state is StageState.PERSISTED for status in optimizer_packets)
     proposal_outputs = [
         runner.coordinator.ledger.read_output(status.result)
@@ -1258,7 +1266,7 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     second_round_contexts = [
         runner.coordinator._input(status.packet, "optimizer_context")
         for status in optimizer_packets
-        if status.packet.work_spec["round"] == 2
+        if runner.coordinator._input(status.packet, "optimizer_context")["round"] == 2
     ]
     assert all(context["scored_attempts"] for context in second_round_contexts)
     assert all(
@@ -1266,6 +1274,21 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         for context in second_round_contexts
     )
     assert all("current_target_hash" in status.packet.work_spec for status in optimizer_packets)
+    assert all(
+        "scope" not in status.packet.work_spec and "round" not in status.packet.work_spec
+        for status in optimizer_packets
+    )
+    partition_one_prompt = next(
+        runner.coordinator._input(status.packet, "optimizer_context")
+        for status in optimizer_packets
+        if runner.coordinator._input(status.packet, "optimizer_context")["scope"]
+        == "optimization/partition-1"
+        and runner.coordinator._input(status.packet, "optimizer_context")["round"] == 1
+        and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"]
+        == "solver_prompt"
+    )
+    assert partition_one_prompt["current_text"] == "Optimized solver or skill instruction."
+    assert partition_one_prompt["scored_attempts"]
     final_fit = next(
         status
         for status in statuses
@@ -1310,12 +1333,12 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         report["optimization"]["final_program"]["candidate_lineage_artifact"]
         == fitted["candidate_lineage_artifact"]
     )
-    assert len(report["optimization"]["rounds"]) == 12
+    assert len(report["optimization"]["rounds"]) == 8
     assert all(
         round_result["proposal_accounting"]["accepted_count"] == 1
         for round_result in report["optimization"]["rounds"]
     )
-    assert report["usage_by_role"]["optimizer"]["model_calls"] == 12
+    assert report["usage_by_role"]["optimizer"]["model_calls"] == 8
     final_test_solves = [
         runner.coordinator._input(status.packet, "case")
         for status in statuses
@@ -1434,14 +1457,11 @@ def test_copro_freezes_prompt_then_schedules_skill_targets_together(tmp_path: Pa
         for status in statuses
         if status.packet.stage is StageKind.OPTIMIZE
         and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"] == "skill"
-        and runner.coordinator._input(status.packet, "optimizer_context")["scope"] == "final_search"
     ]
     assert len(skill_proposals) == 2
     assert skill_proposals[0].dependencies == skill_proposals[1].dependencies
-    assert (
-        skill_proposals[0].work_spec["parent_bundle_hash"]
-        == skill_proposals[1].work_spec["parent_bundle_hash"]
-    )
+    assert all("parent_bundle_hash" not in packet.work_spec for packet in skill_proposals)
+    assert all("fitting_corpus_hash" not in packet.work_spec for packet in skill_proposals)
     assert maximum_optimizer == 2
 
     skill_selections = {
@@ -1450,17 +1470,16 @@ def test_copro_freezes_prompt_then_schedules_skill_targets_together(tmp_path: Pa
         if status.packet.output_schema == "copro-selection-v1"
         and runner.coordinator._input(status.packet, "candidate_selection")["target_kind"]
         == "skill"
-        and runner.coordinator._input(status.packet, "candidate_selection")["scope"]
-        == "final_search"
     }
-    final_fit = next(
+    partition_fit = next(
         status.packet
         for status in statuses
         if status.packet.stage is StageKind.FIT
         and status.result is not None
-        and runner.coordinator.ledger.read_output(status.result)["phase"] == "final_fit"
+        and runner.coordinator.ledger.read_output(status.result)["phase"]
+        == "optimization_partition"
     )
-    assert skill_selections <= set(final_fit.dependencies)
+    assert skill_selections <= set(partition_fit.dependencies)
 
 
 def test_optimization_rejects_judge_validation_on_held_out_case_before_lm_creation(

@@ -114,8 +114,9 @@ The same manifest defines:
 - `optimize-solver`, which selects `strategy: copro`, keeps the solver
   zero-shot, and searches the solver instruction, response prefix, and all
   configured source/imported skill overlays. Each proposal is evaluated by the
-  solver and separate LLM judge inside grouped cross-validation before the
-  selected bundle is compiled from train. The frozen original and optimized
+  solver and separate LLM judge on one fixed validation holdout. Winning bundles
+  and score history carry across sequential training partitions before the
+  selected bundle is materialized once. The frozen original and optimized
   programs are then scored on the same untouched test cases for a paired report.
 
 Executor definitions, model names, and stage assignments are stored directly in
@@ -197,10 +198,11 @@ uv run ms-agent-eval run optimize-solver \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-The optimization command validates the judge, runs bounded COPRO search inside
-each train-only outer fold, records out-of-fold diagnostics, repeats search on
-all train cases, freezes the selected instruction/prefix/skill overlays as a
-zero-demonstration compiled artifact, and only then loads test cases. Optimizer
+The optimization command validates the judge once, derives a fixed validation
+holdout, and runs one bounded COPRO search whose winner and score history carry
+across train-only partitions. It materializes that final instruction, prefix,
+and skill-overlay bundle once as a zero-demonstration compiled artifact, and
+only then loads test cases. Optimizer
 packets never contain rubrics, expected responses, judge feedback, or held-out
 inputs.
 

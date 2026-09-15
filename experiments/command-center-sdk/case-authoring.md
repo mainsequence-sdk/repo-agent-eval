@@ -516,9 +516,9 @@ misconception must share a group so they cannot cross train, test, and challenge
 boundaries. Do not choose or name a split.
 
 DSPy optimization may load training cases only during fitting and selection.
-Model selection uses grouped K-fold cross-validation within the training split.
-After selecting the highest-mean out-of-fold candidate, refit it on all training
-cases and evaluate the untouched test set. Test and challenge results must
+Model selection uses one fixed, group-safe validation holdout derived within
+the training split. After selecting the highest-mean validation candidate,
+materialize it once and evaluate the untouched test set. Test and challenge results must
 never influence authoring instructions, case wording,
 reference answers, rubrics, demonstrations, or optimizer settings.
 

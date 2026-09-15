@@ -9,7 +9,7 @@ Benchmark reports contain:
 - each test case's continuous score, criterion scores, critical violations,
   judge feedback, split, and repetition;
 - the arithmetic mean test score;
-- cross-validation candidate means and the selected configuration for an
+- fixed-validation candidate means and the selected configuration for an
   optimization experiment;
 - for COPRO, proposal rounds plus selected prompt, prefix, skill overlays,
   lineage, compiled-manifest artifact ids, and a paired original-versus-optimized
@@ -39,6 +39,14 @@ report artifacts. The canonical local report remains authoritative. Use
 `ms-agent-eval recorder status --run <run-id>` when MLflow appears incomplete;
 a pending or failed projection is a recorder condition, not an evaluation
 score. See [Experiment recording](../execution/experiment-recording.md).
+
+For execution problems, start with `tables/index.html` and select
+`failure-summary`, then drill into `stage-failures` and
+`model-call-failures`. These views distinguish the stage-level consequence from
+the provider-call root cause and show the endpoint, affected case, retryability,
+and whether a later attempt recovered. Missing diagnostic cells on an old run
+mean that field was not originally captured; they do not mean the value was
+zero or that no error occurred.
 
 ## Context-window outcomes
 

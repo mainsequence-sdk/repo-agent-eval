@@ -106,8 +106,45 @@ def test_terminal_preflight_reporter_shows_fit_and_capacity() -> None:
         {
             "status": "fits",
             "experiment": "baseline",
+            "execution_mode": "benchmark",
             "experiment_revision_id": "sha256:1234567890abcdef",
             "selected_case_count": 10,
+            "workload": {
+                "case_inventory": {
+                    "permanent_splits": {"train": 20, "test": 10, "challenge": 5},
+                    "derived": None,
+                    "execution": {"split": "test", "case_count": 10, "arms": 1},
+                },
+                "steps": [
+                    {
+                        "kind": "model",
+                        "stage": "solve",
+                        "phase": "test",
+                        "role": "solver",
+                        "units": 10,
+                        "multiplicity": 1,
+                        "calls": 10,
+                        "formula": "cases × solver repetitions",
+                    }
+                ],
+                "partitions": [],
+                "model_routes": [
+                    {
+                        "role": "solver",
+                        "model": "model-a",
+                        "deployment": "deployment-a",
+                        "executor": "pool-a",
+                        "configured_capacity": 4,
+                        "endpoints": [{"id": "local-a", "capacity": 4}],
+                    }
+                ],
+                "totals": {
+                    "logical_model_calls": 10,
+                    "by_role": {"solver": 10},
+                    "local_operations": 1,
+                },
+                "reuse_note": "Fresh upper bound before reuse.",
+            },
             "stages": [
                 {
                     "stage": "solve",
@@ -135,7 +172,11 @@ def test_terminal_preflight_reporter_shows_fit_and_capacity() -> None:
     )
 
     rendered = output.getvalue()
-    assert "Preflight baseline · 10 cases · 0 generation calls" in rendered
+    assert "Preflight baseline · benchmark · 0 generation calls" in rendered
+    assert "Case sets used by this experiment" in rendered
+    assert "Expanded fresh-run workload" in rendered
+    assert "10 model calls" in rendered
+    assert "Models and configured execution capacity" in rendered
     assert "Stage fit and usable concurrency" in rendered
     assert "solve" in rendered
     assert "local-a" in rendered

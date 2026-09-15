@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -297,11 +297,13 @@ experiments:
       search:
         breadth: 3
         depth: 2
+        partitions: 2
         init_temperature: 1.4
       metric:
         name: rubric_mean_score
-    cross_validation:
-      folds: 5
+    validation:
+      strategy: holdout
+      fraction: 0.2
       seed: 0
     budget:
       optimizer:

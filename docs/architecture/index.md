@@ -134,6 +134,10 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
   independently selectable solver, optimizer, and judge experiment arms,
   deployment-aware endpoint routing, comparable benchmark identities, and
   workspace-global MLflow model tracking.
+- [ADR-011](011-stateful-optimization-and-semantic-reuse.md) replaces
+  independent K-fold searches with one fixed validation holdout and a stateful
+  COPRO partition chain, and makes stage reuse depend on semantic model inputs
+  rather than orchestration coordinates.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

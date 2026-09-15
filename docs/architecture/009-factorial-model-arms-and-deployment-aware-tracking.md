@@ -1,5 +1,9 @@
 # ADR-009: Factorial Model Arms and Deployment-Aware Global Tracking
 
+> Workspace schema 15 and the current validation/search lifecycle are defined
+> by [ADR-011](011-stateful-optimization-and-semantic-reuse.md). Schema 14 below
+> records the configuration introduced by this decision.
+
 - Status: Accepted and implemented
 - Date: 2026-09-14
 - Decision owners: MS Agent Eval maintainers
@@ -326,7 +330,7 @@ experiments:
       judge: fixed-judge
     optimizer:
       strategy: copro
-      # Existing COPRO search, cross-validation, and budget fields remain here.
+      # Existing COPRO search, validation, and budget fields remain here.
 
   qwen-with-glm-copro:
     mode: optimize

@@ -108,6 +108,12 @@ def test_provider_uses_openai_route_and_redacts_failed_call_secret(tmp_path: Pat
     with store.get_blob(record.response_artifact) as handle:
         failure = json.load(handle)
     assert failure["message"] == "authentication failed for [REDACTED]"
+    assert failure["category"] == "authentication_error"
+    assert failure["exception_type"] == "RuntimeError"
+    assert failure["root_exception_type"] == "RuntimeError"
+    assert failure["retryable"] is False
+    assert record.error == failure
+    assert record.recorded_at
     assert secret not in json.dumps(failure)
 
 
@@ -140,6 +146,33 @@ def test_provider_classifies_wrapped_connection_failures(tmp_path: Path) -> None
     )
 
     assert record.error_kind == "connection_error"
+
+
+def test_provider_persists_actionable_connection_diagnostics(tmp_path: Path) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    observer = ModelCallObserver(store, role="solver")
+    root = ConnectionRefusedError(61, "Connection refused")
+    error = RuntimeError("OpenAI-compatible request failed")
+    error.__cause__ = root
+
+    record = observer.failed(
+        provider_id="openai_compatible",
+        model="solver-model",
+        parameters={"api_base": "http://localhost:8000/v1"},
+        messages=(),
+        request={},
+        error=error,
+        latency_seconds=0.1,
+        configured_cost=0.0,
+    )
+
+    assert record.error_kind == "connection_error"
+    assert record.error is not None
+    assert record.error["root_exception_type"] == "ConnectionRefusedError"
+    assert record.error["root_message"] == "[Errno 61] Connection refused"
+    assert record.error["errno"] == 61
+    assert record.error["retryable"] is True
+    assert record.error["endpoint_base_url"] == "http://localhost:8000/v1"
 
 
 def test_provider_classifies_context_failure_when_native_preflight_was_skipped(

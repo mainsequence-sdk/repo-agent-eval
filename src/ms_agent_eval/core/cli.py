@@ -94,7 +94,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Include non-OpenRouter rows in the candidate set.",
     )
 
-    init = commands.add_parser("init", help="Create a schema-v13 incremental DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v15 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)

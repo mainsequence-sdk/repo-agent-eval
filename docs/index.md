@@ -14,17 +14,18 @@ flowchart LR
     Validate -->|No| Pilot[Run a diagnostic pilot]
     Pilot --> Author
     Validate -->|Yes| Baseline[Run baseline benchmark]
-    Validate -->|Yes| Optimize[Grouped K-fold model selection on train]
-    Optimize --> Refit[Refit selected configuration on all train cases]
+    Validate -->|Yes| Optimize[Fixed validation selection on train]
+    Optimize --> Refit[Materialize selected configuration once]
     Refit --> Test[Evaluate frozen original and optimized programs on untouched test]
     Baseline --> Results[Inspect scores, usage, and evidence]
     Test --> Results
 ```
 
 A pilot is diagnostic and never produces valid benchmark metrics. An
-optimization run selects a configuration by grouped K-fold cross-validation on
-training cases and refits it on all training cases. A COPRO run then evaluates
-the frozen original and optimized programs on the same untouched test cases.
+optimization run selects a configuration on one group-safe validation holdout
+derived from training cases and materializes it once. COPRO carries the winner
+through sequential training partitions before evaluating the frozen original
+and optimized programs on the same untouched test cases.
 
 ## Choose what you are trying to do
 
@@ -104,5 +105,5 @@ they are not part of the framework contract.
 
 Historical implementation plans live outside this documentation tree in the
 root-level `.implementation_tasks/` directory, which is local and ignored by Git. Current behavior is defined by
-these guides, schema-v14 workspaces, and the repository-local case-authoring
+these guides, schema-v15 workspaces, and the repository-local case-authoring
 skill.

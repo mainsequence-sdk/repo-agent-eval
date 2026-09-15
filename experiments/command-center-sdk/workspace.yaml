@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 
 workspace:
   id: command-center-sdk-evaluation
@@ -187,8 +187,9 @@ experiments:
       strategy: labeled_few_shot
       search:
         k: [1, 2, 4]
-    cross_validation:
-      folds: 5
+    validation:
+      strategy: holdout
+      fraction: 0.2
       seed: 0
     budget:
       solver:

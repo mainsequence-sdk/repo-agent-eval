@@ -127,12 +127,13 @@ outputs. Failure blocks every solver call.
 
 - Assign a leakage-resistant group, not each paraphrase, to a split.
 - Codex assigns a semantic group; the configured deterministic policy maps it to a split.
-- Optimization derives grouped K-fold cross-validation within train.
+- Optimization derives one fixed, group-safe validation holdout within train.
 - Judge validation may reference training cases,
   never test/challenge cases.
 - Persist state-only DSPy JSON with pickle and unsafe LM state disabled.
-- Select by mean out-of-fold score, refit on all training cases, and evaluate
-  untouched test data once.
+- Select by mean validation score, materialize the winner once, and evaluate
+  untouched test data once. COPRO carries its winning bundle and numeric
+  history through sequential training partitions.
 - Never use test results to revise cases, prompts, demonstrations, or optimizer
   parameters.
 - Synthetic examples derived from one project example, defect, architecture

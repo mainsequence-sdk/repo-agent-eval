@@ -19,8 +19,15 @@ def _redacted_message(error: BaseException, secret_values: Sequence[str]) -> str
 
 
 def failure_kind(error: Exception) -> str:
-    text = f"{type(error).__name__} {error}".lower()
-    status_code = getattr(error, "status_code", None)
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited and len(chain) < 8:
+        visited.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    text = " ".join(f"{type(item).__name__} {item}" for item in chain).lower()
+    status_codes = [getattr(item, "status_code", None) for item in chain]
     if any(
         token in text
         for token in (
@@ -33,13 +40,17 @@ def failure_kind(error: Exception) -> str:
         )
     ):
         return "context_window_exceeded"
-    if status_code in {401, 403} or "authentication" in text or "unauthorized" in text:
+    if (
+        any(code in {401, 403} for code in status_codes)
+        or "authentication" in text
+        or "unauthorized" in text
+    ):
         return "authentication_error"
-    if status_code == 429 or "rate limit" in text:
+    if 429 in status_codes or "rate limit" in text:
         return "rate_limit_error"
     if any(token in text for token in ("connection", "connecterror", "timeout", "dns")):
         return "connection_error"
-    if isinstance(status_code, int) and status_code >= 500:
+    if any(isinstance(code, int) and code >= 500 for code in status_codes):
         return "provider_server_error"
     return type(error).__name__.lower()
 
@@ -84,13 +95,10 @@ def failure_details(
         "message": outer["message"],
         "root_exception_type": root["exception_type"],
         "root_message": root["message"],
-        "status_code": next(
-            (item["status_code"] for item in chain if "status_code" in item), None
-        ),
+        "status_code": next((item["status_code"] for item in chain if "status_code" in item), None),
         "error_code": next((item["code"] for item in chain if "code" in item), None),
         "errno": next((item["errno"] for item in reversed(chain) if "errno" in item), None),
-        "retryable": category
-        in {"connection_error", "provider_server_error", "rate_limit_error"},
+        "retryable": category in {"connection_error", "provider_server_error", "rate_limit_error"},
         "endpoint_base_url": endpoint,
         "exception_chain": chain,
     }

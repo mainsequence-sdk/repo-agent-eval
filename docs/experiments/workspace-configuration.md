@@ -1,7 +1,7 @@
 # Workspace Configuration
 
 `workspace.yaml` is the only framework configuration file in an experiment
-workspace. Schema version 14 separates transport executors, semantic model
+workspace. Schema version 15 separates transport executors, semantic model
 deployments, role profiles, experiment arms, comparisons, and recorder projection.
 
 ## Top-level structure
@@ -21,7 +21,7 @@ deployments, role profiles, experiment arms, comparisons, and recorder projectio
 | `comparisons` | Explicit baseline/optimization arm sets for compatible cross-model reports. |
 
 ```yaml
-schema_version: 14
+schema_version: 15
 
 workspace:
   id: example-evaluation
@@ -79,7 +79,8 @@ comparisons: {}
 - Every stage has a finite budget.
 - An optimization experiment names its baseline with `based_on`, selects
   exactly one `optimizer.strategy`, declares that strategy's search space, and
-  configures grouped K-fold cross-validation.
+  configures one fixed validation holdout. COPRO also configures sequential
+  training partitions whose state is carried forward.
 - Generated ids, hashes, snapshots, and locks are outputs, not authored
   configuration.
 - Recorder destinations are operational projections. Their configuration hash
@@ -265,7 +266,7 @@ experiments:
     optimizer:
       strategy: labeled_few_shot
       search: {k: [1, 2, 4]}
-    cross_validation: {folds: 5, seed: 0}
+    validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget:
       solver: {model_calls: 1000, tokens: 4000000}
       judge: {model_calls: 3000, tokens: 6000000}
@@ -294,9 +295,9 @@ experiments:
     optimizer:
       strategy: copro
       targets: {prompt: true, skills: all}
-      search: {breadth: 3, depth: 2, init_temperature: 1.4}
+      search: {breadth: 3, depth: 2, partitions: 2, init_temperature: 1.4}
       metric: {name: rubric_mean_score}
-    cross_validation: {folds: 5, seed: 0}
+    validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget:
       optimizer: {model_calls: 100, tokens: 400000}
       solver: {model_calls: 5000, tokens: 20000000}
@@ -334,7 +335,7 @@ experiments:
       solver: qwen-solver
       optimizer: glm-optimizer
       judge: fixed-judge
-    # optimizer/cross_validation/budget omitted
+    # optimizer/validation/budget omitted
 
 comparisons:
   solver-and-copro-models:
@@ -344,13 +345,13 @@ comparisons:
     grouping: [solver, optimizer]
 ```
 
-One experiment may belong to one named comparison in schema 14. A completed
+One experiment may belong to one named comparison in schema 15. A completed
 valid arm automatically refreshes an immutable `model_comparison` projection in
 the workspace-level MLflow Experiment. The manifest selects the latest completed
 report for each `arm_id` and refuses to mix benchmark revisions, comparison
 groups, or judge identities.
 
-Schema 14 supports `score.mean` as the primary comparison metric. Grouping is a
+Schema 15 supports `score.mean` as the primary comparison metric. Grouping is a
 unique subset of `solver` and `optimizer`; every optimization arm must name one
 of the comparison's listed baselines through `based_on`; and every listed arm
 must use the same judge profile.

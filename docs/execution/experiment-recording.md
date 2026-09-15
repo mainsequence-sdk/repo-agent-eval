@@ -51,7 +51,7 @@ Recorder settings are durable workspace configuration, not environment
 variables:
 
 ```yaml
-schema_version: 14
+schema_version: 15
 
 recording:
   enabled: true
@@ -162,7 +162,7 @@ for failed and cancelled terminal runs even when no aggregate report exists.
 All arms for one workspace are recorded in one MLflow Experiment. One MLflow
 parent run represents each canonical local arm execution. Nested MLflow runs
 represent stable stage scopes such as judge validation, solve, judge,
-aggregation, optimization candidates, and folds. The projection includes:
+aggregation, optimization candidates, validation, and training partitions. The projection includes:
 
 - scalar score, usage, latency, failure, and reuse metrics;
 - stage-attempt, model-call, case-result, criterion, endpoint, calibration, and
@@ -183,6 +183,24 @@ canonical `log_table` representation and remain machine-readable inputs. The
 recorder must log each table exactly once: uploading a second generic JSON file
 to the same path would overwrite MLflow's table schema and prevent the UI from
 recognizing it.
+
+Failures are not represented by a bare `failed` state. Three tables lead the
+browser whenever failure evidence exists:
+
+- `failure-summary` groups failures by stage, normalized error kind, and
+  endpoint, with affected scopes/cases, counts, example messages, retryability,
+  and recovery status;
+- `stage-failures` records the affected case and skill, stage and scope, stage
+  error, deepest provider exception, HTTP status/error code/errno when
+  available, endpoint ids and URLs, attempt timing, and whether a later attempt
+  recovered the same work; and
+- `model-call-failures` records every individual failed provider call with its
+  model, provider, endpoint, redacted exception chain, retryability, latency,
+  and correlation ids.
+
+New calls persist these diagnostics structurally. Reports can still recover the
+message and endpoint from older call response artifacts, although fields that
+were never recorded by an older run remain empty rather than being invented.
 
 Objects retain `agent_eval.*` tags containing the local run, revision, work,
 attempt, result, executor, model, and recorder identities. Empty charts are
@@ -240,8 +258,11 @@ true node-and-edge graph backed by `execution-dag.json`, not a Plotly category
 chart. The portable static summaries include:
 
 - `execution-dag.svg`: collapsed execution scopes and actual dependency/retry
-  edges; the complete work/attempt/result graph remains in
-  `execution-dag.json`;
+  edges. Green nodes mean every attempt in that scope persisted; orange means
+  at least one attempt is unfinished; red means at least one attempt failed or
+  was rejected. Solid gray arrows are dependencies and dashed purple arrows
+  are retries. Each node prints its state counts, attempt count, and cache reuse
+  count. The complete work/attempt/result graph remains in `execution-dag.json`;
 - `stage-latency-summary.svg`: p50, p95, and maximum duration for newly
   executed stage attempts;
 - `token-usage-by-stage.svg`: input, output, and unclassified provider tokens;

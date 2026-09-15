@@ -10,6 +10,12 @@
   [ADR-003: Content-Addressed Experiment Graph and Stage Reuse](003-content-addressed-experiment-graph.md)
 - Preserves:
   [ADR-001: Portable Staged Execution](001-portable-staged-execution.md)
+- Selection and search lifecycle superseded by:
+  [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
+
+> Historical note: this ADR introduced the two optimizer strategies. Its
+> independent K-fold search and final-search restart are no longer the active
+> execution contract; ADR-011 defines fixed validation and state carry-forward.
 
 ## Context
 

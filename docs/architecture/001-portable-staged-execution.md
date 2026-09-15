@@ -4,6 +4,8 @@
 - Date: 2026-09-12
 - Decision owners: MS Agent Eval maintainers
 - Scope: Experiment orchestration, model execution, artifact exchange, and run provenance
+- Optimization lifecycle refined by:
+  [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
 
 ## Context
 
@@ -97,10 +99,10 @@ The coordinator recognizes these stage kinds:
 | --- | --- | --- | --- |
 | `author` | Locked instructions, capability catalog, source evidence, campaign | Candidate or reviewed case packages | No solver responses, judge results, optimizer traces, or held-out feedback |
 | `validate_judge` | Judge-validation fixtures, case rubrics, expected evidence | Fixture scores and ordinal-consistency result | May see judge-validation-only hidden material |
-| `fit` | One grouped cross-validation training fold or the full training set | State-only DSPy artifact | Never loads test/challenge inputs or results |
+| `fit` | One optimization-training partition or the final training corpus | State-only DSPy artifact | Never loads test/challenge inputs or results |
 | `solve` | Global context, one skill context, case prompt | Candidate response and optional artifacts | Never sees rubric, expected response, or judge feedback |
 | `judge` | Prompt, skill context, rubric, expected evidence, candidate response | Criterion scores, hard failures, feedback | Sees hidden judging material for its assigned case only |
-| `select` | Complete out-of-fold scores for every candidate | Candidate means and deterministic argmax | Never loads test/challenge inputs or results |
+| `select` | Fixed-validation scores for every candidate | Candidate means and deterministic argmax | Never loads test/challenge inputs or results |
 | `aggregate` | Validated evaluation records | Run summary and report inputs | Deterministic; no model is required |
 
 Source resolution, schema validation, hash verification, split calculation,
@@ -303,10 +305,11 @@ stage boundaries.
 
 Optimization enforces this firewall:
 
-1. grouped K-fold fitting and model selection use training cases only;
-2. every candidate receives one out-of-fold score per training case;
-3. selection maximizes mean out-of-fold score without a cutoff;
-4. the selected configuration is refit on all training cases;
+1. a fixed group-safe validation holdout is derived from training cases only;
+2. candidates are compared on that same validation holdout;
+3. selection maximizes mean validation score without a cutoff;
+4. COPRO carries winners across sequential training partitions and materializes
+   the final configuration once;
 5. test is evaluated once and never influences selection; and
 6. challenge results never flow back into authoring or optimization.
 

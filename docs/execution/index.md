@@ -30,7 +30,7 @@ observed model, output artifacts, usage, timestamps, and failure evidence.
 | OpenAI-compatible endpoint pool | Optimizer, solver, judge, or other model-driven DSPy stages served over one or more HTTP replicas | Optional per-endpoint key named by `api_key_env` | Remote service boundary plus explicit per-replica capacity |
 | Codex CLI harness | Subscription-backed model stages in disposable containers | Dedicated ChatGPT subscription store | Digest-pinned container plus restricted control-plane network |
 | Artifact-exchange harness | A human or external agent that claims packets and submits structured results | Owned by the external worker | Defined by the external worker |
-| Local process | Deterministic coordination such as fold assignment, candidate selection, final refit, and aggregation | None | Framework process |
+| Local process | Deterministic coordination such as validation assignment, training partitioning, candidate selection, final materialization, and aggregation | None | Framework process |
 
 The executor, model, and stage binding are separate configuration objects. This
 allows roles to share an endpoint while keeping distinct model identities,
@@ -50,6 +50,13 @@ or run artifacts:
 ```bash
 uv run ms-agent-eval preflight baseline --workspace workspace.yaml
 ```
+
+This is a workload preflight, not merely a case counter. It prints the expanded
+case sets, stage formulas, fresh model-call upper bound, local operations,
+stateful COPRO partitions, models, deployments, endpoints, and usable
+concurrency before showing token-fit diagnostics. It performs no generation and
+does not create a run. The interactive `run` header repeats a compact workload
+summary before any model request.
 
 Pause after a stage and inspect the ledger:
 
@@ -79,5 +86,7 @@ Capacity-aware replica scheduling is specified by
 [ADR-004](../architecture/004-pooled-endpoint-concurrency.md).
 Optional endpoint-native context admission and its graceful skip behavior are
 specified by [ADR-005](../architecture/005-optional-token-preflight.md).
-The mutually exclusive labeled-few-shot and COPRO execution graphs are defined
-by [ADR-007](../architecture/007-configurable-dspy-optimization-strategies.md).
+The mutually exclusive labeled-few-shot and COPRO strategies are introduced by
+[ADR-007](../architecture/007-configurable-dspy-optimization-strategies.md);
+[ADR-011](../architecture/011-stateful-optimization-and-semantic-reuse.md)
+defines their current fixed-validation and semantic-reuse execution graph.

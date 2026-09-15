@@ -60,9 +60,9 @@ The same manifest defines:
 - `baseline`, which asks the DSPy solver to answer each reviewed case and has a
   separate DSPy judge stage score the result semantically; and
 - `optimize-solver`, which selects `strategy: labeled_few_shot`, compares the
-  baseline and configured demonstration counts by grouped K-fold
-  cross-validation on train, refits the selected configuration on all training
-  cases, and evaluates the untouched test once. It performs no optimizer-model
+  baseline and configured demonstration counts on one fixed group-safe
+  validation holdout derived from train, materializes the selected configuration
+  once, and evaluates the untouched test once. It performs no optimizer-model
   proposal calls.
 
 Solver and judge are distinct roles but may use the same configured model.

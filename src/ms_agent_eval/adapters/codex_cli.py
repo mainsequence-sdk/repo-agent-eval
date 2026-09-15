@@ -354,9 +354,7 @@ class CodexCliExecutor:
             raw = invoke()
             context = _input_mapping(packet, ledger, "optimizer_context")
             raw_candidates = raw.get("candidates")
-            if not isinstance(raw_candidates, Sequence) or isinstance(
-                raw_candidates, (str, bytes)
-            ):
+            if not isinstance(raw_candidates, Sequence) or isinstance(raw_candidates, (str, bytes)):
                 raise IntegrityError("Codex optimizer result requires candidates")
             candidates, proposal_accounting = normalize_copro_proposals(
                 raw_candidates,
@@ -385,7 +383,7 @@ class CodexCliExecutor:
                 "response": _non_empty_string(raw.get("response"), "Codex solver response"),
                 "program_hash": case["program_hash"],
                 "evaluation_phase": case["evaluation_phase"],
-                "fold": case["fold"],
+                "partition": case["partition"],
                 "candidate_id": case["candidate_id"],
                 "candidate_k": case["candidate_k"],
                 "strategy": case["strategy"],
@@ -416,7 +414,7 @@ class CodexCliExecutor:
                 "split": evaluation["split"],
                 "repetition": evaluation["repetition"],
                 "evaluation_phase": evaluation["evaluation_phase"],
-                "fold": evaluation["fold"],
+                "partition": evaluation["partition"],
                 "candidate_id": evaluation["candidate_id"],
                 "candidate_k": evaluation["candidate_k"],
                 "strategy": evaluation["strategy"],

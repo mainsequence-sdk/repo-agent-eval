@@ -1,5 +1,9 @@
 # ADR-006: Experiment Recorder Projection and MLflow Adapter
 
+> Optimization scope/table naming is refined by
+> [ADR-011](011-stateful-optimization-and-semantic-reuse.md): active runs use
+> fixed validation and sequential partitions rather than independent folds.
+
 - Status: Accepted and implemented
 - Date: 2026-09-14
 - Decision owners: MS Agent Eval maintainers

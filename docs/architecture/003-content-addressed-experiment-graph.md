@@ -4,6 +4,8 @@
 - Date: 2026-09-13
 - Refined by:
   [ADR-004: Capacity-Aware Pooled Endpoint Concurrency](004-pooled-endpoint-concurrency.md)
+- Semantic work-key and optimization-graph rules refined by:
+  [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
 - Decision owners: MS Agent Eval maintainers
 - Scope: Experiment identity, incremental execution, cross-run stage reuse,
   invalidation, provenance, and artifact retention
@@ -205,8 +207,6 @@ Judge work is keyed by:
 hash(
     case judge-view hash,
     candidate response content hash,
-    producing solver work and model-deployment hashes,
-    judge validation result hash,
     judge program hash,
     judge model deployment hash,
     judge generation parameters,
@@ -216,23 +216,22 @@ hash(
 )
 ```
 
-The candidate response hash and producing solver work/model identity are
-mandatory. Model name plus case identity is not sufficient: stochastic calls
-from the same solver may produce different responses and therefore require
-different judgments.
+The candidate response hash is mandatory. Producer packet/model identity and
+the calibration gate are orchestration provenance, not semantic judge input:
+identical response bytes under the same exact judge view must be reusable.
 
 ### Fit and select
 
-Fold-specific fitting work is keyed by the ordered training-case projections,
-fold assignment, candidate hyperparameters, optimizer implementation, model
-identities, base solver program, seed, and output contract. Selection work is
-keyed by the complete out-of-fold judgments for every candidate. Test and
+Fitting work is keyed by ordered training-case projections, candidate program,
+optimizer implementation where applicable, model identities, base solver
+program, and output contract. Phase/partition placement is excluded. Selection
+work is keyed by complete fixed-validation judgments for every candidate. Test and
 challenge material is forbidden from both nodes and their transitive dependency
 graphs.
 
 ### Final refit, test evaluation, and aggregate
 
-The final refit is keyed by the selected hyperparameters and all training cases.
+The final materialization is keyed by the selected program and its training corpus.
 Test solving is keyed by that refitted program and the held-out assignment hash.
 Aggregate work is keyed by the ordered test judgment result IDs, split
 assignments, benchmark or pilot mode, and aggregation implementation/policy

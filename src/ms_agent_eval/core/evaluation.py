@@ -825,25 +825,91 @@ def validate_deterministic_splits(
 
 
 @dataclass(frozen=True)
-class FoldAssignment:
+class ValidationAssignment:
     group: str
-    fold: int
+    split: str
 
 
-def deterministic_group_k_fold(
+def deterministic_group_validation_split(
     cases: Sequence[CaseDefinition],
     *,
-    folds: int,
+    fraction: float,
     seed: int,
-) -> tuple[FoldAssignment, ...]:
-    """Assign whole leakage groups to balanced, deterministic cross-validation folds."""
+) -> tuple[ValidationAssignment, ...]:
+    """Derive a fixed, group-safe validation holdout inside the permanent train split."""
 
-    if folds < 2:
-        raise ConfigurationError("cross-validation folds must be at least 2")
-    groups: dict[str, int] = Counter(case.group for case in cases)
-    if folds > len(groups):
+    if not 0 < fraction < 1:
+        raise ConfigurationError("validation fraction must be between 0 and 1")
+    skills_by_group: dict[str, set[str]] = {}
+    for case in cases:
+        skills_by_group.setdefault(case.group, set()).add(case.skill)
+    mixed = sorted(group for group, skills in skills_by_group.items() if len(skills) != 1)
+    if mixed:
         raise PreflightError(
-            "cross-validation folds cannot exceed the number of training leakage groups"
+            "validation derivation requires every leakage group to belong to one skill; "
+            f"mixed groups={mixed}"
+        )
+    groups_by_skill: dict[str, list[str]] = {}
+    for group, skills in skills_by_group.items():
+        groups_by_skill.setdefault(next(iter(skills)), []).append(group)
+    validation_groups: set[str] = set()
+    for skill, groups in sorted(groups_by_skill.items()):
+        # A singleton skill cannot appear on both sides of a group-safe holdout.
+        # Leave it in optimization training; COPRO performs the stricter
+        # per-target train/validation coverage check during preflight.
+        if len(groups) < 2:
+            continue
+        count = max(1, min(len(groups) - 1, round(len(groups) * fraction)))
+        ranked = sorted(
+            groups,
+            key=lambda group: (
+                hashlib.sha256(f"{seed}:{skill}:{group}".encode()).hexdigest(),
+                group,
+            ),
+        )
+        validation_groups.update(ranked[:count])
+    if not validation_groups:
+        ranked = sorted(
+            skills_by_group,
+            key=lambda group: (
+                hashlib.sha256(f"{seed}:{group}".encode()).hexdigest(),
+                group,
+            ),
+        )
+        if len(ranked) < 2:
+            raise PreflightError(
+                "validation derivation requires at least two training leakage groups"
+            )
+        validation_groups.add(ranked[0])
+    return tuple(
+        ValidationAssignment(
+            group,
+            "validation" if group in validation_groups else "training",
+        )
+        for group in sorted(skills_by_group)
+    )
+
+
+@dataclass(frozen=True)
+class TrainingPartitionAssignment:
+    group: str
+    partition: int
+
+
+def deterministic_group_training_partitions(
+    cases: Sequence[CaseDefinition],
+    *,
+    partitions: int,
+    seed: int,
+) -> tuple[TrainingPartitionAssignment, ...]:
+    """Assign training leakage groups to balanced, deterministic sequential partitions."""
+
+    if partitions < 1:
+        raise ConfigurationError("training partitions must be positive")
+    groups: dict[str, int] = Counter(case.group for case in cases)
+    if partitions > len(groups):
+        raise PreflightError(
+            "training partitions cannot exceed the number of training leakage groups"
         )
     ranked = sorted(
         groups,
@@ -853,12 +919,15 @@ def deterministic_group_k_fold(
             group,
         ),
     )
-    fold_sizes = [0] * folds
-    assignments: list[FoldAssignment] = []
+    partition_sizes = [0] * partitions
+    assignments: list[TrainingPartitionAssignment] = []
     for group in ranked:
-        fold = min(range(folds), key=lambda index: (fold_sizes[index], index))
-        assignments.append(FoldAssignment(group, fold))
-        fold_sizes[fold] += groups[group]
+        partition = min(
+            range(partitions),
+            key=lambda index: (partition_sizes[index], index),
+        )
+        assignments.append(TrainingPartitionAssignment(group, partition))
+        partition_sizes[partition] += groups[group]
     return tuple(sorted(assignments, key=lambda item: item.group))
 
 

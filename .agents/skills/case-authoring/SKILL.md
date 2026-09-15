@@ -76,20 +76,24 @@ framework measures the hidden expected response with the configured exact
 endpoint tokenizer after evaluation and reports fixed response-length bands.
 Authors do not enter or estimate token counts in `case.yaml`.
 
-## Permanent splits and cross-validation
+## Permanent splits and derived validation
 
 After cases exist, assign whole leakage groups in schema-v3
 `cases/splits.yaml`. The only permanent split names are:
 
-- `train`: available for fitting and grouped K-fold model selection;
+- `train`: source for optimization training and the derived validation holdout;
 - `test`: untouched until selection and the final full-training refit complete;
 - `challenge`: optional out-of-distribution evaluation, never fitting or
   selection.
 
-Do not create a permanent validation or development split. Fold assignment is
-derived deterministically inside `train` from the optimization experiment's
-`cross_validation.folds` and `cross_validation.seed`. A leakage group must
-never cross folds or permanent splits.
+Do not create a permanent validation or development split. The coordinator
+derives one fixed, group-safe validation holdout inside `train` from the
+optimization experiment's `validation.fraction` and `validation.seed`.
+COPRO may also partition the remaining optimization-training groups into a
+configured sequence; those partitions are execution batches, not independent
+folds, and each selected bundle carries into the next partition. A leakage
+group must never cross the derived training/validation boundary or a permanent
+split.
 
 ## Judge-validation set
 

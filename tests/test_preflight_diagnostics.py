@@ -9,6 +9,7 @@ from ms_agent_eval.core.hashing import content_hash, sha256_file
 from ms_agent_eval.core.planning import compile_workspace
 from ms_agent_eval.core.preflight_diagnostics import calculate_preflight
 from ms_agent_eval.core.token_preflight import TokenPreflightResult
+from ms_agent_eval.core.workload import calculate_workload
 from ms_agent_eval.core.workspace import EndpointConfiguration, WorkspaceRepository
 
 from .helpers import (
@@ -63,7 +64,7 @@ class _FixedPreflight:
         )
 
 
-def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
+def _compiled(tmp_path: Path, *, copro: bool = False):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
     payload["executors"]["remote-models"]["endpoints"] = [
@@ -93,6 +94,23 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     payload["models"]["solver"]["parameters"]["max_tokens"] = 100
     payload["models"]["judge"]["parameters"]["max_tokens"] = 50
     payload["experiments"]["baseline"]["repetitions"] = 3
+    if copro:
+        payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
+        payload["experiments"]["optimize"]["optimizer"] = {
+            "strategy": "copro",
+            "targets": {"prompt": True, "skills": []},
+            "search": {
+                "breadth": 2,
+                "depth": 2,
+                "partitions": 1,
+                "init_temperature": 1.0,
+            },
+            "metric": {"name": "rubric_mean_score"},
+        }
+        payload["experiments"]["optimize"]["budget"]["optimizer"] = {
+            "model_calls": 20,
+            "tokens": 10000,
+        }
     repository.workspace_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     repository = WorkspaceRepository.from_file(repository.workspace_file)
     lock, directory = create_snapshot(
@@ -127,6 +145,19 @@ def test_preflight_calculates_exact_request_fit_and_usable_concurrency(
 
     assert report["status"] == "fits"
     assert report["generation_calls"] == 0
+    workload = report["workload"]
+    assert workload["strategy"] == "evaluation"
+    assert workload["case_inventory"]["permanent_splits"] == {
+        "train": 2,
+        "test": 1,
+        "challenge": 0,
+    }
+    assert workload["totals"] == {
+        "logical_model_calls": 11,
+        "by_role": {"judge": 8, "solver": 3},
+        "by_stage": {"judge": 3, "solve": 3, "validate_judge": 5},
+        "local_operations": 1,
+    }
     stages = {item["stage"]: item for item in report["stages"]}
     assert stages["optimize"]["state"] == "not_applicable"
     assert stages["optimize"]["reason"] == "strategy_does_not_use_optimizer_calls"
@@ -169,3 +200,54 @@ def test_preflight_is_blocked_when_every_endpoint_rejects_a_request(
     assert solve["guaranteed_parallel_capacity"] == 0
     assert solve["dispatchable_parallel_capacity"] == 0
     assert solve["minimum_dispatch_waves"] is None
+
+
+def test_preflight_expands_stateful_copro_partitions_and_paired_test(
+    tmp_path: Path,
+) -> None:
+    compiled = _compiled(tmp_path, copro=True)
+
+    workload = calculate_workload(
+        compiled,
+        "optimize",
+        environment={"TEST_API_KEY": "test-secret"},
+    )
+
+    assert workload["strategy"] == "copro"
+    assert workload["case_inventory"]["derived"] == {
+        "optimization_training_cases": 1,
+        "optimization_training_groups": 1,
+        "validation_cases": 1,
+        "validation_groups": 1,
+        "validation_fraction": 0.5,
+        "validation_seed": 0,
+    }
+    assert workload["case_inventory"]["execution"]["arm_names"] == [
+        "baseline",
+        "optimized",
+    ]
+    assert workload["partitions"] == [
+        {
+            "partition": 1,
+            "training_cases": 1,
+            "training_groups": 1,
+            "active_skills": [],
+            "prompt_targets": 1,
+            "skill_targets": 0,
+            "target_count": 1,
+            "rounds": 2,
+            "candidates_per_target": 2,
+            "validation_case_slots_per_candidate_round": 1,
+            "optimizer_calls": 2,
+            "candidate_solver_calls": 4,
+            "candidate_judge_calls": 4,
+            "local_fit_operations": 5,
+            "local_selection_operations": 2,
+        }
+    ]
+    assert workload["totals"] == {
+        "logical_model_calls": 19,
+        "by_role": {"judge": 11, "optimizer": 2, "solver": 6},
+        "by_stage": {"judge": 6, "optimize": 2, "solve": 6, "validate_judge": 5},
+        "local_operations": 9,
+    }

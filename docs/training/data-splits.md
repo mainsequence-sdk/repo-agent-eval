@@ -1,41 +1,42 @@
-# Data Splits and Cross-Validation
+# Data Splits and Validation
 
 `cases/splits.yaml` assigns leakage groups—not individual prompts—to one of
 three permanent splits:
 
-| Split | Used for fitting? | Used for model selection? | Purpose |
+| Split | Used for fitting? | Used for selection? | Purpose |
 | --- | --- | --- | --- |
-| Train | Yes | Yes, through grouped K-fold cross-validation | Fit candidates and estimate their generalization within the available training data. |
-| Test | No | No | Evaluate the selected, refitted candidate once. |
+| Train | Yes | Yes, through a derived fixed validation holdout | Supply optimization training and selection evidence. |
+| Test | No | No | Evaluate the frozen selected program once. |
 | Challenge | No | No | Optional out-of-distribution or stress evaluation. |
 
-The workspace records deterministic train/test/challenge ratios and a split
-seed. It has no permanent validation or development split.
-
-An optimization experiment separately configures grouped K-fold
-cross-validation:
+There is no permanent validation or development split. Every optimization
+experiment derives one deterministic, group-safe holdout inside permanent
+train:
 
 ```yaml
-optimizer:
-  strategy: labeled_few_shot
-  search:
-    k: [1, 2, 4]
-cross_validation:
-  folds: 5
+validation:
+  strategy: holdout
+  fraction: 0.2
   seed: 0
 ```
 
-The same grouped split boundary applies when `strategy: copro`; its prompt and
-skill proposal/selection loop runs separately inside each K-1 fitting corpus.
-For each selected configuration, every training case receives exactly one
-out-of-fold score.
-All cases in the same leakage group stay in the same fold. The candidate with
-the highest mean out-of-fold score is selected; ties prefer the smaller `k`,
-then candidate id. The selected configuration is refit on all training cases
-before the test set is loaded.
+All cases in one leakage group remain together. The assignment is stratified by
+skill when a skill has enough groups to appear on both sides. COPRO preflight
+requires every selected skill to have optimization-training and validation
+evidence; otherwise the run is rejected before model calls.
 
-Test and challenge prompts, expected responses, solver responses, judge
-feedback, and metrics never become optimizer, fitting, selection, or
-fine-tuning inputs. COPRO's optimizer sees candidate wording and aggregate
-numeric training scores only; the separate judge alone sees correctness
-evidence.
+`labeled_few_shot` fits every configured `k` plus `k=0` once on optimization
+training and selects the highest mean validation score. COPRO may divide
+optimization-training groups into sequential `search.partitions`; these are
+work batches, not independent folds. The winner and scored history from one
+partition initialize the next, while every candidate is compared on the same
+fixed validation cases.
+
+After selection, the coordinator materializes the winner once. Test and
+challenge prompts, expected responses, solver responses, judge feedback, and
+metrics never become optimizer, fitting, validation-selection, or fine-tuning
+inputs. COPRO's optimizer sees candidate wording and aggregate numeric
+validation history only; the separate judge alone sees correctness evidence.
+
+See [ADR-011](../architecture/011-stateful-optimization-and-semantic-reuse.md)
+for the state and reuse invariants.

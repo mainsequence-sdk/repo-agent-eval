@@ -7,10 +7,10 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval setup` | Interactively create or inspect a workspace. |
 | `ms-agent-eval models refresh` | Upsert the OpenRouter model list into the static catalog without deleting existing rows. |
 | `ms-agent-eval models match <name>` | Rank catalog models for a local or deployment model name. |
-| `ms-agent-eval init` | Create an explicit schema-v14 workspace and supporting files. |
+| `ms-agent-eval init` | Create an explicit schema-v15 workspace and supporting files. |
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
-| `ms-agent-eval preflight <experiment>` | Render DSPy requests and calculate endpoint-native token fit and usable concurrency without generation. |
+| `ms-agent-eval preflight <experiment>` | Expand the complete workload, then calculate endpoint-native token fit and usable concurrency without generation. |
 | `ms-agent-eval run <experiment>` | Start a named evaluation or optimization. |
 | `ms-agent-eval run resume <run-id>` | Continue an existing immutable run. |
 | `ms-agent-eval stage list` | List packet attempts and states for a run. |
@@ -52,12 +52,21 @@ Run the endpoint diagnostic before spending inference capacity:
 ms-agent-eval preflight baseline --workspace workspace.yaml
 ```
 
-By default it checks judge-validation and solver requests for the selected
-benchmark split. The later judge stage is shown as deferred because its exact
-DSPy message includes the not-yet-produced solver response. Repeat `--stage`
-with `validate_judge`, `solve`, or `judge`; repeat `--case <case-id>` to select
-cases; or use `--pilot` for the train split. `--json` emits the complete
-per-request matrix.
+The first tables always describe the complete experiment graph rather than
+only the final case count. They include permanent train/test/challenge counts,
+derived optimization-training and validation counts, every model/local stage,
+the formula and logical work for each stage, COPRO partition expansion, paired
+test arms, model/deployment routes, configured endpoint slots, and totals by
+role. The total is a fresh-run logical upper bound before semantic reuse.
+
+After that expansion, the command checks judge-validation and solver requests
+for the selected benchmark split. The later judge stage is shown as deferred
+because its exact DSPy message includes the not-yet-produced solver response.
+Repeat `--stage` with `validate_judge`, `optimize`, `solve`, or `judge`; repeat
+`--case <case-id>` to narrow only the token-fit inspection; or use `--pilot` for
+the train split. `--json` emits both `workload` and the complete per-request
+matrix. A normal interactive `run` also prints a compact version of the case,
+call, and COPRO-partition plan before its first model stage.
 
 The command uses only bounded capability, chat-template, and tokenizer calls;
 it makes zero generation calls and writes no run data. `guaranteed_parallel_capacity`

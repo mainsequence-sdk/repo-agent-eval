@@ -73,13 +73,13 @@ flowchart TB
 
     subgraph Optimization["Selected DSPy optimization experiment"]
         Splits --> Train["Train cases"]
-        Train --> Folds["Grouped K-fold cross-validation"]
-        Folds --> Strategy{"optimizer.strategy"}
+        Train --> Holdout["Fixed group-safe validation holdout"]
+        Holdout --> Strategy{"optimizer.strategy"}
         Strategy -->|"labeled_few_shot"| Demos["Fit and score demonstration counts"]
-        Strategy -->|"copro"| Rewrite["Propose and score prompt + skill rewrites"]
-        Demos --> Select["Select highest mean out-of-fold score"]
+        Strategy -->|"copro"| Rewrite["Stateful prompt + skill search across partitions"]
+        Demos --> Select["Select highest mean validation score"]
         Rewrite --> Select
-        Select --> Refit["Refit selected configuration on all train cases"]
+        Select --> Refit["Materialize the winner once"]
         Refit --> Test["Load untouched test cases"]
         Splits --> Test
         Test --> Original["Original solver program"]
@@ -103,10 +103,13 @@ flowchart TB
   expected result.
 - The LLM judge is the only semantic scorer. Framework code only validates its
   typed result, aggregates votes, and computes weighted arithmetic.
-- Optimization compares candidates by mean out-of-fold score. A
+- Optimization compares candidates on one fixed, group-safe validation holdout
+  derived from permanent train. A
   `labeled_few_shot` experiment changes only demonstrations; a `copro`
   experiment keeps zero demonstrations and searches the solver instruction,
-  response prefix, and selected skill overlays. It has no numerical acceptance
+  response prefix, and selected skill overlays. COPRO carries each winning
+  bundle and its score history into the next training partition; it does not
+  restart per fold or perform another final search. It has no numerical acceptance
   cutoff, permanent validation split, or test-access gate. After selection, a
   COPRO run compares the original and optimized programs on every identical
   untouched test case and records the signed delta by skill, criterion, and
@@ -168,7 +171,7 @@ uv run ms-agent-eval init \
   --recording-content-policy full
 ```
 
-The generated schema-v14 `workspace.yaml` has these top-level concerns:
+The generated schema-v15 `workspace.yaml` has these top-level concerns:
 
 1. `recording` and `recorders`: optional, retryable experiment projection and
    its MLflow destination.
@@ -285,7 +288,7 @@ experiments:
       solver: qwen-solver
       optimizer: qwen-optimizer
       judge: fixed-judge
-    # optimizer, cross_validation, and budget follow here
+    # optimizer, validation, and budget follow here
 ```
 
 The coordinator runs ready packets through a bounded local thread pool. Each
@@ -347,12 +350,18 @@ is the authority: `labeled_few_shot` evaluates `k` demonstrations and makes no
 optimizer-model calls, while `copro` runs explicit optimize → candidate
 solve/judge → select rounds and compiles a zero-shot prompt/skill artifact.
 
-`preflight` makes zero generation calls and creates no run or result artifacts. It
-shows the configured endpoint slots, the exact-fit and dispatchable parallel
-capacity, endpoint context windows, largest rendered request, and minimum
-dispatch waves. Judge requests are reported as deferred until their solver
-responses exist; this is explicit because candidate-response size is part of
-the real judge request.
+`preflight` makes zero generation calls and creates no run or result artifacts.
+Before the token diagnostics, it expands the complete experiment workload: all
+permanent and derived case sets, one-time judge calibration, optimization
+partitions, targets, rounds, candidates, validation solves/judgments, final test
+arms, local fit/select work, model routes, endpoint slots, and the fresh-run
+model-call upper bound by role. The upper bound is explicitly before semantic
+cache reuse; exact reuse is resolved only when packets are materialized. It then
+shows exact-fit and dispatchable parallel capacity, endpoint context windows,
+largest rendered request, and minimum dispatch waves. Judge requests are
+reported as deferred until their solver responses exist because candidate
+response size is part of the real judge request. `run` repeats the expanded
+case/call/partition summary before its first model-driven stage.
 
 A pilot is immutable and explicitly records `benchmark_valid: false`. It never
 loads test or challenge cases, cannot run optimization, retains per-case judge

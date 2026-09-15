@@ -49,7 +49,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v14 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v15 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-validation manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -150,7 +150,7 @@ experiments:
       solver: shared-runtime
       optimizer: optimizer
       judge: shared-runtime
-    # optimizer/cross_validation/budget omitted
+    # optimizer/validation/budget omitted
 ```
 
 If the API requires a credential, set `api_key_env: OPENAI_API_KEY` on the
@@ -266,13 +266,14 @@ or:
 optimizer:
   strategy: copro
   targets: {prompt: true, skills: all}
-  search: {breadth: 3, depth: 2, init_temperature: 1.4}
+  search: {breadth: 3, depth: 2, partitions: 2, init_temperature: 1.4}
   metric: {name: rubric_mean_score}
 ```
 
-Both strategies use grouped K-fold cross-validation only within train, compile
-the selected configuration on all training cases, and then evaluate the
-untouched test set. COPRO evaluates both frozen original and optimized programs
+Both strategies use one fixed group-safe validation holdout derived within
+train, materialize the selected configuration once, and then evaluate the
+untouched test set. COPRO carries winners through sequential training
+partitions and evaluates both frozen original and optimized programs
 on identical test cases and creates explicit, reusable optimizer, candidate
 fit, solve, judge, and selection packets. All generated outputs stay under the
 external data root.

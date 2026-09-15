@@ -12,7 +12,8 @@ from ms_agent_eval.core.evaluation import (
     CapabilityCatalog,
     CaseBank,
     CaseDefinition,
-    deterministic_group_k_fold,
+    deterministic_group_training_partitions,
+    deterministic_group_validation_split,
     deterministic_group_split,
     LlmJudge,
     SplitManifest,
@@ -357,7 +358,9 @@ def test_group_splits_are_reproducible_and_policy_checked(tmp_path: Path) -> Non
         )
 
 
-def test_group_k_fold_is_deterministic_balanced_and_leakage_safe(tmp_path: Path) -> None:
+def test_group_validation_and_training_partitions_are_deterministic_and_group_safe(
+    tmp_path: Path,
+) -> None:
     repository = create_workspace(tmp_path / "workspace")
     from .helpers import create_case
 
@@ -375,14 +378,19 @@ def test_group_k_fold_is_deterministic_balanced_and_leakage_safe(tmp_path: Path)
         )
     )
 
-    assignments = deterministic_group_k_fold(cases, folds=2, seed=17)
-    assert assignments == deterministic_group_k_fold(cases, folds=2, seed=17)
-    assert {item.group for item in assignments} == {"large", "medium", "small"}
-    fold_by_group = {item.group: item.fold for item in assignments}
-    fold_sizes = [
-        sum(1 for case in cases if fold_by_group[case.group] == fold) for fold in range(2)
+    validation = deterministic_group_validation_split(cases, fraction=0.34, seed=17)
+    assert validation == deterministic_group_validation_split(cases, fraction=0.34, seed=17)
+    assert {item.group for item in validation} == {"large", "medium", "small"}
+    assert {item.split for item in validation} == {"training", "validation"}
+
+    assignments = deterministic_group_training_partitions(cases, partitions=2, seed=17)
+    assert assignments == deterministic_group_training_partitions(cases, partitions=2, seed=17)
+    partition_by_group = {item.group: item.partition for item in assignments}
+    partition_sizes = [
+        sum(1 for case in cases if partition_by_group[case.group] == partition)
+        for partition in range(2)
     ]
-    assert sorted(fold_sizes) == [3, 3]
+    assert sorted(partition_sizes) == [3, 3]
 
     with pytest.raises(PreflightError, match="training leakage groups"):
-        deterministic_group_k_fold(cases, folds=4, seed=17)
+        deterministic_group_training_partitions(cases, partitions=4, seed=17)
