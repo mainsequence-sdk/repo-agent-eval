@@ -364,11 +364,18 @@ def load_snapshot_context(
 
     files = {item.source_path: item for item in lock.files}
     unit_paths = {item.source_path for item in lock.units}
-    selected_globals = set(global_paths) if global_paths is not None else set(files) - unit_paths
+    selected_globals = (
+        tuple(global_paths)
+        if global_paths is not None
+        else tuple(source_path for source_path in files if source_path not in unit_paths)
+    )
     global_parts: list[str] = []
-    for source_path, item in files.items():
-        if source_path not in selected_globals:
-            continue
+    for source_path in selected_globals:
+        item = files.get(source_path)
+        if item is None:
+            raise IntegrityError(
+                f"configured global instruction is absent from the snapshot: {source_path}"
+            )
         global_parts.append(
             f"# {source_path}\n\n"
             + (snapshot_directory / item.snapshot_path).read_text(encoding="utf-8")

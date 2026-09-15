@@ -14,7 +14,7 @@ flowchart TB
     Calls --> Results[Validated results]
     Results --> Aggregate[Summary and regression evidence]
     Results --> Queue[Durable recorder queue intent]
-    Queue --> Recorder[Independent recorder worker]
+    Queue --> Recorder[Managed recorder consumer]
     Recorder --> MLflow[MLflow]
 
     Snapshots --> External[(External data root)]
@@ -51,10 +51,11 @@ deterministic projections over retained evidence; reporting never calls an LLM.
 These files are derived and can be deleted and rebuilt.
 
 Recorder state is also derived, but pointer-only queue intents are durable so
-an unavailable tracking server can be retried without inference. Independent
-workers own projection CPU, rendering, and uploads. Pending, leased, and dead-
-letter required intents remain operational retention roots. MLflow never
-replaces the canonical local manifests and blobs.
+an unavailable tracking server can be retried without inference. Normal runs
+manage their own run-scoped consumer; optional standalone consumers support
+recovery and distributed deployments. Pending, leased, and dead-letter
+required intents remain operational retention roots. MLflow never replaces the
+canonical local manifests and blobs.
 
 Within `operations/manifests/`, selected experiment definitions live under
 `experiments/<family>/<revision>/`, reusable computations under `graph/work/`,

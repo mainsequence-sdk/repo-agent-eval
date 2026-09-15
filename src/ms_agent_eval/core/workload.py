@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from .errors import ConfigurationError
 from .evaluation import (
     CaseDefinition,
-    deterministic_group_training_partitions,
     deterministic_group_validation_split,
 )
 from .planning import CompiledWorkspace, ExperimentLock
@@ -42,7 +41,7 @@ def calculate_workload(
             "fixtures × judge repetitions; executed once for the experiment",
         )
     ]
-    partitions: list[Mapping[str, object]] = []
+    copro_search: Mapping[str, object] | None = None
     derived: Mapping[str, object] | None = None
 
     if configuration.mode is ExperimentMode.EVALUATE:
@@ -107,91 +106,76 @@ def calculate_workload(
         if isinstance(optimizer, CoproConfiguration):
             strategy = "copro"
             configured_skills = (
-                tuple(sorted(workspace.context.skill_contexts))
-                if optimizer.skills == "all"
-                else optimizer.skills
+                (
+                    tuple(sorted(workspace.context.skill_contexts))
+                    if optimizer.skills == "all"
+                    else optimizer.skills
+                )
+                if optimizer.search_space_type == "skills"
+                else tuple(sorted({case.skill for case in permanent_train}))
             )
-            assignments = deterministic_group_training_partitions(
-                training_cases,
-                partitions=optimizer.partitions,
-                seed=validation.seed,
+            active_skills = tuple(
+                skill
+                for skill in configured_skills
+                if any(case.skill == skill for case in training_cases)
             )
-            partition_by_group = {item.group: item.partition for item in assignments}
-            proposal_calls = 0
-            candidate_solve_calls = 0
-            candidate_judge_calls = 0
-            candidate_fit_operations = 0
-            selection_operations = 0
-            for partition in range(optimizer.partitions):
-                partition_cases = tuple(
-                    case for case in training_cases if partition_by_group[case.group] == partition
+            global_targets = int(
+                optimizer.search_space_type == "global_instructions" and bool(training_cases)
+            )
+            skill_targets = len(active_skills) if optimizer.search_space_type == "skills" else 0
+            target_count = global_targets + skill_targets
+            validation_slots = (
+                len(validation_cases)
+                if optimizer.search_space_type == "global_instructions"
+                else sum(
+                    sum(case.skill == skill for case in validation_cases)
+                    for skill in active_skills
                 )
-                active_skills = tuple(
-                    skill
-                    for skill in configured_skills
-                    if any(case.skill == skill for case in partition_cases)
-                )
-                prompt_targets = int(optimizer.optimize_prompt)
-                target_count = prompt_targets + len(active_skills)
-                validation_slots = (
-                    len(validation_cases) if optimizer.optimize_prompt else 0
-                ) + sum(
-                    sum(case.skill == skill for case in validation_cases) for skill in active_skills
-                )
-                partition_proposals = optimizer.depth * target_count
-                partition_solves = optimizer.depth * optimizer.breadth * validation_slots
-                partition_judges = partition_solves * judge_repetitions
-                partition_fits = optimizer.depth * optimizer.breadth * target_count + 1
-                partition_selections = optimizer.depth * target_count
-                proposal_calls += partition_proposals
-                candidate_solve_calls += partition_solves
-                candidate_judge_calls += partition_judges
-                candidate_fit_operations += partition_fits
-                selection_operations += partition_selections
-                partitions.append(
-                    {
-                        "partition": partition + 1,
-                        "training_cases": len(partition_cases),
-                        "training_groups": len({case.group for case in partition_cases}),
-                        "active_skills": list(active_skills),
-                        "prompt_targets": prompt_targets,
-                        "skill_targets": len(active_skills),
-                        "target_count": target_count,
-                        "rounds": optimizer.depth,
-                        "candidates_per_target": optimizer.breadth,
-                        "validation_case_slots_per_candidate_round": validation_slots,
-                        "optimizer_calls": partition_proposals,
-                        "candidate_solver_calls": partition_solves,
-                        "candidate_judge_calls": partition_judges,
-                        "local_fit_operations": partition_fits,
-                        "local_selection_operations": partition_selections,
-                    }
-                )
+            )
+            proposal_calls = optimizer.depth * target_count
+            candidate_solve_calls = optimizer.depth * optimizer.breadth * validation_slots
+            candidate_judge_calls = candidate_solve_calls * judge_repetitions
+            candidate_fit_operations = optimizer.depth * optimizer.breadth * target_count
+            selection_operations = optimizer.depth * target_count
+            copro_search = {
+                "training_cases": len(training_cases),
+                "training_groups": len({case.group for case in training_cases}),
+                "active_skills": list(active_skills),
+                "search_space_type": optimizer.search_space_type,
+                "global_instruction_targets": global_targets,
+                "skill_targets": skill_targets,
+                "target_count": target_count,
+                "rounds": optimizer.depth,
+                "candidates_per_target": optimizer.breadth,
+                "validation_case_slots_per_candidate_round": validation_slots,
+                "optimizer_calls": proposal_calls,
+                "candidate_solver_calls": candidate_solve_calls,
+                "candidate_judge_calls": candidate_judge_calls,
+                "local_fit_operations": candidate_fit_operations,
+                "local_selection_operations": selection_operations,
+            }
             steps.extend(
                 (
                     _model_step(
                         "optimize",
                         "stateful search",
                         "optimizer",
-                        sum(int(item["target_count"]) for item in partitions),
+                        target_count,
                         optimizer.depth,
                         proposal_calls,
-                        "partition targets × rounds; each call requests breadth - 1 proposals",
+                        "targets × rounds; each call requests breadth - 1 proposals",
                     ),
                     _local_step(
                         "fit",
                         "candidate search",
                         candidate_fit_operations,
-                        "candidate fits plus one carried winner fit per partition",
+                        "one local fit for every candidate target and round",
                     ),
                     _model_step(
                         "solve",
                         "validation search",
                         "solver",
-                        sum(
-                            int(item["validation_case_slots_per_candidate_round"])
-                            for item in partitions
-                        ),
+                        validation_slots,
                         optimizer.depth * optimizer.breadth,
                         candidate_solve_calls,
                         "validation slots × rounds × candidates",
@@ -324,7 +308,7 @@ def calculate_workload(
             "judge": judge_repetitions,
         },
         "steps": steps,
-        "partitions": partitions,
+        "copro_search": copro_search,
         "model_routes": _model_routes(workspace, lock),
         "totals": {
             "logical_model_calls": sum(int(step["calls"]) for step in model_steps),

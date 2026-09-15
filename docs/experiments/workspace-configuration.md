@@ -1,9 +1,9 @@
 # Workspace Configuration
 
 `workspace.yaml` is the only framework configuration file in an experiment
-workspace. Schema version 16 separates transport executors, semantic model
+workspace. Schema version 17 separates transport executors, semantic model
 deployments, role profiles, experiment arms, comparisons, recorder projection,
-and recorder queue execution.
+recorder queue execution, and factorized COPRO search spaces.
 
 ## Top-level structure
 
@@ -23,7 +23,7 @@ and recorder queue execution.
 | `comparisons` | Explicit baseline/optimization arm sets for compatible cross-model reports. |
 
 ```yaml
-schema_version: 16
+schema_version: 17
 
 workspace:
   id: example-evaluation
@@ -98,8 +98,8 @@ comparisons: {}
 - Every stage has a finite budget.
 - An optimization experiment names its baseline with `based_on`, selects
   exactly one `optimizer.strategy`, declares that strategy's search space, and
-  configures one fixed validation holdout. COPRO also configures sequential
-  training partitions whose state is carried forward.
+  configures one fixed validation holdout. COPRO carries state across its
+  configured search rounds over the complete optimization-training set.
 - Generated ids, hashes, snapshots, and locks are outputs, not authored
   configuration.
 - Recorder destinations are operational projections. Their configuration hash
@@ -112,9 +112,10 @@ and [Execution](../execution/index.md) for executor configuration.
 
 ## Recording and recorder destinations
 
-`recording` selects one destination and queue and controls what workers
-project. `recorders` defines reusable destinations independently from
-solver/judge endpoint executors. `recorder_queues` controls durable scheduling:
+`recording` selects one destination and queue and controls what the automatically
+managed run consumer projects. `recorders` defines reusable destinations
+independently from solver/judge endpoint executors. `recorder_queues` controls
+durable scheduling and recovery:
 
 ```yaml
 recording:
@@ -156,8 +157,11 @@ The experiment-name template accepts `{workspace_id}` and `{experiment_id}`, but
 the standard layout deliberately uses only `{workspace_id}` so every arm is
 visible in one MLflow Experiment. URLs, policies, and secret environment-variable names are
 versioned configuration; credential values are not. The experiment process
-only appends pointer-only intents. Recorder failure remains visible and
-retryable but does not change the semantic outcome of a run.
+automatically manages a run-scoped consumer; the semantic coordinator itself
+only appends pointer-only intents. `wait_on_run_exit: false` drains immediately
+eligible work but does not wait through an unavailable destination's retry
+backoff. Recorder failure remains visible and retryable but does not change the
+semantic outcome of a run.
 
 ## Endpoint executor pools
 
@@ -310,9 +314,10 @@ experiments:
       wall_seconds: 7200
 ```
 
-COPRO keeps the compiled program zero-shot and searches the solver instruction,
-response prefix, and selected skill-text overlays. It requires a separate
-optimizer role and budget even when all roles point to the same model:
+COPRO keeps the compiled program zero-shot and searches exactly one instruction
+layer. It requires a separate optimizer role and budget even when all roles
+point to the same model. To freeze global instructions such as `AGENTS.md` and
+optimize the selected skills:
 
 ```yaml
 models:
@@ -331,8 +336,10 @@ experiments:
       judge: judge
     optimizer:
       strategy: copro
-      targets: {prompt: true, skills: all}
-      search: {breadth: 3, depth: 2, partitions: 2, init_temperature: 1.4}
+      search_space:
+        type: skills
+        include: all
+      search: {breadth: 3, depth: 2, init_temperature: 1.4}
       metric: {name: rubric_mean_score}
     validation: {strategy: holdout, fraction: 0.2, seed: 0}
     budget:
@@ -342,11 +349,31 @@ experiments:
       wall_seconds: 14400
 ```
 
-`targets.skills` is either `all` or an exact non-empty list of configured skill
-ids; glob patterns are rejected. The optimizer receives candidate text and
-numeric score history, but never rubrics, expected answers, judge feedback,
-test cases, or challenge cases. Preflight rejects unknown targets, insufficient
-grouped training coverage, and model-call budgets below the bounded search.
+`search_space.include` is either `all` or an exact non-empty list of configured
+skill ids; glob patterns are rejected. Global instructions, unselected skills,
+and the DSPy signature remain byte-identical throughout this search.
+
+To freeze every skill and optimize the configured global instruction bundle:
+
+```yaml
+optimizer:
+  strategy: copro
+  search_space:
+    type: global_instructions
+    files:
+      - agent_scaffold/AGENTS.md
+  search: {breadth: 3, depth: 2, init_temperature: 1.4}
+  metric: {name: rubric_mean_score}
+```
+
+`search_space.files` is either `all` or an exact non-empty list of paths already
+declared by `evaluation.instructions.global`. The selected files form one
+ordered optimization target; every skill and the DSPy signature remain frozen.
+There is no joint mode and no implicit default. The optimizer receives candidate
+text and numeric score history, but never rubrics, expected answers, judge
+feedback, test cases, or challenge cases. Preflight rejects unknown selectors,
+insufficient grouped training/validation coverage, and model-call budgets below
+the bounded search.
 
 The strategy participates in the experiment revision and downstream work
 identities. Changing it creates a new graph; it cannot reinterpret or resume an
@@ -382,13 +409,13 @@ comparisons:
     grouping: [solver, optimizer]
 ```
 
-One experiment may belong to one named comparison in schema 16. A completed
+One experiment may belong to one named comparison in schema 17. A completed
 valid arm automatically refreshes an immutable `model_comparison` projection in
 the workspace-level MLflow Experiment. The manifest selects the latest completed
 report for each `arm_id` and refuses to mix benchmark revisions, comparison
 groups, or judge identities.
 
-Schema 16 supports `score.mean` as the primary comparison metric. Grouping is a
+Schema 17 supports `score.mean` as the primary comparison metric. Grouping is a
 unique subset of `solver` and `optimizer`; every optimization arm must name one
 of the comparison's listed baselines through `based_on`; and every listed arm
 must use the same judge profile.

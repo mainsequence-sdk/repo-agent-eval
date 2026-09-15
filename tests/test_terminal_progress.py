@@ -127,7 +127,7 @@ def test_terminal_preflight_reporter_shows_fit_and_capacity() -> None:
                         "formula": "cases × solver repetitions",
                     }
                 ],
-                "partitions": [],
+                "copro_search": None,
                 "model_routes": [
                     {
                         "role": "solver",

@@ -115,7 +115,7 @@ The same manifest defines:
   zero-shot, and searches the solver instruction, response prefix, and all
   configured source/imported skill overlays. Each proposal is evaluated by the
   solver and separate LLM judge on one fixed validation holdout. Winning bundles
-  and score history carry across sequential training partitions before the
+  and score history carry across stateful search rounds before the
   selected bundle is materialized once. The frozen original and optimized
   programs are then scored on the same untouched test cases for a paired report.
 
@@ -200,10 +200,11 @@ uv run ms-agent-eval run optimize-solver \
 ```
 
 The optimization command validates the judge once, derives a fixed validation
-holdout, and runs one bounded COPRO search whose winner and score history carry
-across train-only partitions. It materializes that final instruction, prefix,
-and skill-overlay bundle once as a zero-demonstration compiled artifact, and
-only then loads test cases. Optimizer
+holdout, and runs one bounded COPRO skill search whose winners and score history
+carry across configured rounds. The workspace freezes `AGENTS.md`, every
+other global instruction, the DSPy signature, and all unselected skills. It
+materializes the selected skill overlays once as a zero-demonstration compiled
+artifact, and only then loads test cases. Optimizer
 packets never contain rubrics, expected responses, judge feedback, or held-out
 inputs.
 

@@ -26,7 +26,7 @@ Write schema-v6 packages and design rubrics for semantic evaluation by the LLM j
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 16,
+        "schema_version": 17,
         "workspace": {"id": "synthetic-evaluation"},
         "recording": {
             "enabled": False,

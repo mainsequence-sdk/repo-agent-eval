@@ -11,9 +11,9 @@ flowchart LR
     Train[Permanent train groups] --> Holdout[Fixed group-safe validation holdout]
     Holdout --> Strategy{Selected strategy}
     Strategy -->|labeled_few_shot| Demos[Fit each k once]
-    Strategy -->|copro| Partitions[Stateful sequential search partitions]
+    Strategy -->|copro| Search[Stateful search over complete optimization training]
     Demos --> Validation[Score fixed validation]
-    Partitions --> Validation
+    Search --> Validation
     Validation --> Select[Freeze highest mean validation winner]
     Select --> Materialize[Materialize final program once]
     Materialize --> Test[Evaluate untouched test]
@@ -43,7 +43,7 @@ optimize-solver:
 The baseline (`k=0`) is always included. The prompt and skills remain fixed and
 the optimizer model is never called.
 
-For prompt-and-skill search:
+For skill search with frozen global instructions:
 
 ```yaml
 optimize-solver:
@@ -51,11 +51,12 @@ optimize-solver:
   based_on: baseline
   optimizer:
     strategy: copro
-    targets: {prompt: true, skills: all}
+    search_space:
+      type: skills
+      include: all
     search:
       breadth: 3
       depth: 2
-      partitions: 2
       init_temperature: 1.4
     metric: {name: rubric_mean_score}
   validation: {strategy: holdout, fraction: 0.2, seed: 0}
@@ -66,12 +67,15 @@ optimize-solver:
     wall_seconds: 14400
 ```
 
-COPRO starts with the locked solver instruction and skill bytes. For each target
-and depth round it asks the optimizer for `breadth - 1` rewrites, keeps the
-current text as a candidate, and selects by fixed-validation LLM-judge score.
-The winning bundle and scored history carry into the next target, round, and
-training partition. There is no fold reset and no extra final search. The final
-program has zero demonstrations.
+COPRO starts with the locked global instructions and skill bytes. A skill search
+may rewrite only the selected skills. A separate experiment can instead set
+`search_space: {type: global_instructions, files: all}` to optimize one shared
+global bundle while freezing every skill. Both modes freeze the DSPy signature
+and response contract; there is no joint search. For each target and depth round
+the optimizer proposes `breadth - 1` rewrites, keeps the current text as a
+candidate, and selects by fixed-validation LLM-judge score. Winning state and
+scored history carry into the next round. There is no
+fold reset and no extra final search. The final program has zero demonstrations.
 
 Both strategies select by mean validation score. Deterministic tie-breaking
 prefers the current candidate for COPRO and smaller `k` for few-shot search.
@@ -79,14 +83,16 @@ There is no score cutoff.
 
 ## Outputs
 
-The run records the validation assignment, training partitions, candidate
+The run records the validation assignment, candidate
 scores and selections, compiled state, untouched test evaluation,
 content-addressed reuse, and role-separated usage. COPRO additionally records
-proposal rounds, selected instruction/prefix, source/overlay skill hashes, and
-candidate lineage. Reports expose continuous scores and named critical
+its search-space type, proposal rounds, frozen/effective global hashes,
+source/overlay skill hashes, and candidate lineage. Reports expose continuous
+scores and named critical
 violations, not binary pass/fail fields.
 
 See [Data splits and validation](data-splits.md), the
 [optimization lifecycle](optimization-lifecycle.md),
 [outputs and artifacts](outputs-and-artifacts.md), and
-[ADR-011](../architecture/011-stateful-optimization-and-semantic-reuse.md).
+[ADR-011](../architecture/011-stateful-optimization-and-semantic-reuse.md), and
+[ADR-012](../architecture/012-factorized-copro-optimization-scopes.md).

@@ -7,12 +7,12 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval setup` | Interactively create or inspect a workspace. |
 | `ms-agent-eval models refresh` | Upsert the OpenRouter model list into the static catalog without deleting existing rows. |
 | `ms-agent-eval models match <name>` | Rank catalog models for a local or deployment model name. |
-| `ms-agent-eval init` | Create an explicit schema-v16 workspace and supporting files. |
+| `ms-agent-eval init` | Create an explicit schema-v17 workspace and supporting files. |
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
 | `ms-agent-eval preflight <experiment>` | Expand the complete workload, then calculate endpoint-native token fit and usable concurrency without generation. |
-| `ms-agent-eval run <experiment>` | Start a named evaluation or optimization. |
-| `ms-agent-eval run resume <run-id>` | Continue an existing immutable run. |
+| `ms-agent-eval run <experiment>` | Start a named evaluation or optimization and automatically manage recording when enabled. |
+| `ms-agent-eval run resume <run-id>` | Continue an existing immutable run with the same automatic recording behavior. |
 | `ms-agent-eval stage list` | List packet attempts and states for a run. |
 | `ms-agent-eval stage prepare` | Prepare a stage packet independently. |
 | `ms-agent-eval stage claim` | Lease a packet to an external worker. |
@@ -24,8 +24,8 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval recorder doctor` | Verify recorder connectivity and, by default, perform a temporary artifact/table/trace write probe. |
 | `ms-agent-eval recorder status --run <run-id>` | Show queue counts, cursor lag, publication state, and external ids. |
 | `ms-agent-eval recorder project --run <run-id>` | Project or backfill one run without model calls. |
-| `ms-agent-eval recorder worker` | Continuously consume durable recorder-queue work. |
-| `ms-agent-eval recorder worker --once` | Drain currently available queue work and exit. |
+| `ms-agent-eval recorder worker` | Optional recovery/distributed consumer for durable recorder-queue work. Normal runs do not require it. |
+| `ms-agent-eval recorder worker --once` | Drain currently available recovery work and exit. |
 | `ms-agent-eval codex login` | Provision dedicated subscription authentication. |
 | `ms-agent-eval codex status` | Inspect the safe authentication identity. |
 | `ms-agent-eval codex preflight` | Validate image, network, CLI, Python, and authentication without inference. |
@@ -56,7 +56,7 @@ ms-agent-eval preflight baseline --workspace workspace.yaml
 The first tables always describe the complete experiment graph rather than
 only the final case count. They include permanent train/test/challenge counts,
 derived optimization-training and validation counts, every model/local stage,
-the formula and logical work for each stage, COPRO partition expansion, paired
+the formula and logical work for each stage, COPRO target/round expansion, paired
 test arms, model/deployment routes, configured endpoint slots, and totals by
 role. The total is a fresh-run logical upper bound before semantic reuse.
 
@@ -67,7 +67,7 @@ Repeat `--stage` with `validate_judge`, `optimize`, `solve`, or `judge`; repeat
 `--case <case-id>` to narrow only the token-fit inspection; or use `--pilot` for
 the train split. `--json` emits both `workload` and the complete per-request
 matrix. A normal interactive `run` also prints a compact version of the case,
-call, and COPRO-partition plan before its first model stage.
+call, and COPRO search plan before its first model stage.
 
 The command uses only bounded capability, chat-template, and tokenizer calls;
 it makes zero generation calls and writes no run data. `guaranteed_parallel_capacity`

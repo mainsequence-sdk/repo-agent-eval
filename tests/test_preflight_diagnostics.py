@@ -98,11 +98,10 @@ def _compiled(tmp_path: Path, *, copro: bool = False):  # type: ignore[no-untype
         payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
         payload["experiments"]["optimize"]["optimizer"] = {
             "strategy": "copro",
-            "targets": {"prompt": True, "skills": []},
+            "search_space": {"type": "global_instructions", "files": "all"},
             "search": {
                 "breadth": 2,
                 "depth": 2,
-                "partitions": 1,
                 "init_temperature": 1.0,
             },
             "metric": {"name": "rubric_mean_score"},
@@ -202,7 +201,7 @@ def test_preflight_is_blocked_when_every_endpoint_rejects_a_request(
     assert solve["minimum_dispatch_waves"] is None
 
 
-def test_preflight_expands_stateful_copro_partitions_and_paired_test(
+def test_preflight_expands_stateful_copro_search_and_paired_test(
     tmp_path: Path,
 ) -> None:
     compiled = _compiled(tmp_path, copro=True)
@@ -226,28 +225,26 @@ def test_preflight_expands_stateful_copro_partitions_and_paired_test(
         "baseline",
         "optimized",
     ]
-    assert workload["partitions"] == [
-        {
-            "partition": 1,
-            "training_cases": 1,
-            "training_groups": 1,
-            "active_skills": [],
-            "prompt_targets": 1,
-            "skill_targets": 0,
-            "target_count": 1,
-            "rounds": 2,
-            "candidates_per_target": 2,
-            "validation_case_slots_per_candidate_round": 1,
-            "optimizer_calls": 2,
-            "candidate_solver_calls": 4,
-            "candidate_judge_calls": 4,
-            "local_fit_operations": 5,
-            "local_selection_operations": 2,
-        }
-    ]
+    assert workload["copro_search"] == {
+        "training_cases": 1,
+        "training_groups": 1,
+        "active_skills": ["alpha"],
+        "search_space_type": "global_instructions",
+        "global_instruction_targets": 1,
+        "skill_targets": 0,
+        "target_count": 1,
+        "rounds": 2,
+        "candidates_per_target": 2,
+        "validation_case_slots_per_candidate_round": 1,
+        "optimizer_calls": 2,
+        "candidate_solver_calls": 4,
+        "candidate_judge_calls": 4,
+        "local_fit_operations": 4,
+        "local_selection_operations": 2,
+    }
     assert workload["totals"] == {
         "logical_model_calls": 19,
         "by_role": {"judge": 11, "optimizer": 2, "solver": 6},
         "by_stage": {"judge": 6, "optimize": 2, "solve": 6, "validate_judge": 5},
-        "local_operations": 9,
+        "local_operations": 8,
     }

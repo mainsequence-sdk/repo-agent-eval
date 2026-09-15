@@ -100,7 +100,7 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
                 "seed": validation["seed"],
             }
 
-    with pytest.raises(ConfigurationError, match="schema_version must be 16"):
+    with pytest.raises(ConfigurationError, match="schema_version must be 17"):
         WorkspaceConfiguration.from_mapping(legacy)
 
     upgraded = _upgrade_frozen_workspace_payload(legacy)
@@ -109,7 +109,7 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
     upgraded["recorders"] = current["recorders"]
     parsed = WorkspaceConfiguration.from_mapping(upgraded)
 
-    assert parsed.schema_version == 16
+    assert parsed.schema_version == 17
     assert parsed.experiments["baseline"].roles.solver == "solver"
     assert parsed.models["solver"].deployment == "frozen-solver"
     assert {
@@ -137,18 +137,18 @@ def test_schema_v14_is_upgraded_only_for_an_immutable_frozen_run() -> None:
         "seed": validation["seed"],
     }
 
-    with pytest.raises(ConfigurationError, match="schema_version must be 16"):
+    with pytest.raises(ConfigurationError, match="schema_version must be 17"):
         WorkspaceConfiguration.from_mapping(frozen)
 
     upgraded = _upgrade_frozen_workspace_payload(frozen)
     parsed = WorkspaceConfiguration.from_mapping(upgraded)
 
-    assert parsed.schema_version == 16
+    assert parsed.schema_version == 17
     assert parsed.experiments["optimize"].validation is not None
     assert parsed.experiments["optimize"].validation.seed == 0
     optimizer = parsed.experiments["optimize"].optimizer
     assert optimizer is not None
-    assert optimizer.partitions == 2  # type: ignore[union-attr]
+    assert optimizer.search_space_type == "skills"  # type: ignore[union-attr]
 
 
 def test_schema_v7_lock_rehydration_preserves_historical_model_and_run_identity(
@@ -735,7 +735,7 @@ def test_optimizer_is_a_strict_discriminated_strategy_union() -> None:
     mixed = workspace_payload()
     mixed["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
         "strategy": "copro",
-        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search_space": {"type": "skills", "include": ["alpha"]},
         "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0, "k": [1]},
         "metric": {"name": "rubric_mean_score"},
     }
@@ -746,12 +746,79 @@ def test_optimizer_is_a_strict_discriminated_strategy_union() -> None:
     with pytest.raises(ConfigurationError, match="unknown fields"):
         WorkspaceConfiguration.from_mapping(mixed)
 
+    removed_targets = workspace_payload()
+    removed_targets["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": "all"},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(removed_targets)
+
+    removed_partitions = workspace_payload()
+    removed_partitions["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "search_space": {"type": "skills", "include": ["alpha"]},
+        "search": {
+            "breadth": 2,
+            "depth": 1,
+            "partitions": 2,
+            "init_temperature": 1.0,
+        },
+        "metric": {"name": "rubric_mean_score"},
+    }
+    removed_partitions["experiments"]["optimize"]["budget"]["optimizer"] = {  # type: ignore[index]
+        "model_calls": 10,
+        "tokens": 10000,
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(removed_partitions)
+
+    mixed_space = workspace_payload()
+    mixed_space["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "search_space": {"type": "skills", "include": ["alpha"], "files": "all"},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    with pytest.raises(ConfigurationError, match="unknown fields"):
+        WorkspaceConfiguration.from_mapping(mixed_space)
+
+
+def test_copro_global_instruction_space_accepts_only_configured_exact_paths() -> None:
+    payload = workspace_payload()
+    payload["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
+        "strategy": "copro",
+        "search_space": {"type": "global_instructions", "files": ["AGENTS.md"]},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"  # type: ignore[index]
+    payload["experiments"]["optimize"]["budget"]["optimizer"] = {  # type: ignore[index]
+        "model_calls": 10,
+        "tokens": 10000,
+    }
+
+    workspace = WorkspaceConfiguration.from_mapping(payload)
+    optimizer = workspace.experiments["optimize"].optimizer
+    assert optimizer is not None
+    assert optimizer.search_space_type == "global_instructions"  # type: ignore[union-attr]
+    assert optimizer.global_instruction_files == ("AGENTS.md",)  # type: ignore[union-attr]
+    assert optimizer.skills == ()  # type: ignore[union-attr]
+
+    payload["experiments"]["optimize"]["optimizer"]["search_space"]["files"] = [  # type: ignore[index]
+        "missing/AGENTS.md"
+    ]
+    with pytest.raises(ConfigurationError, match="not declared"):
+        WorkspaceConfiguration.from_mapping(payload)
+
 
 def test_copro_resolves_a_distinct_optimizer_role_and_requires_its_budget() -> None:
     payload = workspace_payload()
     payload["experiments"]["optimize"]["optimizer"] = {  # type: ignore[index]
         "strategy": "copro",
-        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search_space": {"type": "skills", "include": ["alpha"]},
         "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
         "metric": {"name": "rubric_mean_score"},
     }

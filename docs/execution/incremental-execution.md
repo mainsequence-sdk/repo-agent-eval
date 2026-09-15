@@ -5,7 +5,7 @@ new run does not imply rerunning every model call. The coordinator reuses an
 existing result only when it can prove that the requested computation is
 semantically identical and that the earlier result was validated and persisted.
 
-This guide describes the implemented schema-v16 behavior. The design rationale
+This guide describes the implemented schema-v17 behavior. The design rationale
 and complete identity rules are in
 [ADR-003](../architecture/003-content-addressed-experiment-graph.md).
 

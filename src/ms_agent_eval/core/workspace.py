@@ -28,7 +28,7 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 16
+WORKSPACE_SCHEMA_VERSION = 17
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -1571,11 +1571,11 @@ class LabeledFewShotConfiguration:
 @dataclass(frozen=True)
 class CoproConfiguration:
     strategy: str
-    optimize_prompt: bool
+    search_space_type: str
     skills: str | tuple[str, ...]
+    global_instruction_files: str | tuple[str, ...]
     breadth: int
     depth: int
-    partitions: int
     init_temperature: float
     metric: str
 
@@ -1583,44 +1583,79 @@ class CoproConfiguration:
     def from_mapping(cls, payload: Mapping[str, object]) -> CoproConfiguration:
         _reject_unknown(
             payload,
-            {"strategy", "targets", "search", "metric"},
+            {"strategy", "search_space", "search", "metric"},
             "experiment.optimizer",
         )
-        targets = _mapping(payload.get("targets"), "experiment.optimizer.targets")
-        _reject_unknown(targets, {"prompt", "skills"}, "experiment.optimizer.targets")
-        optimize_prompt = targets.get("prompt")
-        if not isinstance(optimize_prompt, bool):
-            raise ConfigurationError("experiment.optimizer.targets.prompt must be a boolean")
-        raw_skills = targets.get("skills")
-        if raw_skills == "all":
-            skills: str | tuple[str, ...] = "all"
-        else:
-            skills = _string_list(
-                raw_skills,
-                "experiment.optimizer.targets.skills",
-                allow_empty=optimize_prompt,
+        search_space = _mapping(
+            payload.get("search_space"), "experiment.optimizer.search_space"
+        )
+        search_space_type = _identifier(
+            search_space.get("type"), "experiment.optimizer.search_space.type"
+        )
+        if search_space_type == "skills":
+            _reject_unknown(
+                search_space,
+                {"type", "include"},
+                "experiment.optimizer.search_space",
             )
-            if any("*" in item or "?" in item or "[" in item for item in skills):
-                raise ConfigurationError(
-                    "experiment.optimizer.targets.skills must contain exact skill identifiers, not globs"
+            raw_skills = search_space.get("include")
+            if raw_skills == "all":
+                skills: str | tuple[str, ...] = "all"
+            else:
+                skills = _string_list(
+                    raw_skills,
+                    "experiment.optimizer.search_space.include",
                 )
-        if not optimize_prompt and skills == ():
-            raise ConfigurationError("COPRO must optimize the prompt or at least one skill")
+                if any("*" in item or "?" in item or "[" in item for item in skills):
+                    raise ConfigurationError(
+                        "experiment.optimizer.search_space.include must contain exact skill "
+                        "identifiers, not globs"
+                    )
+            global_instruction_files: str | tuple[str, ...] = ()
+        elif search_space_type == "global_instructions":
+            _reject_unknown(
+                search_space,
+                {"type", "files"},
+                "experiment.optimizer.search_space",
+            )
+            raw_files = search_space.get("files")
+            if raw_files == "all":
+                global_instruction_files = "all"
+            else:
+                global_instruction_files = tuple(
+                    _relative_path(item, "experiment.optimizer.search_space.files[]")
+                    for item in _string_list(
+                        raw_files,
+                        "experiment.optimizer.search_space.files",
+                    )
+                )
+                if len(global_instruction_files) != len(set(global_instruction_files)):
+                    raise ConfigurationError(
+                        "experiment.optimizer.search_space.files must not contain duplicates"
+                    )
+                if any(
+                    "*" in item or "?" in item or "[" in item
+                    for item in global_instruction_files
+                ):
+                    raise ConfigurationError(
+                        "experiment.optimizer.search_space.files must contain exact paths, not globs"
+                    )
+            skills = ()
+        else:
+            raise ConfigurationError(
+                "experiment.optimizer.search_space.type must be skills or global_instructions"
+            )
 
         search = _mapping(payload.get("search"), "experiment.optimizer.search")
         _reject_unknown(
             search,
-            {"breadth", "depth", "partitions", "init_temperature"},
+            {"breadth", "depth", "init_temperature"},
             "experiment.optimizer.search",
         )
         breadth = _positive_int(search.get("breadth"), "experiment.optimizer.search.breadth")
         if breadth < 2:
             raise ConfigurationError("experiment.optimizer.search.breadth must be at least 2")
         depth = _positive_int(search.get("depth"), "experiment.optimizer.search.depth")
-        partitions = _positive_int(
-            search.get("partitions", 1),
-            "experiment.optimizer.search.partitions",
-        )
         temperature = _positive_number(
             search.get("init_temperature"),
             "experiment.optimizer.search.init_temperature",
@@ -1633,11 +1668,11 @@ class CoproConfiguration:
             raise ConfigurationError("experiment.optimizer.metric.name must be rubric_mean_score")
         return cls(
             "copro",
-            optimize_prompt,
+            search_space_type,
             skills,
+            global_instruction_files,
             breadth,
             depth,
-            partitions,
             temperature,
             metric_name,
         )
@@ -1875,7 +1910,7 @@ class ComparisonConfiguration:
         )
         if primary_metric != "score.mean":
             raise ConfigurationError(
-                f"{field}.primary_metric supports only score.mean in schema 16"
+                f"{field}.primary_metric supports only score.mean in schema 17"
             )
         return cls(
             _identifier(comparison_id, "comparison id"),
@@ -2146,7 +2181,7 @@ class WorkspaceConfiguration:
         )
         if duplicated_memberships:
             raise ConfigurationError(
-                "an experiment may belong to only one comparison in schema 16: "
+                "an experiment may belong to only one comparison in schema 17: "
                 f"{duplicated_memberships}"
             )
         result = cls(
@@ -2170,6 +2205,28 @@ class WorkspaceConfiguration:
                 assert experiment.solver is not None
                 experiment.solver.program.validate_role(
                     "solver", field=f"experiments.{experiment.id}.solver.dspy"
+                )
+            optimizer = experiment.optimizer
+            if not isinstance(optimizer, CoproConfiguration):
+                continue
+            if optimizer.search_space_type != "global_instructions":
+                continue
+            configured = result.evaluation.instructions.global_paths
+            if not configured:
+                raise ConfigurationError(
+                    f"COPRO experiment {experiment.id!r} cannot optimize global instructions "
+                    "because evaluation.instructions.global is empty"
+                )
+            selected = (
+                configured
+                if optimizer.global_instruction_files == "all"
+                else optimizer.global_instruction_files
+            )
+            unknown = sorted(set(selected) - set(configured))
+            if unknown:
+                raise ConfigurationError(
+                    f"COPRO experiment {experiment.id!r} references global instruction files "
+                    f"not declared by evaluation.instructions.global: {unknown}"
                 )
         return result
 

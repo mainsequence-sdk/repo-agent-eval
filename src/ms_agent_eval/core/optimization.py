@@ -31,15 +31,13 @@ def normalize_copro_proposals(
 
     if requested_count < 0:
         raise IntegrityError("optimizer candidate_count must not be negative")
-    if target_kind not in {"solver_prompt", "skill"}:
+    if target_kind not in {"global_instructions", "skill"}:
         raise IntegrityError(f"unsupported COPRO target kind: {target_kind!r}")
 
     original_identity = (
         _non_empty_text(current_text, "optimizer current_text"),
-        current_output_prefix.strip() if target_kind == "solver_prompt" else "",
+        "",
     )
-    if target_kind == "solver_prompt" and not original_identity[1]:
-        raise IntegrityError("optimizer current_output_prefix must not be empty")
 
     accepted: list[dict[str, str]] = []
     identities: set[tuple[str, str]] = set()
@@ -61,9 +59,7 @@ def normalize_copro_proposals(
         raw_prefix = raw_candidate.get("output_prefix", "")
         if not isinstance(raw_prefix, str):
             raise IntegrityError("candidate output_prefix must be a string")
-        output_prefix = raw_prefix.strip() if target_kind == "solver_prompt" else ""
-        if target_kind == "solver_prompt" and not output_prefix:
-            raise IntegrityError("solver prompt candidates require output_prefix")
+        output_prefix = ""
 
         identity = (instruction, output_prefix)
         if identity == original_identity:

@@ -3,14 +3,15 @@
 - Status: Accepted and implemented
 - Date: 2026-09-15
 - Decision owners: MS Agent Eval maintainers
-- Scope: recorder-adapter isolation, durable queues, worker deployment,
-  projection phases, cursors, coalescing, retry, and final report generation
+- Scope: recorder-adapter isolation, durable queues, managed run consumers,
+  optional worker deployment, projection phases, cursors, coalescing, retry,
+  and final report generation
 - Extends:
   [ADR-003: Content-Addressed Experiment Graph](003-content-addressed-experiment-graph.md)
   and
   [ADR-006: Experiment Recorder Projection](006-experiment-recorder-projection.md)
-- Supersedes: ADR-006's in-process background synchronization and synchronous
-  terminal flush
+- Supersedes: ADR-006's unqueued background synchronization and repeated
+  full-state projection
 
 ## Context
 
@@ -37,25 +38,26 @@ MLflow.
 Every recorder operation executes behind a durable `RecorderQueue`. The
 experiment coordinator commits canonical evidence and then appends a small,
 pointer-only `ProjectionIntent`. It never constructs a complete recording
-plan, imports an external recorder client, renders reports, or waits for an
-adapter.
+plan, imports an external recorder client, or renders reports.
 
-A separately launched `RecorderWorkerService` claims queue items, reads the
-canonical evidence, constructs a phase-specific recorder-neutral projection,
-calls the configured `ExperimentRecorder`, advances a durable cursor, and
-acknowledges the queue item.
+The public `ExperimentRunner` automatically starts one run-scoped
+`RecorderWorkerService` consumer when recording is enabled. The consumer
+claims queue items, reads canonical evidence, constructs a phase-specific
+recorder-neutral projection, calls the configured `ExperimentRecorder`,
+advances a durable cursor, and acknowledges the item. It runs concurrently
+with semantic execution and is stopped and drained by the same `run` command.
+The user does not launch a second process for normal execution.
 
 ```text
-                    experiment process
+                    normal run command
 
  model/stage work → canonical commit → enqueue intent → continue/exit
                                           │
-------------------------------------------│------------------------
                                           ▼
                          durable RecorderQueue
                                           │ claim + lease
                                           ▼
-                  independent RecorderWorkerService
+                    run-managed consumer thread
                        │         │            │
                        │         │            └── final reports
                        │         └── RecorderProjector
@@ -68,20 +70,24 @@ acknowledges the queue item.
 The queue boundary applies to live metrics, stage tables, traces, final charts,
 comparison reports, and external run finalization. Terminal execution may
 enqueue a high-priority finalization intent, but it may not bypass the queue.
+Standalone worker and one-shot projection commands remain available for crash
+recovery, backfill, or intentionally distributed shared-storage deployments.
 
 ## Dependency rule
 
-The four responsibilities are separate:
+The five responsibilities are separate:
 
 1. `ExperimentCoordinator` owns semantic execution and queue production.
-2. `RecorderQueue` owns durable scheduling, leases, retries, and coalescing.
-3. `RecorderProjector` owns recorder-neutral derived structures.
-4. `ExperimentRecorder` owns translation into one external system.
+2. `ExperimentRunner` owns the lifetime of the normal run-scoped consumer.
+3. `RecorderQueue` owns durable scheduling, leases, retries, and coalescing.
+4. `RecorderProjector` owns recorder-neutral derived structures.
+5. `ExperimentRecorder` owns translation into one external system.
 
-Coordinator, runner, stage executor, model provider, DSPy program, and
-aggregation modules may depend on queue-domain types. They may not import
-MLflow or instantiate a recorder adapter. Adapter construction occurs only in
-doctor, worker, or one-shot projection commands.
+The coordinator, stage executor, model provider, DSPy program, and aggregation
+modules may depend on queue-domain types but may not import MLflow or
+instantiate a recorder adapter. The runner may operate `RecorderWorkerService`
+but remains recorder-neutral; adapter construction occurs inside that service
+for managed runs, doctor, standalone workers, and one-shot projection.
 
 ## Queue intent
 
@@ -237,11 +243,11 @@ finalization intents remain durable.
 
 ## Workspace configuration
 
-Schema 16 removes `live_and_finalize` and `finalize_only`. Those names combined
+Schema 17 removes `live_and_finalize` and `finalize_only`. Those names combined
 projection content with execution placement and implied coordinator delivery.
 
 ```yaml
-schema_version: 16
+schema_version: 17
 
 recording:
   enabled: true
@@ -285,20 +291,23 @@ recorders:
     authentication: {type: none}
 ```
 
-`wait_on_run_exit` defaults to `false`. A future compliance runner may wait for
-a queue receipt when it is true, but it still must not execute adapter work in
-the experiment process.
+The managed consumer always drains immediately eligible work before `run`
+returns. `wait_on_run_exit: false` prevents an unavailable destination's retry
+backoff from delaying command exit. When it is `true`, the runner waits until
+delivery succeeds or the queue reaches terminal dead-letter state.
 
 ## CLI and deployment
 
-Normal execution only creates queue intents:
+Normal execution automatically starts, supervises, drains, and stops the
+run-scoped recorder consumer:
 
 ```bash
 uv run --extra mlflow ms-agent-eval run optimize-solver \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-Deploy a long-running worker separately:
+No second command is required. A long-running standalone worker is optional
+for recovery or a deliberately distributed shared-storage deployment:
 
 ```bash
 uv run --extra mlflow ms-agent-eval recorder worker \
@@ -320,8 +329,8 @@ uv run --extra mlflow ms-agent-eval recorder project \
   --run <run-id>
 ```
 
-The project and worker commands make no model calls. Workers may run on another
-host when canonical storage and the queue are shared.
+The project and standalone worker commands make no model calls. Standalone
+workers may run on another host when canonical storage and the queue are shared.
 
 Status is explicit:
 
@@ -381,8 +390,10 @@ The implementation is covered by tests proving:
 - required boundary intents do not coalesce away;
 - leases expire and recover;
 - retry, dead-letter, acknowledgement, and cursor transitions are durable;
-- completed experiments queue work without invoking an adapter;
-- explicit workers project and finalize afterward;
+- completed public full runs automatically project and finalize recording;
+- low-level coordinator execution still commits canonical evidence before
+  queue delivery;
+- standalone workers can recover and finalize queued work afterward;
 - adapter errors cannot change run completion;
 - historical projection performs no inference;
 - frozen workspaces rehydrate with active operational queue configuration; and
@@ -390,16 +401,18 @@ The implementation is covered by tests proving:
 
 ## Consequences
 
-Expensive recorder work now uses independent worker CPU and can outlive the
-experiment process. Projection lag becomes visible and harmless. Final charts
-may appear after experiment completion, and operators must run or schedule a
-worker. The framework gains queue leases, retry, cursor, and dead-letter state,
-but these operational concerns no longer contaminate the training path.
+Recorder work remains behind a durable queue and runs concurrently with model
+execution. Projection lag is visible and harmless. A normal command needs no
+operator-managed worker and drains final charts automatically when the
+destination is healthy. Queue leases, retry, cursors, and dead-letter state
+still allow delivery to survive process or tracking-service failures.
 
 Rejected alternatives:
 
-- An in-process thread still competes for CPU, memory, I/O, and process life.
-- Synchronous terminal flush still blocks on the most expensive projection.
+- Direct in-process projection without a queue couples recorder failures to
+  semantic execution and loses durable recovery.
+- Requiring a separately launched worker for every normal run exposes an
+  internal deployment boundary as unnecessary CLI ceremony.
 - Sending a full plan through the queue makes the producer perform the costly
   scan and serialization.
 - Using MLflow as queue or source of truth couples correctness to one mutable

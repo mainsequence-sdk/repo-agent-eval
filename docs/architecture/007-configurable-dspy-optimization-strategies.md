@@ -12,10 +12,14 @@
   [ADR-001: Portable Staged Execution](001-portable-staged-execution.md)
 - Selection and search lifecycle superseded by:
   [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
+- COPRO target and frozen-layer contract superseded by:
+  [ADR-012](012-factorized-copro-optimization-scopes.md)
 
 > Historical note: this ADR introduced the two optimizer strategies. Its
 > independent K-fold search and final-search restart are no longer the active
 > execution contract; ADR-011 defines fixed validation and state carry-forward.
+> Its joint DSPy-prompt-and-skill target is also retired; ADR-012 requires one
+> factorized skill or global-instruction search and freezes the other layer.
 
 ## Context
 

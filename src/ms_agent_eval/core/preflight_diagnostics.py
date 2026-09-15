@@ -13,10 +13,9 @@ from ms_agent_eval.programs.dspy.engine import (
     create_copro_proposal_program,
     create_judge_program,
     create_solver_program,
-    solver_prompt_state,
 )
 
-from .errors import ConfigurationError
+from .errors import ConfigurationError, IntegrityError
 from .evaluation import CaseDefinition
 from .hashing import content_hash
 from .planning import CompiledWorkspace
@@ -282,17 +281,33 @@ def _optimizer_requests(
     if not isinstance(optimizer, CoproConfiguration):
         return ()
     program = create_copro_proposal_program()
-    instruction, prefix = solver_prompt_state(create_solver_program())
-    skills = (
-        sorted(workspace.context.skill_contexts)
-        if optimizer.skills == "all"
-        else list(optimizer.skills)
-    )
-    targets = []
-    if optimizer.optimize_prompt:
-        targets.append(("solver_prompt", "solver", instruction, prefix))
-    targets.extend(("skill", skill, workspace.context.skill(skill), "") for skill in skills)
-    multiplicity = optimizer.depth * optimizer.partitions
+    if optimizer.search_space_type == "global_instructions":
+        configured = workspace.repository.workspace.evaluation.instructions.global_paths
+        selected = (
+            configured
+            if optimizer.global_instruction_files == "all"
+            else optimizer.global_instruction_files
+        )
+        parts = []
+        for source_path in selected:
+            try:
+                source = workspace.context.source_files[source_path]
+            except KeyError as error:
+                raise IntegrityError(
+                    f"global instruction source is absent from the snapshot: {source_path}"
+                ) from error
+            parts.append(f"# {source_path}\n\n" + source.read_text(encoding="utf-8"))
+        targets = [("global_instructions", "global", "\n\n".join(parts), "")]
+    else:
+        skills = (
+            sorted(workspace.context.skill_contexts)
+            if optimizer.skills == "all"
+            else list(optimizer.skills)
+        )
+        targets = [
+            ("skill", skill, workspace.context.skill(skill), "") for skill in skills
+        ]
+    multiplicity = optimizer.depth
     return tuple(
         _RenderedRequest(
             id=f"optimize:{kind}:{target_id}",

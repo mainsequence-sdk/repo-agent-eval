@@ -25,6 +25,7 @@ from ms_agent_eval.core.stages import StageKind, StageState
 from ms_agent_eval.core.token_preflight import ExactTokenMeasurement, TokenPreflightResult
 from ms_agent_eval.core.workspace import ResolvedRoleModel, WorkspaceRepository
 from ms_agent_eval.programs.dspy.budget import BudgetLedger
+from ms_agent_eval.programs.dspy.engine import create_solver_program, solver_prompt_state
 
 from .helpers import (
     FixedObservedLM,
@@ -53,16 +54,21 @@ def _compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
 
 
-def _copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
+def _copro_compiled(
+    tmp_path: Path, *, global_instructions: bool = False
+):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
     payload["experiments"]["optimize"]["optimizer"] = {
         "strategy": "copro",
-        "targets": {"prompt": True, "skills": ["alpha"]},
+        "search_space": (
+            {"type": "global_instructions", "files": ["AGENTS.md"]}
+            if global_instructions
+            else {"type": "skills", "include": ["alpha"]}
+        ),
         "search": {
             "breadth": 2,
             "depth": 2,
-            "partitions": 2,
             "init_temperature": 1.0,
         },
         "metric": {"name": "rubric_mean_score"},
@@ -112,11 +118,10 @@ def _parallel_copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     payload["executors"]["remote-models"]["endpoints"][0]["max_concurrent_requests"] = 2
     payload["experiments"]["optimize"]["optimizer"] = {
         "strategy": "copro",
-        "targets": {"prompt": True, "skills": ["alpha", "beta"]},
+        "search_space": {"type": "skills", "include": ["alpha", "beta"]},
         "search": {
             "breadth": 2,
             "depth": 1,
-            "partitions": 1,
             "init_temperature": 1.0,
         },
         "metric": {"name": "rubric_mean_score"},
@@ -1151,7 +1156,7 @@ def test_validation_selects_then_refits_before_held_out_test(tmp_path: Path) -> 
     assert "pass_rate" not in report.get("benchmark_metrics", {})
 
 
-def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
+def test_copro_skill_search_freezes_global_and_dspy_instructions(
     tmp_path: Path,
 ) -> None:
     compiled = _copro_compiled(tmp_path)
@@ -1176,10 +1181,7 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
                 )
             elif self.model == "solver":
                 if "Optimized solver or skill instruction." in rendered:
-                    if "# alpha" not in rendered:
-                        response = solver_response("optimized skill answer")
-                    else:
-                        response = solver_response("optimized prompt answer")
+                    response = solver_response("optimized skill answer")
                 else:
                     response = solver_response("baseline answer")
             else:
@@ -1189,8 +1191,6 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
                     score = 0.5
                 elif "optimized skill answer" in rendered:
                     score = 1.0
-                elif "optimized prompt answer" in rendered:
-                    score = 0.8
                 else:
                     score = 0.0
                 response = judge_response(score)
@@ -1249,7 +1249,7 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     assert run.status == "completed", run.result
     statuses = runner.coordinator.ledger.list(run.run_id)
     optimizer_packets = [status for status in statuses if status.packet.stage is StageKind.OPTIMIZE]
-    assert len(optimizer_packets) == 8
+    assert len(optimizer_packets) == 2
     assert all(status.state is StageState.PERSISTED for status in optimizer_packets)
     proposal_outputs = [
         runner.coordinator.ledger.read_output(status.result)
@@ -1278,17 +1278,17 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         "scope" not in status.packet.work_spec and "round" not in status.packet.work_spec
         for status in optimizer_packets
     )
-    partition_one_prompt = next(
+    second_round_skill = next(
         runner.coordinator._input(status.packet, "optimizer_context")
         for status in optimizer_packets
         if runner.coordinator._input(status.packet, "optimizer_context")["scope"]
-        == "optimization/partition-1"
-        and runner.coordinator._input(status.packet, "optimizer_context")["round"] == 1
+        == "optimization"
+        and runner.coordinator._input(status.packet, "optimizer_context")["round"] == 2
         and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"]
-        == "solver_prompt"
+        == "skill"
     )
-    assert partition_one_prompt["current_text"] == "Optimized solver or skill instruction."
-    assert partition_one_prompt["scored_attempts"]
+    assert second_round_skill["current_text"] == "Optimized solver or skill instruction."
+    assert second_round_skill["scored_attempts"]
     final_fit = next(
         status
         for status in statuses
@@ -1300,7 +1300,13 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     fitted = runner.coordinator.ledger.read_output(final_fit.result)
     assert fitted["strategy"] == "copro"
     assert fitted["demonstration_count"] == 0
-    assert fitted["solver_instruction"] == "Optimized solver or skill instruction."
+    frozen_instruction, frozen_prefix = solver_prompt_state(create_solver_program())
+    assert fitted["solver_instruction"] == frozen_instruction
+    assert fitted["output_prefix"] == frozen_prefix
+    assert fitted["global_context"] == compiled.context.global_context
+    assert fitted["global_instruction_overlay"] == ""
+    assert fitted["global_instruction_artifact"] is None
+    assert fitted["search_space_type"] == "skills"
     assert fitted["skill_overlays"]["alpha"] == "Optimized solver or skill instruction."
     assert compiled.context.skill("alpha") == source_skill
     assert fitted["compiled_manifest_artifact"]["content_id"].startswith("sha256:")
@@ -1318,6 +1324,14 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     )
     compiled_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert compiled_manifest["demonstration_count"] == 0
+    assert compiled_manifest["schema_version"] == 2
+    assert compiled_manifest["search_space_type"] == "skills"
+    assert compiled_manifest["global_instruction_artifact"] is None
+    assert (
+        compiled_manifest["frozen_skill_bank_hash"]
+        != compiled_manifest["effective_skill_bank_hash"]
+    )
+    assert compiled_manifest["optimized_skill_ids"] == ["alpha"]
     assert compiled_manifest["candidate_lineage_artifact"] == fitted["candidate_lineage_artifact"]
     assert compiled_manifest["search_summary_artifact"] == fitted["search_summary_artifact"]
     assert (
@@ -1333,12 +1347,12 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         report["optimization"]["final_program"]["candidate_lineage_artifact"]
         == fitted["candidate_lineage_artifact"]
     )
-    assert len(report["optimization"]["rounds"]) == 8
+    assert len(report["optimization"]["rounds"]) == 2
     assert all(
         round_result["proposal_accounting"]["accepted_count"] == 1
         for round_result in report["optimization"]["rounds"]
     )
-    assert report["usage_by_role"]["optimizer"]["model_calls"] == 8
+    assert report["usage_by_role"]["optimizer"]["model_calls"] == 2
     final_test_solves = [
         runner.coordinator._input(status.packet, "case")
         for status in statuses
@@ -1350,8 +1364,10 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     comparison = report["test_comparison"]
     assert comparison["paired_case_count"] == 1
     assert comparison["baseline_mean_score"] == 0.0
-    assert comparison["optimized_mean_score"] == 1.0
-    assert comparison["micro_case_delta"] == 1.0
+    # The untouched test case belongs to unselected skill gamma. Optimizing
+    # alpha must not leak into gamma through a changed global instruction.
+    assert comparison["optimized_mean_score"] == 0.0
+    assert comparison["micro_case_delta"] == 0.0
     assert comparison["skills"][0]["skill_name"] == "gamma"
     assert comparison["cases"][0]["expected_response_tokens"] == 173
     assert comparison["cases"][0]["expected_response_length_band"] == "129-256"
@@ -1364,6 +1380,8 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         recorder=workspace_configuration.recorders[workspace_configuration.recording.recorder],
         recording=workspace_configuration.recording,
     ).build(run.run_id)
+    assert projection.run.tags["agent_eval.optimization_search_space"] == "skills"
+    assert projection.run.parameters["optimization.search_space"] == "skills"
     artifact_paths = {item.path for item in projection.artifacts}
     assert {
         "graphs/copro-overall-paired-score.svg",
@@ -1392,7 +1410,99 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
     } <= {item.name for item in projection.tables}
 
 
-def test_copro_freezes_prompt_then_schedules_skill_targets_together(tmp_path: Path) -> None:
+def test_copro_global_instruction_search_freezes_every_skill_and_dspy_signature(
+    tmp_path: Path,
+) -> None:
+    compiled = _copro_compiled(tmp_path, global_instructions=True)
+    original_global = compiled.context.global_context
+    original_skill = compiled.context.skill("alpha")
+
+    class GlobalCoproLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                candidate = (
+                    "Optimized global instructions v2."
+                    if "Optimized global instructions v1." in rendered
+                    else "Optimized global instructions v1."
+                )
+                response = (
+                    "[[ ## candidates ## ]]\n"
+                    + json.dumps([{"instruction": candidate, "output_prefix": ""}])
+                    + "\n\n"
+                    + "[[ ## completed ## ]]"
+                )
+            elif self.model == "solver":
+                response = solver_response(
+                    "optimized global answer"
+                    if "Optimized global instructions" in rendered
+                    else "baseline answer"
+                )
+            else:
+                if "strong candidate" in rendered:
+                    score = 1.0
+                elif "partial candidate" in rendered:
+                    score = 0.5
+                elif "optimized global answer" in rendered:
+                    score = 1.0
+                else:
+                    score = 0.0
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return GlobalCoproLM(observer, role=model.role)
+
+    runner = ExperimentRunner(compiled, lm_factory=factory)
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    statuses = runner.coordinator.ledger.list(run.run_id)
+    optimizer_contexts = [
+        runner.coordinator._input(status.packet, "optimizer_context")
+        for status in statuses
+        if status.packet.stage is StageKind.OPTIMIZE
+    ]
+    assert optimizer_contexts
+    assert {context["target_kind"] for context in optimizer_contexts} == {
+        "global_instructions"
+    }
+    assert all(context["target_id"] == "global" for context in optimizer_contexts)
+    final_fit = next(
+        status
+        for status in statuses
+        if status.packet.stage is StageKind.FIT
+        and status.result is not None
+        and runner.coordinator.ledger.read_output(status.result)["phase"] == "final_fit"
+    )
+    assert final_fit.result is not None
+    fitted = runner.coordinator.ledger.read_output(final_fit.result)
+    frozen_instruction, frozen_prefix = solver_prompt_state(create_solver_program())
+    assert fitted["search_space_type"] == "global_instructions"
+    assert fitted["solver_instruction"] == frozen_instruction
+    assert fitted["output_prefix"] == frozen_prefix
+    assert fitted["skill_overlays"] == {}
+    assert fitted["global_instruction_overlay"] == "Optimized global instructions v1."
+    assert fitted["global_context"] != original_global
+    assert "Optimized global instructions v1." in fitted["global_context"]
+    assert fitted["global_instruction_artifact"]["content_id"].startswith("sha256:")
+    assert fitted["frozen_global_context_hash"] != fitted["effective_global_context_hash"]
+    assert fitted["frozen_skill_bank_hash"] == fitted["effective_skill_bank_hash"]
+    assert compiled.context.skill("alpha") == original_skill
+
+
+def test_copro_schedules_independent_skill_targets_together(tmp_path: Path) -> None:
     compiled = _parallel_copro_compiled(tmp_path)
     state_lock = Lock()
     active_optimizer = 0
@@ -1471,15 +1581,15 @@ def test_copro_freezes_prompt_then_schedules_skill_targets_together(tmp_path: Pa
         and runner.coordinator._input(status.packet, "candidate_selection")["target_kind"]
         == "skill"
     }
-    partition_fit = next(
+    final_fit = next(
         status.packet
         for status in statuses
         if status.packet.stage is StageKind.FIT
         and status.result is not None
         and runner.coordinator.ledger.read_output(status.result)["phase"]
-        == "optimization_partition"
+        == "final_fit"
     )
-    assert skill_selections <= set(partition_fit.dependencies)
+    assert skill_selections <= set(final_fit.dependencies)
 
 
 def test_optimization_rejects_judge_validation_on_held_out_case_before_lm_creation(

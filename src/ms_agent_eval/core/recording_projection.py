@@ -477,6 +477,11 @@ class RecorderProjector:
         status: RunLifecycleState,
     ) -> Mapping[str, object]:
         identity = _mapping(report.get("identity", {}), "report identity") if report else {}
+        optimization = (
+            _mapping(report.get("optimization", {}), "report optimization")
+            if report and isinstance(report.get("optimization"), Mapping)
+            else {}
+        )
         return {
             "agent_eval.local_run_id": run.get("run_id"),
             "agent_eval.workspace_id": run.get("workspace_id"),
@@ -495,6 +500,10 @@ class RecorderProjector:
             "agent_eval.case_bank_hash": identity.get("case_bank_hash"),
             "agent_eval.split_hash": identity.get("split_hash"),
             "agent_eval.judge_validation_hash": identity.get("judge_validation_hash"),
+            "agent_eval.optimization_strategy": optimization.get("strategy"),
+            "agent_eval.optimization_search_space": optimization.get(
+                "search_space_type"
+            ),
             "agent_eval.recorder_config_hash": self.recorder.configuration_hash,
             "agent_eval.content_policy": self.recording.content_policy.value,
             "agent_eval.artifact_policy": self.recording.artifact_policy.value,
@@ -509,6 +518,12 @@ class RecorderProjector:
             "judge_repetitions": run.get("judge_repetitions"),
         }
         if report is not None:
+            optimization = report.get("optimization")
+            if isinstance(optimization, Mapping):
+                parameters["optimization.strategy"] = optimization.get("strategy")
+                parameters["optimization.search_space"] = optimization.get(
+                    "search_space_type"
+                )
             models = _mapping(report.get("models", {}), "report models")
             for role in ("author", "optimizer", "solver", "judge"):
                 model = models.get(role)
@@ -544,19 +559,7 @@ class RecorderProjector:
                 context = self._failure_context(status)
                 target_id = str(context.get("target_id", "unknown"))
                 round_number = context.get("round", "unknown")
-                search_scope = str(context.get("scope", "optimization"))
-                partition_match = re.fullmatch(r"optimization/partition-(\d+)", search_scope)
                 parent = "optimize"
-                if partition_match is not None:
-                    partition = int(partition_match.group(1))
-                    parent = f"optimize/partition-{partition}"
-                    add(
-                        parent,
-                        f"Partition {partition}",
-                        "optimize",
-                        stage="partition",
-                        partition=partition,
-                    )
                 scope = f"{parent}/propose/{target_id}/round-{round_number}"
                 add(
                     scope,
@@ -574,16 +577,8 @@ class RecorderProjector:
                 context = self._failure_context(status)
                 selection_scope = str(context.get("scope", "validation"))
                 round_number = context.get("round")
-                if selection_scope.startswith("optimization/partition-"):
-                    partition = int(selection_scope.removeprefix("optimization/partition-"))
-                    parent = f"optimize/partition-{partition}"
-                    add(
-                        parent,
-                        f"Partition {partition}",
-                        "optimize",
-                        stage="partition",
-                        partition=partition,
-                    )
+                if selection_scope == "optimization":
+                    parent = "optimize"
                     target_id = str(context.get("target_id", "unknown"))
                     scope = f"{parent}/select/{target_id}/round-{round_number}"
                     add(
@@ -596,7 +591,7 @@ class RecorderProjector:
                     scope = "optimize/select-validation"
                     add(scope, "Select validation winner", "optimize", stage=stage.value)
             elif stage is StageKind.FIT:
-                phase, candidate, partition = self._stage_coordinates(status)
+                phase, candidate = self._stage_coordinates(status)
                 add("optimize", "Optimize", None, stage="optimize")
                 if phase == "final_fit":
                     scope = "optimize/final_fit"
@@ -610,22 +605,10 @@ class RecorderProjector:
                         stage="candidate",
                         candidate_id=candidate,
                     )
-                    if partition is None:
-                        scope = f"{candidate_scope}/fit"
-                        add(scope, "Fit", candidate_scope, stage=stage.value)
-                    else:
-                        partition_scope = f"{candidate_scope}/partition-{partition}"
-                        add(
-                            partition_scope,
-                            f"Partition {partition}",
-                            candidate_scope,
-                            stage="partition",
-                            partition=partition,
-                        )
-                        scope = f"{partition_scope}/fit"
-                        add(scope, "Fit", partition_scope, stage=stage.value)
+                    scope = f"{candidate_scope}/fit"
+                    add(scope, "Fit", candidate_scope, stage=stage.value)
             elif stage in {StageKind.SOLVE, StageKind.JUDGE}:
-                phase, candidate, partition = self._stage_coordinates(status)
+                phase, candidate = self._stage_coordinates(status)
                 if phase == "validation":
                     add("optimize", "Optimize", None, stage="optimize")
                     candidate_scope = f"optimize/{candidate}"
@@ -636,20 +619,8 @@ class RecorderProjector:
                         stage="candidate",
                         candidate_id=candidate,
                     )
-                    if partition is None:
-                        scope = f"{candidate_scope}/{stage.value}"
-                        add(scope, stage.value.title(), candidate_scope, stage=stage.value)
-                    else:
-                        partition_scope = f"{candidate_scope}/partition-{partition}"
-                        add(
-                            partition_scope,
-                            f"Partition {partition}",
-                            candidate_scope,
-                            stage="partition",
-                            partition=partition,
-                        )
-                        scope = f"{partition_scope}/{stage.value}"
-                        add(scope, stage.value.title(), partition_scope, stage=stage.value)
+                    scope = f"{candidate_scope}/{stage.value}"
+                    add(scope, stage.value.title(), candidate_scope, stage=stage.value)
                 else:
                     scope = f"{stage.value}.{phase or 'test'}"
                     add(
@@ -666,11 +637,10 @@ class RecorderProjector:
         ordered = _topological_scopes(tuple(values.values()))
         return ordered, packet_scopes
 
-    def _stage_coordinates(self, status: StageStatus) -> tuple[str | None, str, int | None]:
+    def _stage_coordinates(self, status: StageStatus) -> tuple[str | None, str]:
         packet = status.packet
         phase: str | None = None
         candidate = "baseline"
-        partition: int | None = None
         if status.result is not None:
             try:
                 output = _mapping(self.ledger.read_output(status.result), "stage output")
@@ -682,14 +652,10 @@ class RecorderProjector:
                 phase = str(output["evaluation_phase"])
             if isinstance(output.get("candidate_id"), str):
                 candidate = str(output["candidate_id"])
-            if isinstance(output.get("partition"), int) and not isinstance(
-                output.get("partition"), bool
-            ):
-                partition = int(output["partition"])
         configuration = packet.work_spec.get("configuration")
         if isinstance(configuration, Mapping) and isinstance(configuration.get("id"), str):
             candidate = str(configuration["id"])
-        return phase, candidate, partition
+        return phase, candidate
 
     def _metrics(
         self,
@@ -1233,7 +1199,6 @@ class RecorderProjector:
                 "split",
                 "repetition",
                 "evaluation_phase",
-                "partition",
                 "candidate_id",
                 "round",
                 "scope",
@@ -1596,7 +1561,7 @@ class RecorderProjector:
         result = status.result
         assert result is not None
         packet = status.packet
-        phase, candidate, _ = self._stage_coordinates(status)
+        phase, candidate = self._stage_coordinates(status)
         if result.error is not None or packet.stage is StageKind.VALIDATE_JUDGE:
             return "full"
         if phase in {"test", "pilot"}:
@@ -1610,7 +1575,7 @@ class RecorderProjector:
             "cross_validation",
             "copro_search",
             "copro_candidate",
-            "optimization_partition",
+            "optimization_search",
             "final_fit",
         }
         if not is_optimization:
@@ -1621,7 +1586,7 @@ class RecorderProjector:
         if policy is OptimizationTracePolicy.METADATA_ONLY:
             return "metadata"
         if packet.stage is StageKind.SELECT or candidate in winner_ids or phase in {
-            "optimization_partition",
+            "optimization_search",
             "final_fit",
         }:
             return "full"
@@ -1700,7 +1665,7 @@ class RecorderProjector:
         for status in statuses:
             attempts_by_work[status.packet.work_id].append(status)
             result = status.result
-            phase, candidate, partition = self._stage_coordinates(status)
+            phase, candidate = self._stage_coordinates(status)
             work_node_id = f"work:{status.packet.work_id}"
             attempt_node_id = f"attempt:{status.packet.packet_id}"
             nodes.append(
@@ -1722,7 +1687,6 @@ class RecorderProjector:
                     ),
                     "phase": phase,
                     "candidate_id": candidate,
-                    "partition": partition,
                     "work_id": status.packet.work_id,
                     "attempt_id": status.packet.attempt_id,
                     "attempt": status.packet.attempt,
@@ -2714,6 +2678,7 @@ def _comparison_arm_row(report: Mapping[str, object]) -> Mapping[str, object]:
     baseline_score = comparison.get("baseline_mean_score", score)
     delta = comparison.get("micro_case_delta")
     strategy = optimization.get("strategy") if optimization else "baseline"
+    search_space_type = optimization.get("search_space_type") if optimization else None
     solver_label = _model_label(solver)
     optimizer_label = _model_label(optimizer) if optimizer else None
     label = (
@@ -2731,6 +2696,7 @@ def _comparison_arm_row(report: Mapping[str, object]) -> Mapping[str, object]:
         "report_hash": report.get("content_hash") or content_hash(report),
         "label": label,
         "strategy": strategy,
+        "search_space_type": search_space_type,
         "solver_profile": solver.get("profile_id"),
         "solver_deployment": solver.get("deployment_id"),
         "solver_model": solver.get("configured_name"),

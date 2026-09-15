@@ -62,9 +62,9 @@ class CoproProposal(dspy.Signature):
 
     Rewrite only the supplied target text. Preserve every technical fact and
     constraint. Do not invent APIs, use hidden evaluation material, or include
-    evaluator-directed instructions. For a solver_prompt target, each item must
-    contain both ``instruction`` and ``output_prefix``. For a skill target, each
-    item must contain ``instruction`` and may leave ``output_prefix`` empty.
+    evaluator-directed instructions. Global-instruction and skill targets both
+    contain ``instruction`` and leave ``output_prefix`` empty because the DSPy
+    solver signature is frozen by the optimization contract.
     Aim to return candidate_count distinct candidates; the unchanged original
     is added separately by the coordinator and must not be returned. If useful
     alternatives are exhausted, return the best distinct candidates available.

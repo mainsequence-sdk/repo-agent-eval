@@ -186,14 +186,9 @@ class TerminalPreflightReporter:
             self.console.print()
             self.console.print(table)
 
-        partitions = workload.get("partitions")
-        if (
-            isinstance(partitions, Sequence)
-            and not isinstance(partitions, (str, bytes))
-            and partitions
-        ):
-            table = Table(title="Stateful COPRO training partitions")
-            table.add_column("Partition", justify="right")
+        search = workload.get("copro_search")
+        if isinstance(search, Mapping):
+            table = Table(title="COPRO search")
             table.add_column("Train cases", justify="right")
             table.add_column("Groups", justify="right")
             table.add_column("Targets", justify="right")
@@ -202,26 +197,18 @@ class TerminalPreflightReporter:
             table.add_column("Optimizer", justify="right")
             table.add_column("Solver", justify="right")
             table.add_column("Judge", justify="right")
-            for raw_partition in partitions:
-                if not isinstance(raw_partition, Mapping):
-                    continue
-                table.add_row(
-                    str(raw_partition.get("partition", "-")),
-                    str(raw_partition.get("training_cases", 0)),
-                    str(raw_partition.get("training_groups", 0)),
-                    str(raw_partition.get("target_count", 0)),
-                    str(raw_partition.get("rounds", 0)),
-                    str(raw_partition.get("candidates_per_target", 0)),
-                    str(raw_partition.get("optimizer_calls", 0)),
-                    str(raw_partition.get("candidate_solver_calls", 0)),
-                    str(raw_partition.get("candidate_judge_calls", 0)),
-                )
+            table.add_row(
+                str(search.get("training_cases", 0)),
+                str(search.get("training_groups", 0)),
+                str(search.get("target_count", 0)),
+                str(search.get("rounds", 0)),
+                str(search.get("candidates_per_target", 0)),
+                str(search.get("optimizer_calls", 0)),
+                str(search.get("candidate_solver_calls", 0)),
+                str(search.get("candidate_judge_calls", 0)),
+            )
             self.console.print()
             self.console.print(table)
-            self.console.print(
-                "[dim]Each partition starts from the previous partition's selected prompt/skills "
-                "and score history.[/]"
-            )
 
         routes = workload.get("model_routes")
         if isinstance(routes, Sequence) and not isinstance(routes, (str, bytes)):

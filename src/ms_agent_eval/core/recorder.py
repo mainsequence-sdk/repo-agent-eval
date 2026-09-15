@@ -464,7 +464,7 @@ RecorderFactory = Callable[[RecorderConfiguration, Mapping[str, str]], Experimen
 
 
 class RecorderWorkerService:
-    """Queue recorder intents and project them only from an explicit worker."""
+    """Queue and project recorder intents from managed or standalone consumers."""
 
     def __init__(
         self,

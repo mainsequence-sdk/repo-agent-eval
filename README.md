@@ -15,7 +15,7 @@ cases, rubrics, and models.
 | Python 3.12+ and Rich | Framework implementation and a live `ms-agent-eval` terminal interface with explicit JSON automation output. |
 | Portable stages | Authoring, judge validation, fitting, solving, judging, model selection, and aggregation use one immutable packet/result lifecycle. |
 | Codex skills / CLI | The configured author model creates grounded cases; the isolated CLI adapter can execute model-driven stages with subscription authentication in disposable containers. |
-| DSPy 3.2 | The runtime prompt-programming layer. Typed programs define optimizer, solver, and judge calls. A named optimization experiment chooses either labeled few-shot demonstrations or staged COPRO prompt-and-skill search. |
+| DSPy 3.2 | The runtime prompt-programming layer. Typed programs define optimizer, solver, and judge calls. A named optimization experiment chooses labeled few-shot fitting or one factorized COPRO search over skills or global instructions. |
 | OpenAI-compatible APIs | Endpoint transport for model-driven DSPy stages. Solver and judge remain separate roles but may use the same model. |
 | OpenRouter model catalog | Static, upsert-only reference data for model context, capabilities, and raw plus $/million-token pricing, with deterministic matching for local model names. |
 | YAML / PyYAML | Human-readable workspace configuration, case metadata, rubrics, split assignments, and judge-validation manifests. |
@@ -76,7 +76,7 @@ flowchart TB
         Train --> Holdout["Fixed group-safe validation holdout"]
         Holdout --> Strategy{"optimizer.strategy"}
         Strategy -->|"labeled_few_shot"| Demos["Fit and score demonstration counts"]
-        Strategy -->|"copro"| Rewrite["Stateful prompt + skill search across partitions"]
+        Strategy -->|"copro"| Rewrite["Stateful skill OR global-instruction search"]
         Demos --> Select["Select highest mean validation score"]
         Rewrite --> Select
         Select --> Refit["Materialize the winner once"]
@@ -106,9 +106,10 @@ flowchart TB
 - Optimization compares candidates on one fixed, group-safe validation holdout
   derived from permanent train. A
   `labeled_few_shot` experiment changes only demonstrations; a `copro`
-  experiment keeps zero demonstrations and searches the solver instruction,
-  response prefix, and selected skill overlays. COPRO carries each winning
-  bundle and its score history into the next training partition; it does not
+  experiment keeps zero demonstrations and searches either selected skill
+  overlays with `AGENTS.md` frozen or one global instruction bundle with every
+  skill frozen. The DSPy signature stays frozen in both modes. COPRO carries
+  each winning bundle and its score history into the next search round; it does not
   restart per fold or perform another final search. It has no numerical acceptance
   cutoff, permanent validation split, or test-access gate. After selection, a
   COPRO run compares the original and optimized programs on every identical
@@ -171,10 +172,10 @@ uv run ms-agent-eval init \
   --recording-content-policy full
 ```
 
-The generated schema-v16 `workspace.yaml` has these top-level concerns:
+The generated schema-v17 `workspace.yaml` has these top-level concerns:
 
 1. `recording`, `recorders`, and `recorder_queues`: optional projection policy,
-   external destinations, and durable independent-worker delivery.
+   external destinations, and durable managed delivery.
 2. `executors`, `deployments`, and `models`: transport routes, immutable served
    model revisions, and role-specific inference profiles.
 3. `stages`: portable reuse and budget policies; experiment arms select models.
@@ -348,12 +349,13 @@ uv run ms-agent-eval run optimize-solver --workspace workspace.yaml
 `optimize-solver` is only an example experiment id. Its `optimizer.strategy`
 is the authority: `labeled_few_shot` evaluates `k` demonstrations and makes no
 optimizer-model calls, while `copro` runs explicit optimize → candidate
-solve/judge → select rounds and compiles a zero-shot prompt/skill artifact.
+solve/judge → select rounds and compiles a zero-shot artifact for exactly one
+configured instruction layer.
 
 `preflight` makes zero generation calls and creates no run or result artifacts.
 Before the token diagnostics, it expands the complete experiment workload: all
 permanent and derived case sets, one-time judge calibration, optimization
-partitions, targets, rounds, candidates, validation solves/judgments, final test
+targets, rounds, candidates, validation solves/judgments, final test
 arms, local fit/select work, model routes, endpoint slots, and the fresh-run
 model-call upper bound by role. The upper bound is explicitly before semantic
 cache reuse; exact reuse is resolved only when packets are materialized. It then
@@ -361,7 +363,7 @@ shows exact-fit and dispatchable parallel capacity, endpoint context windows,
 largest rendered request, and minimum dispatch waves. Judge requests are
 reported as deferred until their solver responses exist because candidate
 response size is part of the real judge request. `run` repeats the expanded
-case/call/partition summary before its first model-driven stage.
+case/call/search summary before its first model-driven stage.
 
 A pilot is immutable and explicitly records `benchmark_valid: false`. It never
 loads test or challenge cases, cannot run optimization, retains per-case judge
@@ -382,10 +384,11 @@ For an external harness, prepare or claim a packet and submit a JSON result with
 model, executor, and usage evidence is append-only under the external data root.
 
 When `recording.enabled` is true, each durable checkpoint appends a small queue
-intent. The experiment process never renders reports or calls MLflow. Run
-`ms-agent-eval recorder worker --workspace workspace.yaml` independently, or
-project one run with `ms-agent-eval recorder project --run <run-id> --workspace
-workspace.yaml`. A tracking outage never invalidates the evaluation; see
+intent. The normal `run` command automatically starts one run-scoped recorder
+consumer, publishes live progress, and drains final recording work. No second
+command is required. The standalone `recorder worker` and `recorder project`
+commands exist only for recovery, backfill, or separately deployed consumers.
+A tracking outage never invalidates the evaluation; see
 [Experiment recording with MLflow](docs/execution/experiment-recording.md).
 
 Generated snapshots, solver calls, judge calls, compiled

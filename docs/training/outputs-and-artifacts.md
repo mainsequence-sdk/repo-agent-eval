@@ -8,7 +8,7 @@ to reconstruct model selection and held-out evaluation.
 | State-only DSPy JSON | Safe serialized demonstrations and program state; pickle and unsafe LM state are disabled. |
 | `fitted_program_hash` | Identity of an exact fitted solver program. |
 | Validation-assignment hash | Identity of the fixed group-safe holdout derived within train. |
-| Training-partition assignment | Deterministic COPRO batching order; each partition inherits the prior winner and history. |
+| COPRO search history | Deterministic target/round order; each round inherits the prior winner and score history. |
 | Candidate selection result | Mean validation score for every candidate and the deterministic argmax. |
 | Training-case hash | Identity of the examples used for each fit, including the final refit. |
 | Experiment lock | Source, policy, catalog, cases, splits, models, programs, judge, and judge-validation identities. |

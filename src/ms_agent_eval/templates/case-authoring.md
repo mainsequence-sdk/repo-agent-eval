@@ -101,9 +101,9 @@ and count as one semantic family for split isolation. Prefer several narrow
 campaigns with explicit coverage requests over one vague request for generic
 variety. Only reviewed training cases may become DSPy demonstrations,
 distillation data, or fine-tuning examples. Candidate selection uses one fixed,
-group-safe validation holdout derived from training data. COPRO may process the
-remaining training groups in sequential partitions, carrying every winner and
-its score history forward. The selected configuration is materialized once
+group-safe validation holdout derived from training data. COPRO processes the
+complete remaining training set in one stateful search, carrying every winner
+and its score history through configured rounds. The selected configuration is materialized once
 before one test evaluation.
 
 ## What a strong case measures

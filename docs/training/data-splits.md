@@ -26,11 +26,10 @@ requires every selected skill to have optimization-training and validation
 evidence; otherwise the run is rejected before model calls.
 
 `labeled_few_shot` fits every configured `k` plus `k=0` once on optimization
-training and selects the highest mean validation score. COPRO may divide
-optimization-training groups into sequential `search.partitions`; these are
-work batches, not independent folds. The winner and scored history from one
-partition initialize the next, while every candidate is compared on the same
-fixed validation cases.
+training and selects the highest mean validation score. COPRO consumes the
+complete optimization-training set in one stateful search. The winner and
+scored history from one configured round initialize the next, while every
+candidate is compared on the same fixed validation cases.
 
 After selection, the coordinator materializes the winner once. Test and
 challenge prompts, expected responses, solver responses, judge feedback, and

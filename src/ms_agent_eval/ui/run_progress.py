@@ -89,11 +89,18 @@ class TerminalRunReporter:
             strategy = optimization.get("strategy")
             self.console.print(f"[dim]Optimization strategy: {strategy}[/]")
             if strategy == "copro":
-                targets = optimization.get("skills", "configured skills")
+                search_space = optimization.get("search_space_type")
+                targets = (
+                    optimization.get("skills", "configured skills")
+                    if search_space == "skills"
+                    else optimization.get(
+                        "global_instruction_files", "configured global instructions"
+                    )
+                )
                 self.console.print(
                     "[dim]COPRO search: "
                     f"breadth {optimization.get('breadth')} × depth {optimization.get('depth')} "
-                    f"· prompt {optimization.get('optimize_prompt')} · skills {targets}[/]"
+                    f"· search space {search_space} · selection {targets}[/]"
                 )
         workload = event.details.get("workload")
         if isinstance(workload, Mapping):
@@ -131,18 +138,15 @@ class TerminalRunReporter:
                 f"[bold]Fresh upper bound: {totals.get('logical_model_calls', 0)} model calls[/]"
                 + (f" [dim]· {roles}[/]" if roles else "")
             )
-        partitions = workload.get("partitions")
-        if (
-            isinstance(partitions, list)
-            and partitions
-            and all(isinstance(item, Mapping) for item in partitions)
-        ):
-            details = " · ".join(
-                f"P{item.get('partition')} {item.get('training_cases')} train / "
-                f"{item.get('target_count')} targets / {item.get('candidate_solver_calls')} solves"
-                for item in partitions
+        search = workload.get("copro_search")
+        if isinstance(search, Mapping):
+            self.console.print(
+                "[dim]COPRO search: "
+                f"{search.get('training_cases')} training cases · "
+                f"{search.get('target_count')} targets · "
+                f"{search.get('rounds')} rounds · "
+                f"{search.get('candidate_solver_calls')} validation solves[/]"
             )
-            self.console.print(f"[dim]Stateful partitions: {details}[/]")
 
     def _packet_started(self, event: ProgressEvent) -> None:
         self._stop_status()
@@ -278,7 +282,7 @@ class TerminalRunReporter:
         suffix = f" · {pending} queued" if isinstance(pending, int) else ""
         self.console.print(
             f"[yellow]Recording {status} in {recorder}{suffix}; "
-            "run recorder project or recorder worker[/yellow]"
+            "automatic delivery remains safely retryable[/yellow]"
         )
 
     def _recording_sync_started(self, event: ProgressEvent) -> None:

@@ -1,21 +1,23 @@
 # Formal COPRO Summary
 
-A completed COPRO benchmark reports the effect of the selected prompt-and-skill
-program against the original zero-shot program on the same untouched test
-cases. This is a paired comparison, not a comparison of two unrelated runs.
+A completed COPRO benchmark reports the effect of one selected instruction
+layer against the original zero-shot program on the same untouched test cases.
+A run optimizes either skills or global instructions and freezes the other
+layer. This is a paired comparison, not a comparison of two unrelated runs.
 
 ## What is compared
 
 For every test case and solver repetition:
 
 ```text
-original score  = judge(original prompt + original skill response)
-optimized score = judge(frozen COPRO prompt + selected skill overlay response)
+original score  = judge(original global + original skill response)
+optimized score = judge(effective global + effective skill response)
 delta           = optimized score - original score
 ```
 
-Both responses use the same solver and judge deployments and the same locked
-case, rubric, and expected evidence. Positive delta means the COPRO program
+Both responses use the same frozen DSPy signature, solver and judge deployments,
+and locked case, rubric, and expected evidence. The report records whether the
+effective change came from a skill overlay or one global bundle. Positive delta means the COPRO program
 scored higher; negative delta means it regressed. The untouched test scores are
 never sent back into COPRO.
 

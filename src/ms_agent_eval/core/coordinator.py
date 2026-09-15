@@ -23,7 +23,6 @@ from ms_agent_eval.programs.dspy.budget import BudgetLedger, BudgetLimits
 from ms_agent_eval.programs.dspy.engine import (
     DspyExecutionContract,
     DspyExecutor,
-    apply_solver_prompt,
     create_author_program,
     create_copro_proposal_program,
     create_judge_program,
@@ -58,7 +57,6 @@ from .evaluation import (
     LlmJudge,
     SplitManifest,
     aggregate_judge_votes,
-    deterministic_group_training_partitions,
     deterministic_group_validation_split,
     judge_validation_result_from_scores,
     validate_judge,
@@ -171,6 +169,12 @@ class _CoproTargetPlan:
     current_candidate_id: str
     fits: tuple[StagePacket, ...]
     solves: tuple[StagePacket, ...]
+
+
+@dataclass(frozen=True)
+class _CoproSearchResult:
+    bundle: Mapping[str, object]
+    dependencies: tuple[StagePacket, ...]
 
 
 class _ExecutionSession:
@@ -1406,29 +1410,26 @@ class StageCoordinator:
             if not isinstance(optimizer, CoproConfiguration):
                 raise PreflightError("optimize is valid only for COPRO experiments")
             training, _, _ = self._optimization_cases(lock)
-            partition_by_group, _ = self._training_partition_assignment(lock, training)
-            partition_cases = tuple(
-                case for case in training if partition_by_group[case.group] == 0
-            )
             target_kind, target_id = next(
                 (kind, target)
                 for kind, target in self._copro_targets(optimizer)
-                if kind == "solver_prompt" or any(case.skill == target for case in partition_cases)
+                if kind == "global_instructions"
+                or any(case.skill == target for case in training)
             )
             return (
                 self._copro_proposal_packet(
                     run_id,
                     lock,
                     judge_validation,
-                    bundle=self._base_copro_bundle(),
+                    bundle=self._base_copro_bundle(optimizer),
                     target_kind=target_kind,
                     target_id=target_id,
                     round_number=1,
-                    scope="optimization/partition-0",
+                    scope="optimization",
                     fitting_cases=(
-                        partition_cases
-                        if target_kind == "solver_prompt"
-                        else tuple(case for case in partition_cases if case.skill == target_id)
+                        training
+                        if target_kind == "global_instructions"
+                        else tuple(case for case in training if case.skill == target_id)
                     ),
                     history=(),
                     dependencies=(),
@@ -2247,7 +2248,6 @@ class StageCoordinator:
                 "repetition",
                 "program_hash",
                 "evaluation_phase",
-                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
@@ -2257,7 +2257,6 @@ class StageCoordinator:
             current = _mapping(self._input(packet, "training_set"), "fit input")
             context = _mapping(current.get("context"), "fit input context")
             value["phase"] = context["phase"]
-            value["partition"] = context["partition"]
             value["validation_assignment_hash"] = context["validation_assignment_hash"]
         elif packet.stage is StageKind.JUDGE:
             current = _mapping(self._input(packet, "evaluation"), "judge input")
@@ -2265,7 +2264,6 @@ class StageCoordinator:
             value["split"] = current["split"]
             value["repetition"] = current["repetition"]
             value["evaluation_phase"] = current["evaluation_phase"]
-            value["partition"] = current["partition"]
             value["candidate_id"] = current["candidate_id"]
             value["candidate_k"] = current["candidate_k"]
             value["strategy"] = current["strategy"]
@@ -2822,7 +2820,6 @@ class StageCoordinator:
             return {
                 "candidate_id": output.get("candidate_id"),
                 "phase": output.get("phase"),
-                "partition": output.get("partition"),
             }
         if stage is StageKind.SELECT:
             return {
@@ -3286,7 +3283,6 @@ class StageCoordinator:
                 "response": result.primary_response,
                 "program_hash": program_hash(program),
                 "evaluation_phase": values["evaluation_phase"],
-                "partition": values["partition"],
                 "candidate_id": values["candidate_id"],
                 "candidate_k": values["candidate_k"],
                 "strategy": values["strategy"],
@@ -3328,7 +3324,6 @@ class StageCoordinator:
                 "split": values["split"],
                 "repetition": values["repetition"],
                 "evaluation_phase": values["evaluation_phase"],
-                "partition": values["partition"],
                 "candidate_id": values["candidate_id"],
                 "candidate_k": values["candidate_k"],
                 "strategy": values["strategy"],
@@ -3349,8 +3344,6 @@ class StageCoordinator:
             training_cases = _list(training_input.get("cases"), "training cases")
             fit_context = _mapping(training_input.get("context"), "fit context")
             phase = _string(fit_context.get("phase"), "fit phase")
-            raw_partition = fit_context.get("partition")
-            partition = None if raw_partition is None else _integer(raw_partition, "fit partition")
             validation_assignment_hash = _string(
                 fit_context.get("validation_assignment_hash"),
                 "validation assignment hash",
@@ -3364,6 +3357,9 @@ class StageCoordinator:
                 raise IntegrityError("fit context and semantic finalization flag disagree")
             compiled = create_solver_program()
             skill_overlays: Mapping[str, str] = {}
+            global_context = self.workspace.context.global_context
+            global_instruction_overlay = ""
+            search_space_type: str | None = None
             if isinstance(experiment.optimizer, LabeledFewShotConfiguration):
                 raw_k = _integer(configuration.get("k"), "fit candidate k")
                 if set(configuration) != {"id", "k"}:
@@ -3399,17 +3395,58 @@ class StageCoordinator:
                 bundle = _mapping(configuration.get("bundle"), "COPRO candidate bundle")
                 instruction = _string(bundle.get("instruction"), "COPRO solver instruction")
                 prefix = _string(bundle.get("output_prefix"), "COPRO output prefix")
+                global_context = _string(
+                    bundle.get("global_context"), "COPRO effective global context"
+                )
+                global_instruction_overlay = _text(
+                    bundle.get("global_overlay", ""), "COPRO global instruction overlay"
+                )
                 skill_overlays = {
                     _string(skill_id, "COPRO skill id"): _string(text, "COPRO skill text")
                     for skill_id, text in _mapping(
                         bundle.get("skills", {}), "COPRO skill overlays"
                     ).items()
                 }
-                apply_solver_prompt(
-                    compiled,
-                    instruction=instruction,
-                    output_prefix=prefix,
-                )
+                frozen_instruction, frozen_prefix = solver_prompt_state(compiled)
+                if (instruction, prefix) != (frozen_instruction, frozen_prefix):
+                    raise IntegrityError(
+                        "COPRO cannot change the frozen DSPy solver instruction or output prefix"
+                    )
+                search_space_type = experiment.optimizer.search_space_type
+                if search_space_type == "skills":
+                    if global_context != self.workspace.context.global_context:
+                        raise IntegrityError(
+                            "skill optimization cannot change global instructions"
+                        )
+                    if global_instruction_overlay:
+                        raise IntegrityError(
+                            "skill optimization cannot contain a global instruction overlay"
+                        )
+                    allowed_skills = set(self._selected_copro_skills(experiment.optimizer))
+                    unknown_overlays = sorted(set(skill_overlays) - allowed_skills)
+                    if unknown_overlays:
+                        raise IntegrityError(
+                            f"COPRO candidate contains unselected skill overlays: {unknown_overlays}"
+                        )
+                elif search_space_type == "global_instructions":
+                    if skill_overlays:
+                        raise IntegrityError(
+                            "global-instruction optimization cannot contain skill overlays"
+                        )
+                    if not global_instruction_overlay:
+                        raise IntegrityError(
+                            "global-instruction optimization requires one global bundle"
+                        )
+                    expected_global = self._effective_global_context(
+                        experiment.optimizer,
+                        global_instruction_overlay,
+                    )
+                    if global_context != expected_global:
+                        raise IntegrityError(
+                            "COPRO effective global context does not match its selected bundle"
+                        )
+                else:  # pragma: no cover - workspace parser closes the union
+                    raise IntegrityError("unsupported COPRO search space")
                 if any(predictor.demos for _, predictor in compiled.named_predictors()):
                     raise IntegrityError("COPRO compiled programs must remain zero-shot")
                 strategy = "copro"
@@ -3432,13 +3469,36 @@ class StageCoordinator:
             prefix_artifact = self.artifacts.put_blob(
                 BytesIO(output_prefix.encode("utf-8")), "text/plain"
             )
+            global_instruction_artifact = (
+                self.artifacts.put_blob(
+                    BytesIO(global_instruction_overlay.encode("utf-8")),
+                    "text/markdown",
+                )
+                if global_instruction_overlay
+                else None
+            )
+            source_skill_hashes = {
+                item.id: item.content_hash
+                for item in self.workspace.context.instruction_units
+            }
+            frozen_skill_text_hashes = {
+                skill_id: content_hash(text)
+                for skill_id, text in sorted(
+                    self.workspace.context.skill_contexts.items()
+                )
+            }
+            effective_skill_hashes = {
+                skill_id: content_hash(skill_overlays.get(skill_id, text))
+                for skill_id, text in sorted(
+                    self.workspace.context.skill_contexts.items()
+                )
+            }
+            frozen_skill_bank_hash = content_hash(frozen_skill_text_hashes)
+            effective_skill_bank_hash = content_hash(effective_skill_hashes)
             compiled_manifest = None
             candidate_lineage_artifact = None
             search_summary_artifact = None
             if phase == "final_fit":
-                source_skill_hashes = {
-                    item.id: item.content_hash for item in self.workspace.context.instruction_units
-                }
                 selection_reference = None
                 if len(packet.dependencies) > 1:
                     selection_status = self.ledger.status(packet.dependencies[-1])
@@ -3457,9 +3517,7 @@ class StageCoordinator:
                         selection_output = _mapping(
                             self.ledger.read_output(item.result), "COPRO selection output"
                         )
-                        if not str(selection_output.get("scope", "")).startswith(
-                            "optimization/partition-"
-                        ):
+                        if selection_output.get("scope") != "optimization":
                             continue
                         output = item.result.outputs[0]
                         lineage.append(
@@ -3484,35 +3542,23 @@ class StageCoordinator:
                         )
                     lineage.sort(
                         key=lambda item: (
-                            int(str(item.get("scope", "")).removeprefix("optimization/partition-")),
                             int(item.get("round") or 0),
-                            0 if item.get("target_kind") == "solver_prompt" else 1,
+                            0 if item.get("target_kind") == "global_instructions" else 1,
                             str(item.get("target_id")),
                         )
                     )
                     if not lineage:
                         raise IntegrityError("final COPRO fit has no candidate lineage")
-                    final_partition = max(
-                        int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
-                        for item in lineage
-                    )
-                    final_round = max(
-                        int(item.get("round") or 0)
-                        for item in lineage
-                        if int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
-                        == final_partition
-                    )
+                    final_round = max(int(item.get("round") or 0) for item in lineage)
                     terminal_selections = [
                         item["selection_artifact"]
                         for item in lineage
-                        if int(str(item.get("scope", "")).removeprefix("optimization/partition-"))
-                        == final_partition
-                        and int(item.get("round") or 0) == final_round
+                        if int(item.get("round") or 0) == final_round
                     ]
                     selected_evidence = {
                         "selected_candidate_id": candidate_id,
                         "selected_bundle_hash": content_hash(configuration.get("bundle")),
-                        "partition": final_partition,
+                        "search_space_type": search_space_type,
                         "round": final_round,
                         "terminal_selection_artifacts": terminal_selections,
                     }
@@ -3542,19 +3588,47 @@ class StageCoordinator:
                     f"compiled-program/{candidate_id}/"
                     f"{content_hash(selection_reference or 'unselected').removeprefix('sha256:')}",
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "strategy": strategy,
+                        "search_space_type": search_space_type,
                         "candidate_id": candidate_id,
                         "base_solver_program_hash": lock.solver_program_hash,
                         "fitted_program_hash": program_hash(compiled),
                         "state_artifact": json_value(state),
                         "solver_instruction_artifact": json_value(instruction_artifact),
                         "output_prefix_artifact": json_value(prefix_artifact),
+                        "global_instruction_artifact": json_value(
+                            global_instruction_artifact
+                        ),
+                        "frozen_global_context_hash": content_hash(
+                            self.workspace.context.global_context
+                        ),
+                        "effective_global_context_hash": content_hash(global_context),
+                        "global_instruction_files": (
+                            list(self._selected_global_instruction_files(experiment.optimizer))
+                            if isinstance(experiment.optimizer, CoproConfiguration)
+                            and experiment.optimizer.search_space_type
+                            == "global_instructions"
+                            else []
+                        ),
+                        "source_global_hashes": {
+                            item.source_path: item.content_hash
+                            for item in self.workspace.snapshot.files
+                            if item.source_path
+                            in set(
+                                self.workspace.repository.workspace.evaluation.instructions.global_paths
+                            )
+                        },
                         "skill_overlay_artifacts": overlay_artifacts,
                         "candidate_lineage_artifact": json_value(candidate_lineage_artifact),
                         "search_summary_artifact": json_value(search_summary_artifact),
                         "selected_candidate_evidence": selected_evidence,
                         "source_skill_hashes": source_skill_hashes,
+                        "frozen_skill_text_hashes": frozen_skill_text_hashes,
+                        "effective_skill_hashes": effective_skill_hashes,
+                        "frozen_skill_bank_hash": frozen_skill_bank_hash,
+                        "effective_skill_bank_hash": effective_skill_bank_hash,
+                        "optimized_skill_ids": sorted(skill_overlays),
                         "demonstration_count": sum(
                             len(predictor.demos) for _, predictor in compiled.named_predictors()
                         ),
@@ -3580,12 +3654,22 @@ class StageCoordinator:
                 "candidate_id": candidate_id,
                 "candidate_k": raw_k,
                 "strategy": strategy,
+                "search_space_type": search_space_type,
                 "solver_instruction": instruction,
                 "output_prefix": output_prefix,
                 "skill_overlays": dict(skill_overlays),
                 "skill_overlay_artifacts": overlay_artifacts,
                 "solver_instruction_artifact": json_value(instruction_artifact),
                 "output_prefix_artifact": json_value(prefix_artifact),
+                "global_context": global_context,
+                "frozen_global_context_hash": content_hash(
+                    self.workspace.context.global_context
+                ),
+                "effective_global_context_hash": content_hash(global_context),
+                "global_instruction_overlay": global_instruction_overlay,
+                "global_instruction_artifact": json_value(global_instruction_artifact),
+                "frozen_skill_bank_hash": frozen_skill_bank_hash,
+                "effective_skill_bank_hash": effective_skill_bank_hash,
                 "compiled_manifest_artifact": (
                     json_value(compiled_manifest) if compiled_manifest is not None else None
                 ),
@@ -3603,7 +3687,6 @@ class StageCoordinator:
                     len(predictor.demos) for _, predictor in compiled.named_predictors()
                 ),
                 "phase": phase,
-                "partition": partition,
                 "state_format": "json",
             }
         if packet.stage is StageKind.SELECT:
@@ -3643,8 +3726,11 @@ class StageCoordinator:
                         )
                     scores = [_number(item.get("score"), "COPRO score") for item in results]
                     text = (
-                        _string(bundle.get("instruction"), "COPRO instruction")
-                        if target_kind == "solver_prompt"
+                        _string(
+                            bundle.get("global_overlay"),
+                            "COPRO global instruction bundle",
+                        )
+                        if target_kind == "global_instructions"
                         else _string(
                             _mapping(bundle.get("skills", {}), "COPRO skills").get(
                                 target_id, self.workspace.context.skill(target_id)
@@ -3659,9 +3745,7 @@ class StageCoordinator:
                             "case_count": len(scores),
                             "text": text,
                             "output_prefix": (
-                                _string(bundle.get("output_prefix"), "COPRO output prefix")
-                                if target_kind == "solver_prompt"
-                                else ""
+                                ""
                             ),
                             "text_hash": content_hash(text),
                             "normalized_length": len(" ".join(text.split())),
@@ -4153,27 +4237,93 @@ class StageCoordinator:
             *({"id": f"labeled-few-shot-k-{k}", "k": k} for k in optimizer.k_values),
         )
 
-    def _base_copro_bundle(self) -> Mapping[str, object]:
+    def _selected_copro_skills(self, optimizer: CoproConfiguration) -> tuple[str, ...]:
+        if optimizer.search_space_type != "skills":
+            return ()
+        available = set(self.workspace.context.skill_contexts)
+        selected = (
+            tuple(sorted(available))
+            if optimizer.skills == "all"
+            else tuple(optimizer.skills)
+        )
+        unknown = sorted(set(selected) - available)
+        if unknown:
+            raise PreflightError(f"COPRO targets unknown skills: {unknown}")
+        return selected
+
+    def _selected_global_instruction_files(
+        self, optimizer: CoproConfiguration
+    ) -> tuple[str, ...]:
+        if optimizer.search_space_type != "global_instructions":
+            return ()
+        configured = self.workspace.repository.workspace.evaluation.instructions.global_paths
+        return (
+            configured
+            if optimizer.global_instruction_files == "all"
+            else tuple(optimizer.global_instruction_files)
+        )
+
+    def _render_global_instruction_files(self, paths: Sequence[str]) -> str:
+        parts = []
+        for source_path in paths:
+            try:
+                path = self.workspace.context.source_files[source_path]
+            except KeyError as error:
+                raise IntegrityError(
+                    f"global instruction source is absent from the frozen context: {source_path}"
+                ) from error
+            parts.append(f"# {source_path}\n\n" + path.read_text(encoding="utf-8"))
+        value = "\n\n".join(parts)
+        if not value.strip():
+            raise IntegrityError("global instruction target must not be empty")
+        return value
+
+    def _effective_global_context(
+        self,
+        optimizer: CoproConfiguration,
+        selected_bundle: str,
+    ) -> str:
+        selected = self._selected_global_instruction_files(optimizer)
+        configured = self.workspace.repository.workspace.evaluation.instructions.global_paths
+        if selected == configured:
+            return selected_bundle
+        selected_set = set(selected)
+        parts: list[str] = []
+        inserted = False
+        for source_path in configured:
+            if source_path in selected_set:
+                if not inserted:
+                    parts.append(selected_bundle)
+                    inserted = True
+                continue
+            parts.append(self._render_global_instruction_files((source_path,)))
+        if not inserted:
+            raise IntegrityError("selected global instruction bundle was not inserted")
+        return "\n\n".join(parts)
+
+    def _base_copro_bundle(self, optimizer: CoproConfiguration) -> Mapping[str, object]:
         instruction, output_prefix = solver_prompt_state(create_solver_program())
+        global_overlay = (
+            self._render_global_instruction_files(
+                self._selected_global_instruction_files(optimizer)
+            )
+            if optimizer.search_space_type == "global_instructions"
+            else ""
+        )
         return {
             "instruction": instruction,
             "output_prefix": output_prefix,
+            "global_context": self.workspace.context.global_context,
+            "global_overlay": global_overlay,
             "skills": {},
         }
 
     def _copro_targets(self, optimizer: CoproConfiguration) -> tuple[tuple[str, str], ...]:
-        available = set(self.workspace.context.skill_contexts)
-        if optimizer.skills == "all":
-            selected_skills = sorted(available)
-        else:
-            selected_skills = list(optimizer.skills)
-            unknown = sorted(set(selected_skills) - available)
-            if unknown:
-                raise PreflightError(f"COPRO targets unknown skills: {unknown}")
-        targets = []
-        if optimizer.optimize_prompt:
-            targets.append(("solver_prompt", "solver"))
-        targets.extend(("skill", skill_id) for skill_id in selected_skills)
+        targets = (
+            [("global_instructions", "global")]
+            if optimizer.search_space_type == "global_instructions"
+            else [("skill", skill_id) for skill_id in self._selected_copro_skills(optimizer)]
+        )
         if not targets:
             raise PreflightError("COPRO has no enabled optimization target")
         return tuple(targets)
@@ -4183,6 +4333,12 @@ class StageCoordinator:
         normalized = {
             "instruction": _string(bundle.get("instruction"), "COPRO bundle instruction"),
             "output_prefix": _string(bundle.get("output_prefix"), "COPRO bundle prefix"),
+            "global_context": _string(
+                bundle.get("global_context"), "COPRO bundle global context"
+            ),
+            "global_overlay": _text(
+                bundle.get("global_overlay", ""), "COPRO bundle global overlay"
+            ),
             "skills": {
                 _string(skill_id, "COPRO bundle skill id"): _string(text, "COPRO bundle skill text")
                 for skill_id, text in sorted(
@@ -4214,12 +4370,17 @@ class StageCoordinator:
         if not isinstance(optimizer, CoproConfiguration):
             raise IntegrityError("COPRO proposal requires COPRO configuration")
         skills = _mapping(bundle.get("skills", {}), "COPRO bundle skills")
-        if target_kind == "solver_prompt":
-            current_text = _string(bundle.get("instruction"), "solver instruction")
-            current_prefix = _string(bundle.get("output_prefix"), "solver output prefix")
+        if target_kind == "global_instructions":
+            current_text = _string(
+                bundle.get("global_overlay"), "global instruction bundle"
+            )
+            current_prefix = ""
+            selected_files = self._selected_global_instruction_files(optimizer)
             requirements = (
-                "Rewrite only the solver instruction and response prefix. Preserve the input "
-                "contract global_context, skill_context, task and the single response output."
+                "Rewrite only the configured global instruction bundle. Preserve its technical "
+                "facts and repository-wide responsibilities. Do not rewrite skills or the DSPy "
+                "signature. Selected source paths: "
+                + ", ".join(selected_files)
             )
         else:
             current_text = _string(
@@ -4299,6 +4460,11 @@ class StageCoordinator:
         bundle: Mapping[str, object],
         proposal: StagePacket,
     ) -> tuple[Mapping[str, object], ...]:
+        optimizer = self.workspace.repository.workspace.experiments[
+            proposal.experiment_id
+        ].optimizer
+        if not isinstance(optimizer, CoproConfiguration):
+            raise IntegrityError("COPRO candidates require COPRO configuration")
         status = self.ledger.status(proposal.packet_id)
         if status.result is None:
             raise IntegrityError("COPRO proposal is not persisted")
@@ -4311,11 +4477,19 @@ class StageCoordinator:
             next_bundle = {
                 "instruction": bundle["instruction"],
                 "output_prefix": bundle["output_prefix"],
+                "global_context": bundle["global_context"],
+                "global_overlay": bundle.get("global_overlay", ""),
                 "skills": dict(_mapping(bundle.get("skills", {}), "COPRO bundle skills")),
             }
-            if target_kind == "solver_prompt":
-                next_bundle["instruction"] = proposed["instruction"]
-                next_bundle["output_prefix"] = proposed["output_prefix"]
+            if target_kind == "global_instructions":
+                overlay = _string(
+                    proposed.get("instruction"), "proposed global instruction bundle"
+                )
+                next_bundle["global_overlay"] = overlay
+                next_bundle["global_context"] = self._effective_global_context(
+                    optimizer,
+                    overlay,
+                )
             else:
                 next_bundle["skills"][target_id] = proposed["instruction"]
             candidate = self._copro_candidate(next_bundle)
@@ -4439,32 +4613,25 @@ class StageCoordinator:
         training_cases: Sequence[CaseDefinition],
         validation_cases: Sequence[CaseDefinition],
         scope: str,
-        partition: int,
         validation_assignment_hash: str,
         initial_bundle: Mapping[str, object],
-        initial_dependency: StagePacket | None = None,
-    ) -> StagePacket | RunProgress:
+    ) -> _CoproSearchResult | RunProgress:
         optimizer = lock.configuration.optimizer
         if not isinstance(optimizer, CoproConfiguration):
             raise IntegrityError("COPRO search requires COPRO configuration")
         bundle: Mapping[str, object] = initial_bundle
-        dependencies: tuple[StagePacket, ...] = (
-            () if initial_dependency is None else (initial_dependency,)
-        )
-        history_by_target = self._copro_history_before_partition(run_id, partition)
+        dependencies: tuple[StagePacket, ...] = ()
+        history_by_target: dict[str, list[Mapping[str, object]]] = {}
         for round_number in range(1, optimizer.depth + 1):
             targets = self._copro_targets(optimizer)
-            target_batches = (
-                tuple(target for target in targets if target[0] == "solver_prompt"),
-                tuple(target for target in targets if target[0] == "skill"),
-            )
+            target_batches = (targets,)
             for target_batch in target_batches:
                 if not target_batch:
                     continue
 
-                # Freeze the selected global prompt before scheduling skills.
-                # Every skill in the second batch is independent and starts
-                # from this exact bundle.
+                # Every target in this factorized search round starts from the
+                # same frozen bundle. The workspace schema makes the batch
+                # either one global target or independent skill targets.
                 frozen_bundle = bundle
                 target_inputs: list[
                     tuple[
@@ -4479,14 +4646,14 @@ class StageCoordinator:
                 for target_kind, target_id in target_batch:
                     target_training_cases = (
                         tuple(training_cases)
-                        if target_kind == "solver_prompt"
+                        if target_kind == "global_instructions"
                         else tuple(case for case in training_cases if case.skill == target_id)
                     )
                     if not target_training_cases:
                         continue
                     target_validation_cases = (
                         tuple(validation_cases)
-                        if target_kind == "solver_prompt"
+                        if target_kind == "global_instructions"
                         else tuple(case for case in validation_cases if case.skill == target_id)
                     )
                     if not target_validation_cases:
@@ -4554,7 +4721,6 @@ class StageCoordinator:
                             cases=target_training_cases,
                             candidate=candidate,
                             phase="copro_candidate",
-                            partition=partition,
                             validation_assignment_hash=validation_assignment_hash,
                             selection=proposal,
                         )
@@ -4599,7 +4765,6 @@ class StageCoordinator:
                             selected_case_ids=[case.id for case in target_validation_cases],
                             program_dependency=fit,
                             evaluation_phase="validation",
-                            partition=partition,
                         )
                     )
                     all_solves.extend(solves)
@@ -4671,7 +4836,7 @@ class StageCoordinator:
                         )
                     )
 
-                if plans[0].target_kind == "solver_prompt":
+                if plans[0].target_kind == "global_instructions":
                     bundle = selected_by_target[plans[0].target_id]
                 else:
                     merged_skills = dict(
@@ -4689,56 +4854,15 @@ class StageCoordinator:
                     bundle = {
                         "instruction": frozen_bundle["instruction"],
                         "output_prefix": frozen_bundle["output_prefix"],
+                        "global_context": frozen_bundle["global_context"],
+                        "global_overlay": frozen_bundle.get("global_overlay", ""),
                         "skills": merged_skills,
                     }
                 dependencies = tuple(selections)
 
         if not dependencies:
             raise IntegrityError("COPRO search produced no selection")
-        final_candidate = self._copro_candidate(bundle)
-        final_fit = self._fit_packet(
-            run_id,
-            lock,
-            judge_validation,
-            cases=training_cases,
-            candidate=final_candidate,
-            phase="optimization_partition",
-            partition=partition,
-            validation_assignment_hash=validation_assignment_hash,
-            upstream_dependencies=dependencies,
-        )
-        if not self._ensure_executed(final_fit, lock, session):
-            return self._blocked_progress(run_id, lock.configuration.id, final_fit)
-        return final_fit
-
-    def _copro_history_before_partition(
-        self, run_id: str, partition: int
-    ) -> dict[str, list[Mapping[str, object]]]:
-        history: dict[str, list[Mapping[str, object]]] = {}
-        for item in self.ledger.list(run_id):
-            if (
-                item.packet.output_schema != "copro-selection-v1"
-                or item.state is not StageState.PERSISTED
-                or item.result is None
-            ):
-                continue
-            output = _mapping(self.ledger.read_output(item.result), "COPRO selection")
-            scope = str(output.get("scope", ""))
-            prefix = "optimization/partition-"
-            if not scope.startswith(prefix):
-                continue
-            try:
-                source_partition = int(scope.removeprefix(prefix))
-            except ValueError:
-                continue
-            if source_partition >= partition:
-                continue
-            target_id = _string(output.get("target_id"), "COPRO target id")
-            history.setdefault(target_id, []).extend(
-                _mapping(candidate, "COPRO candidate summary")
-                for candidate in _list(output.get("candidates"), "COPRO candidates")
-            )
-        return history
+        return _CoproSearchResult(bundle, dependencies)
 
     def _advance_copro(
         self,
@@ -4750,56 +4874,31 @@ class StageCoordinator:
         through: str | None,
     ) -> StagePacket | RunProgress:
         training, validation, validation_assignment_hash = self._optimization_cases(lock)
-        partition_by_group, _ = self._training_partition_assignment(lock, training)
         optimizer = lock.configuration.optimizer
         assert isinstance(optimizer, CoproConfiguration)
-        bundle: Mapping[str, object] = self._base_copro_bundle()
-        dependency: StagePacket | None = None
-        for partition in range(optimizer.partitions):
-            partition_cases = tuple(
-                case for case in training if partition_by_group[case.group] == partition
-            )
-            active_targets = optimizer.optimize_prompt or any(
-                case.skill in optimizer.skills for case in partition_cases
-            )
-            if not active_targets:
-                continue
-            fit = self._run_copro_search(
-                run_id,
-                lock,
-                judge_validation,
-                session,
-                training_cases=partition_cases,
-                validation_cases=validation,
-                scope=f"optimization/partition-{partition}",
-                partition=partition,
-                validation_assignment_hash=validation_assignment_hash,
-                initial_bundle=bundle,
-                initial_dependency=dependency,
-            )
-            if isinstance(fit, RunProgress):
-                return fit
-            status = self.ledger.status(fit.packet_id)
-            assert status.result is not None
-            output = _mapping(self.ledger.read_output(status.result), "COPRO partition fit")
-            bundle = {
-                "instruction": _string(output.get("solver_instruction"), "solver instruction"),
-                "output_prefix": _string(output.get("output_prefix"), "solver output prefix"),
-                "skills": dict(_mapping(output.get("skill_overlays", {}), "skill overlays")),
-            }
-            dependency = fit
-        if dependency is None:
-            raise IntegrityError("COPRO optimization produced no training partition")
+        search = self._run_copro_search(
+            run_id,
+            lock,
+            judge_validation,
+            session,
+            training_cases=training,
+            validation_cases=validation,
+            scope="optimization",
+            validation_assignment_hash=validation_assignment_hash,
+            initial_bundle=self._base_copro_bundle(optimizer),
+        )
+        if isinstance(search, RunProgress):
+            return search
         final_fit = self._fit_packet(
             run_id,
             lock,
             judge_validation,
             cases=training,
-            candidate=self._copro_candidate(bundle),
+            candidate=self._copro_candidate(search.bundle),
             phase="final_fit",
-            partition=None,
             validation_assignment_hash=validation_assignment_hash,
-            selection=dependency,
+            selection=search.dependencies[-1],
+            upstream_dependencies=search.dependencies[:-1],
         )
         if not self._ensure_executed(final_fit, lock, session):
             return self._blocked_progress(run_id, lock.configuration.id, final_fit)
@@ -4831,25 +4930,6 @@ class StageCoordinator:
         )
         return training, validation, assignment_hash
 
-    def _training_partition_assignment(
-        self, lock: ExperimentLock, training: Sequence[CaseDefinition]
-    ) -> tuple[Mapping[str, int], str]:
-        optimizer = lock.configuration.optimizer
-        if not isinstance(optimizer, CoproConfiguration):
-            raise IntegrityError("training partitions are valid only for COPRO")
-        validation = lock.configuration.validation
-        if validation is None:
-            raise IntegrityError("optimization experiment has no validation configuration")
-        assignments = deterministic_group_training_partitions(
-            training,
-            partitions=optimizer.partitions,
-            seed=validation.seed,
-        )
-        return (
-            {item.group: item.partition for item in assignments},
-            content_hash(assignments),
-        )
-
     def _fit_packet(
         self,
         run_id: str,
@@ -4859,7 +4939,6 @@ class StageCoordinator:
         cases: Sequence[object],
         candidate: Mapping[str, object],
         phase: str,
-        partition: int | None,
         validation_assignment_hash: str,
         selection: StagePacket | None = None,
         upstream_dependencies: Sequence[StagePacket] = (),
@@ -4877,7 +4956,7 @@ class StageCoordinator:
                 for case in cases
             ]
         else:
-            # COPRO fitting packages an already selected prompt/skill bundle.
+            # COPRO fitting packages an already selected factorized instruction bundle.
             # Gold answers and rubrics are deliberately absent from this local
             # compilation packet; only the judge saw them while scoring.
             train = [
@@ -4904,7 +4983,6 @@ class StageCoordinator:
                         "cases": train,
                         "context": {
                             "phase": phase,
-                            "partition": partition,
                             "validation_assignment_hash": validation_assignment_hash,
                         },
                     },
@@ -4940,7 +5018,6 @@ class StageCoordinator:
                     cases=fit_cases,
                     candidate=candidate,
                     phase="validation",
-                    partition=None,
                     validation_assignment_hash=assignment_hash,
                 )
             )
@@ -4968,7 +5045,6 @@ class StageCoordinator:
                     selected_case_ids=tuple(case.id for case in validation),
                     program_dependency=fit,
                     evaluation_phase="validation",
-                    partition=None,
                     candidate_id=candidate_id,
                 )
             )
@@ -5041,7 +5117,6 @@ class StageCoordinator:
             cases=self._cases_by_split()["train"] if candidate["k"] else (),
             candidate=candidate,
             phase="final_fit",
-            partition=None,
             validation_assignment_hash=assignment_hash,
             selection=selection,
         )
@@ -5057,7 +5132,6 @@ class StageCoordinator:
         selected_case_ids: Sequence[str] | None = None,
         program_dependency: StagePacket | None = None,
         evaluation_phase: str = "test",
-        partition: int | None = None,
         candidate_id: str | None = None,
         gate_dependency: StagePacket | None = None,
     ) -> tuple[StagePacket, ...]:
@@ -5097,6 +5171,7 @@ class StageCoordinator:
         candidate_k = 0
         strategy = "baseline"
         skill_overlays: Mapping[str, str] = {}
+        global_context = self.workspace.context.global_context
         if program_dependency is not None:
             dependencies.append(program_dependency.packet_id)
             if program_dependency.stage is not StageKind.FIT:
@@ -5111,6 +5186,10 @@ class StageCoordinator:
             candidate_id = _string(output.get("candidate_id"), "candidate id")
             candidate_k = _integer(output.get("candidate_k"), "candidate k")
             strategy = _string(output.get("strategy"), "fit strategy")
+            global_context = _string(
+                output.get("global_context", self.workspace.context.global_context),
+                "fit global context",
+            )
             skill_overlays = {
                 _string(skill_id, "skill overlay id"): _string(text, "skill overlay text")
                 for skill_id, text in _mapping(
@@ -5150,13 +5229,12 @@ class StageCoordinator:
                             "skill": case.skill,
                             "split": split,
                             "repetition": repetition,
-                            "global_context": self.workspace.context.global_context,
+                            "global_context": global_context,
                             "skill_context": skill_context,
                             "task": case.prompt,
                             "solver_attachments": dict(case.solver_attachments()),
                             "program_hash": solver_program_hash,
                             "evaluation_phase": evaluation_phase,
-                            "partition": partition,
                             "candidate_id": candidate_id or "baseline",
                             "candidate_k": candidate_k,
                             "strategy": strategy,
@@ -5167,7 +5245,8 @@ class StageCoordinator:
                     inputs.append(state_artifact)
                 solver_view = {
                     "case_solver_view_hash": case.solver_view_hash,
-                    "global_context": self.workspace.context.global_context,
+                    "global_context": global_context,
+                    "effective_global_hash": content_hash(global_context),
                     "skill_context": skill_context,
                     "effective_skill_hash": content_hash(skill_context),
                     "task": case.prompt,
@@ -5227,7 +5306,6 @@ class StageCoordinator:
                 "split": candidate["split"],
                 "repetition": candidate["repetition"],
                 "evaluation_phase": candidate["evaluation_phase"],
-                "partition": candidate["partition"],
                 "candidate_id": candidate["candidate_id"],
                 "candidate_k": candidate["candidate_k"],
                 "strategy": candidate["strategy"],
@@ -5439,11 +5517,10 @@ class StageCoordinator:
             "cases": measurements,
         }
 
-    def _judge_packet_key(self, packet: StagePacket) -> tuple[str, int, str, str, int]:
+    def _judge_packet_key(self, packet: StagePacket) -> tuple[str, str, str, int]:
         value = _mapping(self._input(packet, "evaluation"), "judge input")
         return (
             _string(value.get("candidate_id", "baseline"), "judge candidate id"),
-            int(value.get("partition") if value.get("partition") is not None else -1),
             _string(value.get("case_id"), "judge case_id"),
             _string(value.get("split"), "judge split"),
             int(value.get("repetition", 0)),
@@ -5625,15 +5702,11 @@ class StageCoordinator:
             if len(candidates) > expected_count:
                 raise IntegrityError("COPRO proposal exceeds its candidate count")
             target_kind = _string(context.get("target_kind"), "optimizer target kind")
+            if target_kind not in {"global_instructions", "skill"}:
+                raise IntegrityError("COPRO proposal has an unsupported target kind")
             original = (
                 _string(context.get("current_text"), "optimizer current text").strip(),
-                (
-                    _string(
-                        context.get("current_output_prefix"), "optimizer current prefix"
-                    ).strip()
-                    if target_kind == "solver_prompt"
-                    else ""
-                ),
+                "",
             )
             identities = set()
             for raw_candidate in candidates:
@@ -5648,12 +5721,14 @@ class StageCoordinator:
                     raise IntegrityError("candidate output_prefix must be a string")
                 identity = (
                     instruction.strip(),
-                    prefix.strip() if target_kind == "solver_prompt" else "",
+                    "",
                 )
                 if not identity[0]:
                     raise IntegrityError("COPRO proposal candidate instruction is empty")
-                if target_kind == "solver_prompt" and not identity[1]:
-                    raise IntegrityError("solver prompt candidate output_prefix is empty")
+                if prefix.strip():
+                    raise IntegrityError(
+                        "COPRO candidates cannot change the frozen output prefix"
+                    )
                 if identity == original or identity in identities:
                     raise IntegrityError("COPRO proposal candidates must be new and unique")
                 identities.add(identity)
@@ -5709,7 +5784,6 @@ class StageCoordinator:
                 "repetition",
                 "program_hash",
                 "evaluation_phase",
-                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
@@ -5732,7 +5806,6 @@ class StageCoordinator:
                 "split",
                 "repetition",
                 "evaluation_phase",
-                "partition",
                 "candidate_id",
                 "candidate_k",
                 "strategy",
@@ -5756,6 +5829,62 @@ class StageCoordinator:
                 raise IntegrityError("COPRO fitted programs must have zero demonstrations")
             if strategy == "labeled_few_shot" and overlays:
                 raise IntegrityError("labeled_few_shot programs cannot contain skill overlays")
+            if strategy == "copro":
+                search_space_type = _string(
+                    payload.get("search_space_type"), "COPRO search space type"
+                )
+                frozen_global_hash = _string(
+                    payload.get("frozen_global_context_hash"),
+                    "frozen global context hash",
+                )
+                effective_global_hash = _string(
+                    payload.get("effective_global_context_hash"),
+                    "effective global context hash",
+                )
+                frozen_skill_bank_hash = _string(
+                    payload.get("frozen_skill_bank_hash"),
+                    "frozen skill-bank hash",
+                )
+                effective_skill_bank_hash = _string(
+                    payload.get("effective_skill_bank_hash"),
+                    "effective skill-bank hash",
+                )
+                if search_space_type == "skills":
+                    if frozen_global_hash != effective_global_hash:
+                        raise IntegrityError(
+                            "skill optimization changed the global context hash"
+                        )
+                    if payload.get("global_instruction_overlay") != "":
+                        raise IntegrityError(
+                            "skill optimization changed global instructions"
+                        )
+                    if payload.get("global_instruction_artifact") is not None:
+                        raise IntegrityError(
+                            "skill optimization contains a global instruction artifact"
+                        )
+                elif search_space_type == "global_instructions":
+                    if frozen_skill_bank_hash != effective_skill_bank_hash:
+                        raise IntegrityError(
+                            "global-instruction optimization changed the skill bank"
+                        )
+                    if overlays:
+                        raise IntegrityError(
+                            "global-instruction optimization contains skill overlays"
+                        )
+                    _string(
+                        payload.get("global_instruction_overlay"),
+                        "optimized global instruction bundle",
+                    )
+                    reference = _mapping(
+                        payload.get("global_instruction_artifact"),
+                        "global instruction artifact",
+                    )
+                    self.artifacts.reference(
+                        _string(reference.get("content_id"), "global artifact content_id"),
+                        _string(reference.get("media_type"), "global artifact media_type"),
+                    )
+                else:
+                    raise IntegrityError("fitted program has an unsupported COPRO search space")
             if packet.work_spec.get("materialize_final_artifacts") is True:
                 manifest = _mapping(
                     payload.get("compiled_manifest_artifact"), "compiled manifest artifact"
@@ -6112,7 +6241,7 @@ class StageCoordinator:
 def _upgrade_frozen_workspace_payload(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Upgrade an immutable schema-13 or schema-14 run for the current parser.
+    """Upgrade an immutable historical run for the current parser.
 
     This is deliberately not used by ``WorkspaceRepository.from_file``:
     user-authored legacy workspaces remain rejected. It exists only so a run
@@ -6122,15 +6251,19 @@ def _upgrade_frozen_workspace_payload(
     version = payload.get("schema_version")
     if version == WORKSPACE_SCHEMA_VERSION:
         return json.loads(canonical_json_bytes(payload))
-    if WORKSPACE_SCHEMA_VERSION != 16 or version not in {13, 14, 15}:
+    if WORKSPACE_SCHEMA_VERSION != 17 or version not in {13, 14, 15, 16}:
         raise IntegrityError(
             f"frozen workspace schema_version {version!r} cannot be rehydrated by "
             f"schema {WORKSPACE_SCHEMA_VERSION}"
         )
 
     upgraded = json.loads(canonical_json_bytes(payload))
+    if version == 16:
+        return _upgrade_frozen_copro_search_spaces(upgraded)
     if version == 15:
-        return _upgrade_frozen_recording_payload(upgraded)
+        return _upgrade_frozen_copro_search_spaces(
+            _upgrade_frozen_recording_payload(upgraded)
+        )
     if version == 14:
         experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
         upgraded_experiments: dict[str, object] = {}
@@ -6148,19 +6281,7 @@ def _upgrade_frozen_workspace_payload(
                         f"frozen experiment {experiment_id} optimizer",
                     )
                 )
-                if optimizer.get("strategy") == "copro":
-                    search = dict(
-                        _mapping(
-                            optimizer.get("search"),
-                            f"frozen experiment {experiment_id} search",
-                        )
-                    )
-                    search["partitions"] = _integer(
-                        legacy_validation.get("folds"),
-                        "frozen cross-validation folds",
-                    )
-                    optimizer["search"] = search
-                    experiment["optimizer"] = optimizer
+                experiment["optimizer"] = optimizer
                 experiment["validation"] = {
                     "strategy": "holdout",
                     "fraction": 0.2,
@@ -6168,7 +6289,9 @@ def _upgrade_frozen_workspace_payload(
                 }
             upgraded_experiments[experiment_id] = experiment
         upgraded["experiments"] = upgraded_experiments
-        return _upgrade_frozen_recording_payload(upgraded)
+        return _upgrade_frozen_copro_search_spaces(
+            _upgrade_frozen_recording_payload(upgraded)
+        )
 
     stages = _mapping(upgraded.get("stages"), "frozen workspace stages")
     models = _mapping(upgraded.get("models"), "frozen workspace models")
@@ -6278,17 +6401,6 @@ def _upgrade_frozen_workspace_payload(
         optimizer = experiment.get("optimizer")
         if isinstance(optimizer, Mapping) and optimizer.get("strategy") == "copro":
             roles["optimizer"] = optimizer_profile
-            search = dict(
-                _mapping(optimizer.get("search"), f"frozen experiment {experiment_id} search")
-            )
-            cross_validation = _mapping(
-                experiment.get("cross_validation"),
-                f"frozen experiment {experiment_id} cross_validation",
-            )
-            search["partitions"] = _integer(
-                cross_validation.get("folds"), "frozen cross-validation folds"
-            )
-            experiment["optimizer"] = {**dict(optimizer), "search": search}
         if experiment.get("mode") == "optimize":
             cross_validation = _mapping(
                 experiment.pop("cross_validation"),
@@ -6309,7 +6421,55 @@ def _upgrade_frozen_workspace_payload(
     upgraded["stages"] = upgraded_stages
     upgraded["experiments"] = upgraded_experiments
     upgraded.setdefault("comparisons", {})
-    return _upgrade_frozen_recording_payload(upgraded)
+    return _upgrade_frozen_copro_search_spaces(
+        _upgrade_frozen_recording_payload(upgraded)
+    )
+
+
+def _upgrade_frozen_copro_search_spaces(upgraded: dict[str, object]) -> dict[str, object]:
+    """Project retired COPRO targets into the explicit frozen search-space union.
+
+    This runs only for immutable historical definitions. Active workspace files
+    never pass through this adapter and must use schema 17 directly.
+    """
+
+    experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
+    projected: dict[str, object] = {}
+    for experiment_id, raw_experiment in experiments.items():
+        experiment = dict(_mapping(raw_experiment, f"frozen experiment {experiment_id}"))
+        raw_optimizer = experiment.get("optimizer")
+        if not isinstance(raw_optimizer, Mapping) or raw_optimizer.get("strategy") != "copro":
+            projected[experiment_id] = experiment
+            continue
+        optimizer = dict(raw_optimizer)
+        raw_targets = optimizer.pop("targets", None)
+        if raw_targets is not None:
+            targets = _mapping(raw_targets, f"frozen experiment {experiment_id} targets")
+            raw_skills = targets.get("skills")
+            has_skills = raw_skills == "all" or (
+                isinstance(raw_skills, Sequence)
+                and not isinstance(raw_skills, (str, bytes, bytearray))
+                and bool(raw_skills)
+            )
+            if has_skills:
+                optimizer["search_space"] = {
+                    "type": "skills",
+                    "include": raw_skills,
+                }
+            elif targets.get("prompt") is True:
+                optimizer["search_space"] = {
+                    "type": "global_instructions",
+                    "files": "all",
+                }
+            else:
+                raise IntegrityError(
+                    f"frozen COPRO experiment {experiment_id!r} has no usable target"
+                )
+        experiment["optimizer"] = optimizer
+        projected[experiment_id] = experiment
+    upgraded["experiments"] = projected
+    upgraded["schema_version"] = WORKSPACE_SCHEMA_VERSION
+    return upgraded
 
 
 def _upgrade_frozen_recording_payload(upgraded: dict[str, object]) -> dict[str, object]:

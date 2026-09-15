@@ -49,7 +49,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v16 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v17 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-validation manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -179,8 +179,10 @@ uv run --extra mlflow ms-agent-eval recorder doctor \
   --workspace workspace.yaml
 ```
 
-The experiment still runs when MLflow is unavailable; recorder state remains
-pending for a later `recorder project` or `recorder worker`. Read
+The normal experiment command starts its recorder consumer automatically. The
+experiment still runs when MLflow is unavailable; undelivered state remains
+durable for automatic retry or the recovery-only `recorder project` and
+`recorder worker` commands. Read
 [Experiment recording](../execution/experiment-recording.md) for server setup,
 privacy policies, authentication, status, and backfill.
 
@@ -262,18 +264,32 @@ optimizer:
 or:
 
 ```yaml
-# Prompt/skill search: zero demonstrations and explicit optimizer proposals.
+# Skill search: global instructions and the DSPy signature stay frozen.
 optimizer:
   strategy: copro
-  targets: {prompt: true, skills: all}
-  search: {breadth: 3, depth: 2, partitions: 2, init_temperature: 1.4}
+  search_space: {type: skills, include: all}
+  search: {breadth: 3, depth: 2, init_temperature: 1.4}
+  metric: {name: rubric_mean_score}
+```
+
+Or define a separate COPRO experiment that freezes every skill and optimizes
+one global instruction bundle:
+
+```yaml
+optimizer:
+  strategy: copro
+  search_space:
+    type: global_instructions
+    files: [agent_scaffold/AGENTS.md]
+  search: {breadth: 3, depth: 2, init_temperature: 1.4}
   metric: {name: rubric_mean_score}
 ```
 
 Both strategies use one fixed group-safe validation holdout derived within
 train, materialize the selected configuration once, and then evaluate the
-untouched test set. COPRO carries winners through sequential training
-partitions and evaluates both frozen original and optimized programs
+untouched test set. COPRO never changes both instruction layers in one run. It
+carries winners through stateful search rounds and evaluates both the
+frozen original and optimized programs
 on identical test cases and creates explicit, reusable optimizer, candidate
 fit, solve, judge, and selection packets. All generated outputs stay under the
 external data root.

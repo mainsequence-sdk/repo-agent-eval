@@ -142,7 +142,7 @@ An optimization arm must keep the same solver and judge profiles as its
 “which model proposes better instructions?” from “which model solves the case?”
 The named comparison must include that `based_on` experiment in
 `baseline_experiments`, all listed arms must use one fixed judge profile, and
-schema 16 currently supports `score.mean` as its primary metric. Grouping is a
+schema 17 currently supports `score.mean` as its primary metric. Grouping is a
 unique subset of `solver` and `optimizer`.
 
 ## Execute arms

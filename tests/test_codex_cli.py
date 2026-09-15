@@ -86,7 +86,6 @@ def _case_input() -> dict[str, object]:
         "split": "test",
         "repetition": 1,
         "evaluation_phase": "test",
-        "partition": None,
         "candidate_id": "baseline",
         "candidate_k": 0,
         "strategy": "baseline",
@@ -101,7 +100,7 @@ def _case_input() -> dict[str, object]:
 def _optimizer_packet(ledger: StageLedger) -> StagePacket:
     context = {
         "strategy": "copro",
-        "target_kind": "solver_prompt",
+        "target_kind": "global_instructions",
         "target_id": "solver",
         "current_text": "Answer precisely.",
         "current_output_prefix": "Response:",
@@ -109,7 +108,7 @@ def _optimizer_packet(ledger: StageLedger) -> StagePacket:
         "requirements": "Preserve the solver contract.",
         "candidate_count": 2,
         "round": 2,
-        "scope": "optimization/partition-1",
+        "scope": "optimization",
         "fitting_corpus_hash": f"sha256:{'8' * 64}",
     }
     return StagePacket.create(

@@ -53,7 +53,7 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 16
+    assert repository.workspace.schema_version == 17
     assert repository.workspace.models["solver"].reasoning_effort == "high"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert repository.workspace.executors["remote-models"].total_concurrency == 10

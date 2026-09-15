@@ -49,7 +49,7 @@ flowchart TB
     Views --> Judge
     Solver --> Results
     Judge --> Results
-    Queue --> Worker[Independent recorder worker]
+    Queue --> Worker[Managed recorder consumer]
     Results --> Worker
     Worker --> MLflow[MLflow comparison and traces]
 ```
@@ -129,8 +129,8 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
   recovery, and the first MLflow adapter.
 - [ADR-007](007-configurable-dspy-optimization-strategies.md) defines a
   mutually exclusive workspace choice between labeled few-shot fitting and
-  COPRO prompt-and-skill search, including leakage, budget, identity, artifact,
-  and reporting requirements.
+  COPRO search, including leakage, budget, identity, artifact, and reporting
+  requirements. ADR-012 supersedes its joint prompt-and-skill target contract.
 - [ADR-008](008-paired-copro-evaluation-and-formal-reporting.md) defines the
   paired original-versus-optimized COPRO test, exact expected-response token
   measurement, formal summaries, and MLflow chart contract.
@@ -140,12 +140,16 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
   workspace-global MLflow model tracking.
 - [ADR-011](011-stateful-optimization-and-semantic-reuse.md) replaces
   independent K-fold searches with one fixed validation holdout and a stateful
-  COPRO partition chain, and makes stage reuse depend on semantic model inputs
+  COPRO round chain, and makes stage reuse depend on semantic model inputs
   rather than orchestration coordinates.
+- [ADR-012](012-factorized-copro-optimization-scopes.md) separates COPRO into
+  mutually exclusive skill or global-instruction search spaces, freezes the
+  non-selected instruction layer, and defines factorized identity, artifacts,
+  invalidation, validation, and reporting for both experiment types.
 - [ADR-013](013-queued-recorder-workers.md) moves all recorder adapters and
   projection phases behind a durable queue, adds worker leases and cursors,
-  coalesces live updates, and keeps final report generation off the experiment
-  hot path.
+  coalesces live updates, and lets normal runs supervise their recorder
+  consumer automatically.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

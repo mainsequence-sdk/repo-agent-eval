@@ -228,7 +228,6 @@ def test_projection_exposes_actionable_failure_tables(tmp_path: Path) -> None:
             "skill": "application_surfaces/api_surfaces",
             "split": "train",
             "evaluation_phase": "validation",
-            "partition": 1,
             "candidate_id": "baseline",
         },
         inputs=(
@@ -505,7 +504,10 @@ def test_comparison_projection_groups_only_compatible_model_arms(tmp_path: Path)
                     }
                 ],
             }
-            optimization = {"strategy": "copro"}
+            optimization = {
+                "strategy": "copro",
+                "search_space_type": "skills",
+            }
         return {
             "schema_version": 1,
             "run_id": run_id,
@@ -586,6 +588,9 @@ def test_comparison_projection_groups_only_compatible_model_arms(tmp_path: Path)
         "model-skill-comparison",
         "model-token-band-comparison",
     }
+    arm_table = next(table for table in plan.tables if table.name == "model-arm-comparison")
+    optimized_arm = next(row for row in arm_table.rows if row["strategy"] == "copro")
+    assert optimized_arm["search_space_type"] == "skills"
     artifact_paths = {artifact.path for artifact in plan.artifacts}
     assert {
         "index.html",
@@ -654,7 +659,7 @@ def test_recorder_delivery_is_retryable_idempotent_and_redacts_errors(
     assert repeated["external_run_id"] == "run-remote-1"
 
 
-def test_completed_run_queues_recorder_work_without_calling_adapter(tmp_path: Path) -> None:
+def test_completed_full_run_automatically_projects_recorder_work(tmp_path: Path) -> None:
     repository = create_workspace(tmp_path / "workspace")
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
     payload["recording"]["enabled"] = True
@@ -711,13 +716,7 @@ def test_completed_run_queues_recorder_work_without_calling_adapter(tmp_path: Pa
     run = runner.run("baseline", environment={"TEST_API_KEY": "test-secret"})
 
     assert run.status == "completed"
-    assert not fake.plans
-    queued = runner.coordinator.recorder_service.status(run.run_id)
-    assert queued["status"] == "queued"
-    assert queued["queue"]["pending"] >= 1
-
-    projected = runner.coordinator.recorder_service.project_run(run.run_id)
-
+    projected = runner.coordinator.recorder_service.status(run.run_id)
     assert projected["status"] == "published"
     assert fake.plans
     assert fake.plans[-1].run.status == RunLifecycleState.COMPLETED.value

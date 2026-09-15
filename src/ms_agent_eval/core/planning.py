@@ -19,7 +19,6 @@ from .evaluation import (
     CapabilityCatalog,
     CaseBank,
     SplitManifest,
-    deterministic_group_training_partitions,
     deterministic_group_validation_split,
     validate_deterministic_splits,
     validate_case_authoring_provenance,
@@ -136,16 +135,19 @@ def _optimization_preflight(
             case for case in train if validation_by_group[case.group] == "validation"
         )
         if isinstance(optimizer, CoproConfiguration):
-            skills = (
-                sorted(context.skill_contexts)
-                if optimizer.skills == "all"
-                else list(optimizer.skills)
-            )
-            unknown = sorted(set(skills) - set(context.skill_contexts))
-            if unknown:
-                raise PreflightError(
-                    f"COPRO experiment {experiment_id!r} targets unknown skills: {unknown}"
+            if optimizer.search_space_type == "skills":
+                skills = (
+                    sorted(context.skill_contexts)
+                    if optimizer.skills == "all"
+                    else list(optimizer.skills)
                 )
+                unknown = sorted(set(skills) - set(context.skill_contexts))
+                if unknown:
+                    raise PreflightError(
+                        f"COPRO experiment {experiment_id!r} targets unknown skills: {unknown}"
+                    )
+            else:
+                skills = sorted({case.skill for case in train})
             groups_by_skill = {
                 skill: sorted({case.group for case in fitting if case.skill == skill})
                 for skill in skills
@@ -153,7 +155,7 @@ def _optimization_preflight(
             insufficient = {
                 skill: groups for skill, groups in groups_by_skill.items() if not groups
             }
-            if insufficient:
+            if optimizer.search_space_type == "skills" and insufficient:
                 detail = ", ".join(
                     f"{skill}={len(groups)} groups"
                     for skill, groups in sorted(insufficient.items())
@@ -167,39 +169,24 @@ def _optimization_preflight(
                 for skill in skills
                 if not any(case.skill == skill for case in held_out_validation)
             )
-            if missing_validation:
+            if optimizer.search_space_type == "skills" and missing_validation:
                 raise PreflightError(
                     f"COPRO experiment {experiment_id!r} has no validation cases for "
                     f"selected skills: {missing_validation}"
                 )
-            partition_assignments = deterministic_group_training_partitions(
-                fitting,
-                partitions=optimizer.partitions,
-                seed=validation.seed,
-            )
-            partition_by_group = {item.group: item.partition for item in partition_assignments}
-            candidate_evaluations = 0
-            proposal_calls = 0
-            for partition in range(optimizer.partitions):
-                partition_cases = tuple(
-                    case for case in fitting if partition_by_group[case.group] == partition
-                )
-                active_skills = [
-                    skill
-                    for skill in skills
-                    if any(case.skill == skill for case in partition_cases)
-                ]
-                targets = int(optimizer.optimize_prompt) + len(active_skills)
-                proposal_calls += optimizer.depth * targets
-                validation_evaluations = (
-                    len(held_out_validation) if optimizer.optimize_prompt else 0
-                ) + sum(
+            targets = 1 if optimizer.search_space_type == "global_instructions" else len(skills)
+            proposal_calls = optimizer.depth * targets
+            validation_evaluations = (
+                len(held_out_validation)
+                if optimizer.search_space_type == "global_instructions"
+                else sum(
                     sum(case.skill == skill for case in held_out_validation)
-                    for skill in active_skills
+                    for skill in skills
                 )
-                candidate_evaluations += (
-                    optimizer.depth * optimizer.breadth * validation_evaluations
-                )
+            )
+            candidate_evaluations = (
+                optimizer.depth * optimizer.breadth * validation_evaluations
+            )
             final_test_calls = 2 * len(test) * test_solver_repetitions(experiment)
             solver_calls = candidate_evaluations + final_test_calls
             judge_calls = solver_calls * judge_repetitions
@@ -221,7 +208,20 @@ def _optimization_preflight(
             )
             plans[experiment_id] = {
                 "strategy": "copro",
-                "targets": {"prompt": optimizer.optimize_prompt, "skills": skills},
+                "search_space": {
+                    "type": optimizer.search_space_type,
+                    **(
+                        {"skills": skills}
+                        if optimizer.search_space_type == "skills"
+                        else {
+                            "global_instruction_files": list(
+                                workspace.evaluation.instructions.global_paths
+                                if optimizer.global_instruction_files == "all"
+                                else optimizer.global_instruction_files
+                            )
+                        }
+                    ),
+                },
                 "validation": {
                     "strategy": validation.strategy,
                     "fraction": validation.fraction,
@@ -229,7 +229,6 @@ def _optimization_preflight(
                     "assignment_hash": content_hash(validation_assignments),
                 },
                 "training_case_count": len(fitting),
-                "training_partitions": optimizer.partitions,
                 "breadth": optimizer.breadth,
                 "depth": optimizer.depth,
                 "planned_upper_bound": required,

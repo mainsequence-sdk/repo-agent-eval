@@ -2,9 +2,9 @@
 
 MS Agent Eval records runs through a recorder-neutral durable queue while
 retaining the external filesystem artifact store as the source of truth.
-MLflow is the first adapter, not part of the experiment process. Recorder
-workers perform projection independently, so recorder CPU, rendering, uploads,
-or outages cannot delay model execution, alter scores, or invalidate reuse.
+MLflow is the first adapter. A normal `run` command automatically manages one
+run-scoped recorder consumer in the background; recorder failures cannot alter
+scores, stage results, or reuse.
 
 ## Data flow
 
@@ -13,7 +13,7 @@ flowchart LR
     Stages[Solver, judge, and optimizer stages] --> Canonical[Canonical local evidence]
     Canonical --> Intent[Small pointer-only projection intent]
     Intent --> Queue[Durable recorder queue]
-    Queue --> Worker[Independent recorder worker]
+    Queue --> Worker[Run-managed recorder consumer]
     Canonical --> Worker
     Worker --> Report[Human-readable report bundle]
     Worker --> MLflow[MLflow experiment and runs]
@@ -21,11 +21,12 @@ flowchart LR
 ```
 
 Every stage result is committed locally before a projection intent is queued.
-The coordinator never imports MLflow, builds tables, renders charts, constructs
-a complete recording plan, or waits for a recorder. Live intents coalesce by
-run and recorder. Stage and finalization intents remain durable. Historical
-projection reads canonical evidence and makes zero author, solver, judge, or
-optimizer calls. See
+The semantic coordinator never imports MLflow, builds tables, renders charts,
+or constructs a recording plan. The public runner supervises a recorder
+consumer around coordinator execution. Live intents coalesce by run and
+recorder; stage and finalization intents remain durable. Historical projection
+reads canonical evidence and makes zero author, solver, judge, or optimizer
+calls. See
 [ADR-013](../architecture/013-queued-recorder-workers.md).
 
 ## Install and run MLflow
@@ -57,7 +58,7 @@ Recorder settings are durable workspace configuration, not environment
 variables:
 
 ```yaml
-schema_version: 16
+schema_version: 17
 
 recording:
   enabled: true
@@ -93,11 +94,13 @@ recorder_queues:
     max_attempts: 12
 ```
 
-`projection` controls what workers produce. `recorder_queues` controls durable
-delivery and retry. `wait_on_run_exit` defaults to `false`; the experiment
-finishes when semantic execution finishes, not when external projection
-finishes. The only supported failure policy is `continue`: failed delivery is
-visible and retryable but cannot change the experiment result.
+`projection` controls what the managed consumer produces. `recorder_queues`
+controls durable delivery and retry. The consumer always drains immediately
+eligible work before the `run` command exits. With `wait_on_run_exit: false`,
+it does not wait through retry backoff when the recorder is unavailable; with
+`true`, it waits for delivery or terminal dead-letter state. The only supported
+failure policy is `continue`: failed delivery is visible and retryable but
+cannot change the experiment result.
 
 Live checkpoints record progress metrics, compact traces, and current graph
 artifacts. Complete result tables are terminal assets: uploading a new
@@ -164,15 +167,15 @@ uv run --extra mlflow ms-agent-eval recorder doctor --read-only \
 
 ## Run and inspect
 
-The experiment command only queues recording work:
+One command executes the experiment and manages recording:
 
 ```bash
 uv run --extra mlflow ms-agent-eval run baseline \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-Run a continuously polling worker in another process or on another machine
-with shared storage:
+No separate recorder command is required. For recovery, backfill, or a
+separately deployed shared-storage consumer, the optional worker command is:
 
 ```bash
 uv run --extra mlflow ms-agent-eval recorder worker \
@@ -211,7 +214,7 @@ for failed and cancelled terminal runs even when no aggregate report exists.
 All arms for one workspace are recorded in one MLflow Experiment. One MLflow
 parent run represents each canonical local arm execution. Nested MLflow runs
 represent stable stage scopes such as judge validation, solve, judge,
-aggregation, optimization candidates, validation, and training partitions. The projection includes:
+aggregation, optimization candidates, validation, and search rounds. The projection includes:
 
 - scalar score, usage, latency, failure, and reuse metrics;
 - stage-attempt, model-call, case-result, criterion, endpoint, calibration, and

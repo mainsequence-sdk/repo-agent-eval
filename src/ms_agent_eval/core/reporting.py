@@ -784,6 +784,18 @@ class RunReportBuilder:
                 "solver_instruction_artifact": output.get("solver_instruction_artifact"),
                 "output_prefix": output.get("output_prefix"),
                 "output_prefix_artifact": output.get("output_prefix_artifact"),
+                "search_space_type": output.get("search_space_type"),
+                "frozen_global_context_hash": output.get(
+                    "frozen_global_context_hash"
+                ),
+                "effective_global_context_hash": output.get(
+                    "effective_global_context_hash"
+                ),
+                "global_instruction_artifact": output.get(
+                    "global_instruction_artifact"
+                ),
+                "frozen_skill_bank_hash": output.get("frozen_skill_bank_hash"),
+                "effective_skill_bank_hash": output.get("effective_skill_bank_hash"),
                 "skill_overlays": output.get("skill_overlay_artifacts"),
             }
         rounds = []
@@ -815,12 +827,13 @@ class RunReportBuilder:
                 key=lambda item: (
                     str(item.get("scope")),
                     int(item.get("round") or 0),
-                    0 if item.get("target_kind") == "solver_prompt" else 1,
+                    0 if item.get("target_kind") == "global_instructions" else 1,
                     str(item.get("target_id")),
                 )
             )
         return {
             "strategy": strategy,
+            "search_space_type": optimizer.get("search_space_type"),
             "configuration": optimizer,
             "final_program": final_program,
             "rounds": rounds,
@@ -1422,9 +1435,14 @@ def render_report_markdown(report: RunReport) -> bytes:
                 "## Optimization",
                 "",
                 f"- Strategy: `{optimization.get('strategy')}`",
+                f"- Search space: `{optimization.get('search_space_type')}`",
                 f"- Final candidate: `{final_mapping.get('candidate_id')}`",
                 f"- Final program hash: `{final_mapping.get('program_hash')}`",
                 f"- Demonstrations: `{final_mapping.get('demonstration_count')}`",
+                f"- Frozen global hash: `{final_mapping.get('frozen_global_context_hash')}`",
+                f"- Effective global hash: `{final_mapping.get('effective_global_context_hash')}`",
+                f"- Frozen skill-bank hash: `{final_mapping.get('frozen_skill_bank_hash')}`",
+                f"- Effective skill-bank hash: `{final_mapping.get('effective_skill_bank_hash')}`",
                 f"- Search rounds: `{len(rounds) if isinstance(rounds, Sequence) else 0}`",
                 f"- Degraded proposal rounds: `{degraded_rounds}`",
                 f"- Compiled manifest: `{_artifact_id(final_mapping.get('compiled_manifest_artifact'))}`",

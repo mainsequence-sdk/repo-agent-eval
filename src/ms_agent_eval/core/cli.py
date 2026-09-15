@@ -95,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Include non-OpenRouter rows in the candidate set.",
     )
 
-    init = commands.add_parser("init", help="Create a schema-v16 incremental DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v17 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -312,7 +312,7 @@ def _parser() -> argparse.ArgumentParser:
     recorder_project.add_argument("--run", required=True, help="Run id to project.")
     _workspace_argument(recorder_project)
     recorder_worker = recorder_commands.add_parser(
-        "worker", help="Run the independent recorder queue worker."
+        "worker", help="Run the optional standalone recorder queue worker."
     )
     recorder_worker.add_argument(
         "--once",
@@ -618,16 +618,17 @@ def _run(
             pilot=pilot,
         )
 
-    from .coordinator import StageCoordinator
     from .stages import StageKind
 
-    coordinator = StageCoordinator(compiled, progress_sink=progress_sink)
     if arguments.command == "run":
+        from .runner import ExperimentRunner
+
+        runner = ExperimentRunner(compiled, progress_sink=progress_sink)
         if arguments.target == "resume":
             if not arguments.run_id:
                 raise ConfigurationError("run resume requires a run id")
             return json_value(
-                coordinator.resume(
+                runner.resume(
                     arguments.run_id,
                     environment=environment,
                     through=arguments.through,
@@ -636,13 +637,16 @@ def _run(
         if arguments.run_id is not None:
             raise ConfigurationError("a run id is only valid with 'run resume'")
         return json_value(
-            coordinator.start(
+            runner.run(
                 arguments.target,
                 environment=environment,
                 through=arguments.through,
                 pilot=pilot,
             )
         )
+    from .coordinator import StageCoordinator
+
+    coordinator = StageCoordinator(compiled, progress_sink=progress_sink)
     if arguments.stage_command == "list":
         return {
             "run_id": arguments.run,

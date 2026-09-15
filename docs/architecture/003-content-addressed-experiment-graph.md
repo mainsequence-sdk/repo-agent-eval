@@ -224,7 +224,7 @@ identical response bytes under the same exact judge view must be reusable.
 
 Fitting work is keyed by ordered training-case projections, candidate program,
 optimizer implementation where applicable, model identities, base solver
-program, and output contract. Phase/partition placement is excluded. Selection
+program, and output contract. Phase/round placement is excluded. Selection
 work is keyed by complete fixed-validation judgments for every candidate. Test and
 challenge material is forbidden from both nodes and their transitive dependency
 graphs.

@@ -469,9 +469,9 @@ when prose or provider names differ. Unrelated operations in one repository do
 not automatically share a group. Never name the group after a split.
 
 Optimization derives one fixed, group-safe validation holdout within reviewed
-training cases. COPRO training partitions are sequential: each winning prompt
-and skill bundle plus scored history initializes the next partition; no fold
-resets or extra final search are allowed. Distillation and fine-tuning may use
+training cases. COPRO uses one stateful search over the complete
+optimization-training set: each winning instruction bundle plus scored history
+initializes the next round; no fold resets or extra final search are allowed. Distillation and fine-tuning may use
 reviewed training cases only.
 Test/challenge prompts, answers, solver responses,
 judge feedback, and results must never influence case generation or become

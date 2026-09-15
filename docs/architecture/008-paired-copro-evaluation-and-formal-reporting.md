@@ -8,6 +8,10 @@
 - Preserves: [ADR-003](003-content-addressed-experiment-graph.md)
 - Search lifecycle refined by:
   [ADR-011](011-stateful-optimization-and-semantic-reuse.md)
+- COPRO target and frozen-layer terminology refined by:
+  [ADR-012](012-factorized-copro-optimization-scopes.md)
+- COPRO target and frozen-layer terminology refined by:
+  [ADR-012](012-factorized-copro-optimization-scopes.md)
 
 ## Context
 
@@ -25,7 +29,7 @@ coordinator evaluates two test arms:
 
 ```mermaid
 flowchart LR
-    Train[Fixed validation plus sequential training partitions] --> Search[Stateful COPRO search]
+    Train[Fixed validation plus complete optimization training] --> Search[Stateful COPRO search]
     Search --> Freeze[Freeze selected program]
     Freeze --> Baseline[Original prompt and source skills]
     Freeze --> Optimized[Selected prompt, prefix, and skill overlays]

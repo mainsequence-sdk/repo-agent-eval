@@ -6,7 +6,7 @@
 
 ```text
 core/
-  workspace.py             schema-v16 deployments, arms, recorder queues, reuse, and stages
+  workspace.py             schema-v17 deployments, arms, recorder queues, reuse, and stages
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring

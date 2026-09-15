@@ -891,47 +891,6 @@ def deterministic_group_validation_split(
 
 
 @dataclass(frozen=True)
-class TrainingPartitionAssignment:
-    group: str
-    partition: int
-
-
-def deterministic_group_training_partitions(
-    cases: Sequence[CaseDefinition],
-    *,
-    partitions: int,
-    seed: int,
-) -> tuple[TrainingPartitionAssignment, ...]:
-    """Assign training leakage groups to balanced, deterministic sequential partitions."""
-
-    if partitions < 1:
-        raise ConfigurationError("training partitions must be positive")
-    groups: dict[str, int] = Counter(case.group for case in cases)
-    if partitions > len(groups):
-        raise PreflightError(
-            "training partitions cannot exceed the number of training leakage groups"
-        )
-    ranked = sorted(
-        groups,
-        key=lambda group: (
-            -groups[group],
-            hashlib.sha256(f"{seed}:{group}".encode()).hexdigest(),
-            group,
-        ),
-    )
-    partition_sizes = [0] * partitions
-    assignments: list[TrainingPartitionAssignment] = []
-    for group in ranked:
-        partition = min(
-            range(partitions),
-            key=lambda index: (partition_sizes[index], index),
-        )
-        assignments.append(TrainingPartitionAssignment(group, partition))
-        partition_sizes[partition] += groups[group]
-    return tuple(sorted(assignments, key=lambda item: item.group))
-
-
-@dataclass(frozen=True)
 class CriterionScore:
     id: str
     score: float

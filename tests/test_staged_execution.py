@@ -188,7 +188,7 @@ def test_orchestration_metadata_does_not_change_semantic_work_identity(
         inputs=(
             ledger.put_json(
                 "case",
-                {**semantic_request, "phase": "validation", "partition": 0},
+                {**semantic_request, "phase": "validation"},
             ),
         ),
         work_spec=semantic_request,
@@ -208,7 +208,7 @@ def test_orchestration_metadata_does_not_change_semantic_work_identity(
         inputs=(
             ledger.put_json(
                 "case",
-                {**semantic_request, "phase": "test", "partition": 1},
+                {**semantic_request, "phase": "test"},
             ),
         ),
         work_spec=semantic_request,

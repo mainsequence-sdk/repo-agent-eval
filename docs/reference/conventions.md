@@ -133,7 +133,7 @@ outputs. Failure blocks every solver call.
 - Persist state-only DSPy JSON with pickle and unsafe LM state disabled.
 - Select by mean validation score, materialize the winner once, and evaluate
   untouched test data once. COPRO carries its winning bundle and numeric
-  history through sequential training partitions.
+  history through one search over the complete optimization-training set.
 - Never use test results to revise cases, prompts, demonstrations, or optimizer
   parameters.
 - Synthetic examples derived from one project example, defect, architecture

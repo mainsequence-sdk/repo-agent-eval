@@ -166,7 +166,7 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 16,
+        "schema_version": 17,
         "workspace": workspace,
         "recording": {
             "enabled": recording_enabled,
@@ -362,11 +362,10 @@ def build_workspace_template(
             if optimization_strategy == "labeled_few_shot"
             else {
                 "strategy": "copro",
-                "targets": {"prompt": True, "skills": "all"},
+                "search_space": {"type": "skills", "include": "all"},
                 "search": {
                     "breadth": 3,
                     "depth": 2,
-                    "partitions": 2,
                     "init_temperature": 1.4,
                 },
                 "metric": {"name": "rubric_mean_score"},

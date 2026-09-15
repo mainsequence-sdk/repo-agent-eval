@@ -199,7 +199,7 @@ hidden files is prohibited.
 | `validate_judge` | Assigned judge-validation fixtures, their cases, rubrics, expected evidence, output schema | Real solver responses and unrelated fixtures |
 | `solve` | Case prompt, declared global context, selected skill context, permitted repository snapshot, runtime/test files | Rubric, expected answer, judge prompt, judge feedback, other split data |
 | `judge` | Assigned case prompt, rubric, expected evidence, locked candidate response, permitted supporting snapshot | Other candidates, aggregate scores, previous judge decisions, unrelated cases |
-| `fit` | One optimization-training partition or final corpus | Validation answers/feedback, test, and challenge inputs or feedback |
+| `fit` | One optimization candidate or final corpus | Validation answers/feedback, test, and challenge inputs or feedback |
 | `select` | Complete fixed-validation scores and candidate metadata | Test and challenge inputs, answers, responses, and feedback |
 
 An artifact referenced by an allowed directory is not automatically safe. The

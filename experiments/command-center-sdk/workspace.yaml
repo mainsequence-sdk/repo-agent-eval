@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 
 workspace:
   id: command-center-sdk-evaluation

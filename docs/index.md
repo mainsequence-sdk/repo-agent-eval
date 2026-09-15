@@ -24,7 +24,7 @@ flowchart LR
 A pilot is diagnostic and never produces valid benchmark metrics. An
 optimization run selects a configuration on one group-safe validation holdout
 derived from training cases and materializes it once. COPRO carries the winner
-through sequential training partitions before evaluating the frozen original
+through stateful search rounds before evaluating the frozen original
 and optimized programs on the same untouched test cases.
 
 ## Choose what you are trying to do
@@ -105,5 +105,5 @@ they are not part of the framework contract.
 
 Historical implementation plans live outside this documentation tree in the
 root-level `.implementation_tasks/` directory, which is local and ignored by Git. Current behavior is defined by
-these guides, schema-v16 workspaces, and the repository-local case-authoring
+these guides, schema-v17 workspaces, and the repository-local case-authoring
 skill.

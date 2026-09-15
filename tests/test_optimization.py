@@ -49,20 +49,20 @@ def test_duplicate_copro_proposals_create_an_audited_shortfall() -> None:
 def test_copro_proposal_normalization_drops_unchanged_and_excess_candidates() -> None:
     candidates, accounting = normalize_copro_proposals(
         [
-            {"instruction": " Current prompt ", "output_prefix": " Answer: "},
+            {"instruction": " Current global instructions ", "output_prefix": "ignored"},
             {"instruction": "Rewrite A", "output_prefix": "Response A:"},
             {"instruction": "Rewrite B", "output_prefix": "Response B:"},
             {"instruction": "Rewrite C", "output_prefix": "Response C:"},
         ],
         requested_count=2,
-        target_kind="solver_prompt",
-        current_text="Current prompt",
-        current_output_prefix="Answer:",
+        target_kind="global_instructions",
+        current_text="Current global instructions",
+        current_output_prefix="",
     )
 
     assert candidates == [
-        {"instruction": "Rewrite A", "output_prefix": "Response A:"},
-        {"instruction": "Rewrite B", "output_prefix": "Response B:"},
+        {"instruction": "Rewrite A", "output_prefix": ""},
+        {"instruction": "Rewrite B", "output_prefix": ""},
     ]
     assert accounting["unchanged_dropped_count"] == 1
     assert accounting["excess_dropped_count"] == 1
@@ -75,9 +75,9 @@ def test_copro_proposal_normalization_keeps_structural_errors_fatal() -> None:
         normalize_copro_proposals(
             [{"instruction": " ", "output_prefix": "Answer:"}],
             requested_count=1,
-            target_kind="solver_prompt",
-            current_text="Current prompt",
-            current_output_prefix="Answer:",
+            target_kind="global_instructions",
+            current_text="Current global instructions",
+            current_output_prefix="",
         )
 
 

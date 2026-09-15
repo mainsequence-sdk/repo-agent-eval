@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -317,13 +317,12 @@ experiments:
       judge: judge
     optimizer:
       strategy: copro
-      targets:
-        prompt: true
-        skills: all
+      search_space:
+        type: skills
+        include: all
       search:
         breadth: 3
         depth: 2
-        partitions: 2
         init_temperature: 1.4
       metric:
         name: rubric_mean_score

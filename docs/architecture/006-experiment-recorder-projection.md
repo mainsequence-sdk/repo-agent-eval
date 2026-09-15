@@ -2,7 +2,7 @@
 
 > Optimization scope/table naming is refined by
 > [ADR-011](011-stateful-optimization-and-semantic-reuse.md): active runs use
-> fixed validation and sequential partitions rather than independent folds.
+> one fixed validation holdout and stateful rounds rather than independent folds.
 
 - Status: Accepted and implemented
 - Date: 2026-09-14
@@ -20,7 +20,7 @@
 >
 > Execution note: ADR-013 supersedes coordinator-owned background projection
 > and terminal flushing. Recorder work now executes only through durable queue
-> intents claimed by independent workers.
+> intents claimed by run-managed or optional standalone consumers.
 
 ## Context
 
