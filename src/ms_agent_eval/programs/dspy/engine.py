@@ -109,24 +109,34 @@ class _PortableStructuredAdapter(dspy.ChatAdapter):
             except Exception:
                 pass
 
-            # Some OpenAI-compatible models return the value of the sole output
-            # field directly. For CoproProposal that is the candidates array.
+            # Some OpenAI-compatible models add an explanation before a fenced
+            # JSON value, or return the value of the sole output field directly.
+            # Decode complete embedded JSON values locally; do not spend another
+            # model call repairing an already valid payload.
             text = completion.strip()
-            if text.startswith("```") and text.endswith("```"):
-                lines = text.splitlines()
-                text = "\n".join(lines[1:-1]).strip()
-            try:
-                decoded = json.loads(text)
-            except (TypeError, ValueError):
-                raise chat_error from None
             output_names = tuple(signature.output_fields)
-            if len(output_names) != 1:
-                raise chat_error from None
-            wrapped = json.dumps({output_names[0]: decoded}, ensure_ascii=False)
-            try:
-                return dict(json_adapter.parse(signature, wrapped))
-            except Exception:
-                raise chat_error from None
+            decoder = json.JSONDecoder()
+            for index, character in enumerate(text):
+                if character not in "[{":
+                    continue
+                try:
+                    decoded, _ = decoder.raw_decode(text[index:])
+                except (TypeError, ValueError):
+                    continue
+
+                encoded = json.dumps(decoded, ensure_ascii=False)
+                try:
+                    return dict(json_adapter.parse(signature, encoded))
+                except Exception:
+                    pass
+
+                if len(output_names) == 1:
+                    wrapped = json.dumps({output_names[0]: decoded}, ensure_ascii=False)
+                    try:
+                        return dict(json_adapter.parse(signature, wrapped))
+                    except Exception:
+                        pass
+            raise chat_error from None
 
 
 PROGRAM_SIGNATURES: Mapping[str, Mapping[str, tuple[str, ...]]] = {

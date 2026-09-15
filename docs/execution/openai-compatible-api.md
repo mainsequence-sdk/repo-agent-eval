@@ -135,15 +135,20 @@ POST /tokenize
 
 When available, the coordinator renders the final DSPy messages with the
 server's active chat template, counts those tokens with the server tokenizer,
-adds the model profile's `max_tokens` output reservation, and compares the
-total with the advertised `n_ctx`. This measures the complete request—including
-DSPy instructions, skill context, case content, and judge evidence—not only the
-small authored prompt.
+adds an output reservation, and compares the total with the advertised `n_ctx`.
+The reservation normally comes from the model profile's `max_tokens`. For an
+uncapped COPRO proposal, it is an admission-only estimate for all requested
+complete rewrites and is not forwarded to the model as an output limit. This
+measures the complete request—including DSPy instructions, skill context, case
+content, and judge evidence—not only the small authored prompt.
 
 If one replica is known to be too small, its permit is released and the call is
-routed to another replica in the same executor pool. If every replica is known
-to be too small, the stage fails before generation with
-`context_window_exceeded`. The framework never truncates experiment inputs.
+routed to another replica in the same executor pool. A provider context error
+after skipped preflight also tries the other eligible replicas without marking
+the rejecting endpoint unhealthy. If every replica is too small, the request
+fails with `context_window_exceeded`. COPRO may then create a separately hashed
+structural-delta history retry; the framework never truncates an existing work
+packet in place.
 
 If `/props`, `/apply-template`, or `/tokenize` is missing, unavailable,
 unauthorized, or incompatible, preflight is recorded as `skipped` and the

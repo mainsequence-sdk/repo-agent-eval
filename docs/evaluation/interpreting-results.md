@@ -52,8 +52,10 @@ zero or that no error occurred.
 
 Endpoint summaries report `preflight_checks`, `preflight_rejections`, and
 `preflight_skips` separately from model calls. A rejection means the exact
-rendered request plus its configured output reservation exceeded a concrete
-endpoint's advertised context window; no inference call was made there. A
+rendered request plus its output reservation exceeded a concrete endpoint's
+advertised context window; no inference call was made there. The
+`output_token_source` field distinguishes a configured generation limit from a
+COPRO admission-only completion estimate. A
 rejection followed by a successful call on another endpoint is a normal pooled
 reroute, not a failed case.
 
@@ -63,3 +65,8 @@ and not a DSPy parsing failure. When preflight is `skipped`, the endpoint lacks
 the optional exact-count contract; the request is still sent and any provider
 context error is recorded normally. The framework never estimates a token
 count from characters to authorize or reject a benchmark request.
+
+For COPRO, a failed complete-history proposal may be followed automatically by
+a separately hashed `structural_delta_v1` proposal. It retains the full winner
+and validation diagnostics while reducing only non-selected candidate bodies.
+The original failed request remains visible as execution evidence.

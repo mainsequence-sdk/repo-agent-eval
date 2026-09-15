@@ -109,9 +109,14 @@ flowchart TB
   experiment keeps zero demonstrations and searches either selected skill
   overlays with `AGENTS.md` frozen or one global instruction bundle with every
   skill frozen. The DSPy signature stays frozen in both modes. COPRO carries
-  each winning bundle and its score history into the next search round; it does not
-  restart per fold or perform another final search. It has no numerical acceptance
-  cutoff, permanent validation split, or test-access gate. After selection, a
+  each winning bundle and the complete scored candidate history into the next
+  search round, including per-case criterion scores, hard failures, and judge
+  feedback. Before dispatch, exact endpoint tokenization reserves room for the
+  uncapped rewritten candidates. Only a request that exceeds every eligible model
+  context is retried with deterministic structural deltas for non-selected text;
+  its score and failure evidence remain intact. COPRO does not restart per fold or
+  perform another final search. It has no numerical acceptance cutoff, permanent
+  validation split, or test-access gate. After selection, a
   COPRO run compares the original and optimized programs on every identical
   untouched test case and records the signed delta by skill, criterion, and
   exact expected-response token length.

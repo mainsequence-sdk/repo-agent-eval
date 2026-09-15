@@ -265,10 +265,20 @@ For skill optimization, the state chain and winner are maintained separately
 for each selected skill. For global-instruction optimization, there is one
 state chain and one winner across the complete affected corpus.
 
-Validation and test cases never become proposal inputs. The optimizer may
-receive current candidate text, previous candidate text, numeric scores, and
-non-sensitive aggregate search statistics. It must not receive expected
-responses, rubrics, judge feedback, test content, or challenge content.
+Test and challenge evidence never becomes a proposal input. The optimizer
+receives complete previous candidate text and the outcomes produced on the fixed
+validation cases: overall and criterion scores, hard failures, and judge
+feedback. It still must not receive expected responses, expected artifacts, raw
+rubrics, test content, or challenge content. Validation feedback is legitimate
+optimization evidence; suppressing it would leave COPRO unable to determine why
+a candidate improved or regressed.
+
+The coordinator performs exact context admission on the complete request and
+reserves estimated room for all uncapped candidate rewrites. Only when no
+eligible endpoint can fit it may the coordinator replace non-selected candidate
+bodies with deterministic structural deltas. It keeps the winner and every
+validation diagnostic. A reduced request is a different content-addressed work
+node, never a silent mutation or a score-only shortcut.
 
 ## Factorized content identity
 

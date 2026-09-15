@@ -50,6 +50,8 @@ class TerminalRunReporter:
             self._packet_reused(event)
         elif event.kind == "packet_retrying":
             self._packet_retrying(event)
+        elif event.kind == "optimizer_history_reduced":
+            self._optimizer_history_reduced(event)
         elif event.kind == "packet_failed":
             self._packet_failed(event)
         elif event.kind == "packet_waiting":
@@ -190,9 +192,19 @@ class TerminalRunReporter:
         suffix = f" · attempt {attempt}" if isinstance(attempt, int) else ""
         self.console.print(f"[yellow]↻[/] Retrying {_subject(event)}{suffix}")
 
+    def _optimizer_history_reduced(self, event: ProgressEvent) -> None:
+        self._stop_status()
+        self.console.print(
+            f"[yellow]↳[/] Retrying {_subject(event)} with scored structural deltas "
+            "because the complete candidate history exceeded the model context"
+        )
+
     def _packet_failed(self, event: ProgressEvent) -> None:
         self._stop_status()
-        if event.details.get("error_kind") == "context_window_exceeded":
+        if (
+            event.details.get("error_kind") == "context_window_exceeded"
+            and event.details.get("preflight_status") == "exceeds"
+        ):
             required = event.details.get("required_tokens")
             available = event.details.get("context_window")
             counts = (
@@ -202,6 +214,25 @@ class TerminalRunReporter:
             )
             self.console.print(
                 f"[red]✗[/] {_subject(event)} context preflight rejected request{counts}"
+            )
+            return
+        if event.details.get("error_kind") == "context_window_exceeded":
+            endpoint = event.details.get("endpoint_id")
+            endpoint_suffix = f" · {endpoint}" if isinstance(endpoint, str) else ""
+            preflight = event.details.get("preflight_status")
+            reason = event.details.get("reason")
+            preflight_suffix = (
+                f" · preflight {preflight}"
+                + (f" ({reason})" if isinstance(reason, str) else "")
+                if isinstance(preflight, str)
+                else ""
+            )
+            message = event.details.get("error")
+            rendered = _terminal_error(message)
+            error_suffix = f": {rendered}" if rendered else ""
+            self.console.print(
+                f"[red]✗[/] {_subject(event)} backend context limit exceeded"
+                f"{endpoint_suffix}{preflight_suffix}{error_suffix}"
             )
             return
         message = event.details.get("error")

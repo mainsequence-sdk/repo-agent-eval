@@ -988,9 +988,13 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert traces[0].info.tags["agent_eval.local_run_id"] == "run-1"
 
     lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_resumed")
+    client.delete_experiment(str(status["external_experiment_id"]))
     resumed = service.project_run("run-1", raise_on_error=True)
 
     assert resumed["external_run_id"] == status["external_run_id"]
+    assert (
+        client.get_experiment(str(resumed["external_experiment_id"])).lifecycle_stage == "active"
+    )
     resumed_root = client.get_run(str(resumed["external_run_id"]))
     assert resumed_root.info.status == "RUNNING"
     scoped_runs = client.search_runs(

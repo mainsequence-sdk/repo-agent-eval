@@ -62,8 +62,13 @@ optimizer:
   metric: {name: rubric_mean_score}
 ```
 
-Every round receives the prior winner and scored proposal history. Within each
-target and round, candidates are scored on the same fixed validation holdout.
+Every round receives the prior winner and the complete scored proposal history.
+Each history entry contains its candidate text, identity, mean score, content
+hash, length, selected status, score delta, and per-validation-case outcomes.
+Those outcomes include criterion scores, hard failures, and judge feedback, so
+the next proposal can distinguish a useful change from a failed one instead of
+reasoning from a scalar score alone. Within each target and round, candidates
+are scored on the same fixed validation holdout.
 After the last round, the coordinator materializes that winner once on all
 optimization-training cases. It must not restart from the original bundle or
 repeat the same search over artificial training partitions.
@@ -117,11 +122,43 @@ includes the candidate response hash, exact rubric/expected evidence, judge
 program, repetitions, model, and parameters. It does not include which solver
 packet produced identical response bytes. For optimizer proposals, identity
 includes exactly the proposal fields the optimizer receives: target kind and
-id, current target text and output prefix, scored history, rewrite
-requirements, requested candidate count, optimizer program, and temperature.
+id, current target text and output prefix, the exact model-visible scored
+history, rewrite requirements, requested candidate count, optimizer program,
+and temperature.
+The default work node contains complete candidate bodies and validation
+diagnostics. If that request cannot fit any eligible model context, the failed
+full-history node remains auditable and the coordinator creates a distinct
+reduced-history work node. That node retains the complete winner and every
+validation outcome, but replaces each non-selected candidate body with a
+deterministic structural delta against the winner. Full and reduced requests
+therefore never collide in the Merkle graph.
 The parent-bundle and fitting-corpus hashes remain orchestration metadata; they
 affect downstream fit and scoring work when their actual content changes, but
 must not make an otherwise identical proposal request a new work node.
+
+### Context-aware history reduction
+
+COPRO candidate output is intentionally uncapped. For proposal packets, exact
+endpoint tokenization reserves the estimated space required for every requested
+complete rewrite; this admission reserve is not sent as `max_tokens`. The full
+history is always attempted first. A preflight rejection is routed across the
+remaining eligible endpoints. When exact preflight is unavailable, a backend
+context rejection is treated the same way.
+
+Only after the complete request has failed every eligible context does the
+coordinator retry that target using `structural_delta_v1`. The reduced history
+keeps:
+
+- the selected winner in full as `current_text`;
+- every candidate's mean and per-case scores;
+- every criterion score, hard failure, and judge feedback string;
+- content hashes and lengths; and
+- changed headings plus representative edit hunks distributed across the
+  candidate.
+
+If this evidence-bearing reduced request still does not fit, optimization fails
+explicitly. The coordinator must not degrade to score-only history because that
+would remove the causal signal COPRO needs to improve the prompt or skill.
 
 When a semantic result is reused in another orchestration location, the
 coordinator writes a new persisted result whose output metadata is rebound to

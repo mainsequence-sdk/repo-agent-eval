@@ -243,6 +243,84 @@ def test_terminal_reporter_bounds_provider_error_payloads() -> None:
     assert len(rendered) < 400
 
 
+def test_terminal_reporter_distinguishes_backend_context_failure_from_preflight() -> None:
+    output = StringIO()
+    reporter = TerminalRunReporter(
+        Console(file=output, force_terminal=False, color_system=None, width=160)
+    )
+    reporter.handle(
+        ProgressEvent(
+            "packet_failed",
+            run_id="run-123",
+            experiment_id="optimize-solver",
+            stage="optimize",
+            position=10,
+            total=20,
+            details={
+                "error_kind": "context_window_exceeded",
+                "error": "optimizer backend rejected the request",
+                "endpoint_id": "llama-server-10-11434",
+                "preflight_status": "skipped",
+                "reason": "output_limit_unknown",
+            },
+        )
+    )
+    reporter.close()
+
+    rendered = output.getvalue()
+    assert "backend context limit exceeded" in rendered
+    assert "llama-server-10-11434" in rendered
+    assert "preflight skipped (output_limit_unknown)" in rendered
+    assert "context preflight rejected" not in rendered
+
+
+def test_terminal_reporter_identifies_actual_context_preflight_rejection() -> None:
+    output = StringIO()
+    reporter = TerminalRunReporter(
+        Console(file=output, force_terminal=False, color_system=None, width=120)
+    )
+    reporter.handle(
+        ProgressEvent(
+            "packet_failed",
+            run_id="run-123",
+            experiment_id="baseline",
+            stage="solve",
+            details={
+                "error_kind": "context_window_exceeded",
+                "preflight_status": "exceeds",
+                "required_tokens": 9_000,
+                "context_window": 8_192,
+            },
+        )
+    )
+    reporter.close()
+
+    rendered = output.getvalue()
+    assert "context preflight rejected request (9000 required > 8192 available)" in rendered
+
+
+def test_terminal_reporter_explains_automatic_copro_history_reduction() -> None:
+    output = StringIO()
+    reporter = TerminalRunReporter(
+        Console(file=output, force_terminal=False, color_system=None, width=140)
+    )
+    reporter.handle(
+        ProgressEvent(
+            "optimizer_history_reduced",
+            run_id="run-123",
+            experiment_id="optimize-solver",
+            stage="optimize",
+            position=10,
+            total=20,
+        )
+    )
+    reporter.close()
+
+    rendered = output.getvalue()
+    assert "scored structural deltas" in rendered
+    assert "complete candidate history exceeded the model context" in rendered
+
+
 def test_terminal_reporter_shows_parallel_judge_validation_votes() -> None:
     output = StringIO()
     reporter = TerminalRunReporter(

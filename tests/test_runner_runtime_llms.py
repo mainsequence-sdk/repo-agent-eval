@@ -512,8 +512,10 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
     assert run.result["endpoint_execution"]["configured_capacity"] == 3
 
 
-def test_transport_failure_uses_another_eligible_endpoint_in_the_same_call(
+@pytest.mark.parametrize("endpoint_failure", ["connection", "context_window"])
+def test_endpoint_failure_uses_another_eligible_endpoint_in_the_same_call(
     tmp_path: Path,
+    endpoint_failure: str,
 ) -> None:
     compiled = _pooled_compiled(tmp_path)
     calls: Counter[tuple[str, str]] = Counter()
@@ -546,7 +548,11 @@ def test_transport_failure_uses_another_eligible_endpoint_in_the_same_call(
             self.budget.begin_call(0.0)
             if self.endpoint.endswith(":8000/v1"):
                 calls[(self.endpoint, "failed")] += 1
-                error = ConnectionError("primary endpoint unavailable")
+                error = (
+                    ConnectionError("primary endpoint unavailable")
+                    if endpoint_failure == "connection"
+                    else RuntimeError("Context size has been exceeded")
+                )
                 self.observer.failed(
                     provider_id="fixed",
                     model=self.model,
@@ -1270,7 +1276,20 @@ def test_copro_skill_search_freezes_global_and_dspy_instructions(
     ]
     assert all(context["scored_attempts"] for context in second_round_contexts)
     assert all(
-        all("text" in attempt and "mean_score" in attempt for attempt in context["scored_attempts"])
+        all(
+            "text" in attempt
+            and "mean_score" in attempt
+            and "text_hash" in attempt
+            and "normalized_length" in attempt
+            and "selected" in attempt
+            and "score_delta_from_selected" in attempt
+            and attempt["outcomes"]
+            and all(
+                outcome["criterion_scores"] and outcome["feedback"]
+                for outcome in attempt["outcomes"]
+            )
+            for attempt in context["scored_attempts"]
+        )
         for context in second_round_contexts
     )
     assert all("current_target_hash" in status.packet.work_spec for status in optimizer_packets)
@@ -1408,6 +1427,142 @@ def test_copro_skill_search_freezes_global_and_dspy_instructions(
         "copro-criterion-comparison",
         "expected-response-token-counts",
     } <= {item.name for item in projection.tables}
+
+
+def test_copro_reduces_candidate_text_only_after_full_history_exceeds_context(
+    tmp_path: Path,
+) -> None:
+    compiled = _copro_compiled(tmp_path)
+    rejected_full_history = 0
+    accepted_reduced_history = 0
+    optimizer_call_parameters: list[Mapping[str, object]] = []
+
+    class AdaptiveObservedLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                optimizer_call_parameters.append(dict(kwargs))
+                candidate = (
+                    "Alternative second-round instruction."
+                    if "Optimized solver or skill instruction." in rendered
+                    else "Optimized solver or skill instruction."
+                )
+                response = (
+                    "[[ ## candidates ## ]]\n"
+                    + json.dumps([{"instruction": candidate, "output_prefix": ""}])
+                    + "\n\n"
+                    "[[ ## completed ## ]]"
+                )
+            elif self.model == "solver":
+                response = solver_response(
+                    "optimized skill answer"
+                    if "Optimized solver or skill instruction." in rendered
+                    else "baseline answer"
+                )
+            else:
+                score = (
+                    1.0
+                    if "strong candidate" in rendered
+                    or "optimized skill answer" in rendered
+                    else (0.5 if "partial candidate" in rendered else 0.0)
+                )
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    class HistoryAwarePreflight:
+        def evaluate(self, endpoint, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal rejected_full_history, accepted_reduced_history
+            rendered = json.dumps(kwargs["messages"], ensure_ascii=False)
+            full_history = (
+                "score_delta_from_selected" in rendered
+                and "complete_candidate_text" not in rendered
+            )
+            reduced_history = "complete_candidate_text" in rendered
+            if full_history:
+                rejected_full_history += 1
+            if reduced_history:
+                accepted_reduced_history += 1
+            return TokenPreflightResult(
+                status="exceeds" if full_history else "fits",
+                reason="test_exact_tokenization",
+                context_window=8_192,
+                input_tokens=8_000 if full_history else 1_000,
+                maximum_output_tokens=1_000,
+                required_tokens=9_000 if full_history else 2_000,
+                tokenizer_fingerprint="sha256:test-tokenizer",
+                chat_template_fingerprint="sha256:test-template",
+                capability_source="props",
+                capability_checked_at="2026-09-15T00:00:00+00:00",
+                rendered_message_hash=content_hash(rendered),
+                output_token_source="estimated_copro_completion_reserve",
+            )
+
+        def measure_text(self, endpoint, *, model, deployment_revision, content, api_key):  # type: ignore[no-untyped-def]
+            del api_key
+            return ExactTokenMeasurement(
+                "exact",
+                "exact_endpoint_tokenization",
+                content_hash(content),
+                100,
+                model,
+                deployment_revision,
+                endpoint.id,
+                endpoint.configuration_hash,
+                content_hash("test-tokenizer"),
+            )
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return AdaptiveObservedLM(observer, role=model.role)
+
+    runner = ExperimentRunner(
+        compiled,
+        lm_factory=factory,
+        token_preflight=HistoryAwarePreflight(),  # type: ignore[arg-type]
+    )
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    assert rejected_full_history == 1
+    assert accepted_reduced_history == 1
+    assert optimizer_call_parameters
+    assert all("max_tokens" not in parameters for parameters in optimizer_call_parameters)
+    optimizer_statuses = [
+        status
+        for status in runner.coordinator.ledger.list(run.run_id)
+        if status.packet.stage is StageKind.OPTIMIZE
+    ]
+    failed_full = next(status for status in optimizer_statuses if status.state is StageState.FAILED)
+    assert failed_full.result is not None and failed_full.result.error is not None
+    assert failed_full.result.error.kind == "context_window_exceeded"
+    reduced = next(
+        status
+        for status in optimizer_statuses
+        if runner.coordinator._input(status.packet, "optimizer_context").get(
+            "history_reduction"
+        )
+        == "structural_delta_v1"
+    )
+    assert reduced.state is StageState.PERSISTED
+    reduced_context = runner.coordinator._input(reduced.packet, "optimizer_context")
+    attempts = reduced_context["scored_attempts"]
+    assert all("text" not in attempt for attempt in attempts)
+    assert all(attempt["outcomes"] for attempt in attempts)
+    assert any(
+        attempt["text_representation"]["kind"] == "structural_delta_v1"
+        for attempt in attempts
+        if not attempt["selected"]
+    )
 
 
 def test_copro_global_instruction_search_freezes_every_skill_and_dspy_signature(

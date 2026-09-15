@@ -77,6 +77,21 @@ Each proposal result records `proposal_accounting` with requested, received,
 accepted, unchanged, duplicate, excess, and shortfall counts plus a `degraded`
 flag. The accounting flows into selection, candidate lineage, and reports.
 
+The next round receives the selected winner as `current_text` and complete
+candidate bodies in `scored_attempts`. Each scored attempt also carries exact
+per-case validation outcomes: overall score, criterion scores, hard failures,
+and judge feedback. This is the evidence COPRO uses to understand what succeeded
+and what failed.
+
+Before dispatch, exact endpoint tokenization checks the full rendered request
+and reserves estimated completion space for every requested complete rewrite.
+The reserve does not impose a model output limit. If the complete request cannot
+fit any eligible context, the coordinator automatically creates a distinct
+`structural_delta_v1` retry for that target. It keeps the winner in full and all
+validation outcomes, replacing only non-selected bodies with changed headings
+and representative edit hunks. If that still cannot fit, the stage fails; it
+does not silently discard failure evidence.
+
 There is no acceptance cutoff. Selection compares mean validation score.
 Few-shot ties prefer smaller `k`; COPRO ties prefer current text, then shorter
 normalized text, then candidate id. Test is not a gate and cannot affect

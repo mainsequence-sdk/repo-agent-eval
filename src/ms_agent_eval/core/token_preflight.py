@@ -32,6 +32,7 @@ class TokenPreflightResult:
     capability_source: str | None
     capability_checked_at: str | None
     rendered_message_hash: str
+    output_token_source: str | None = None
 
     @property
     def permits_dispatch(self) -> bool:
@@ -50,6 +51,7 @@ class TokenPreflightResult:
             "capability_source": self.capability_source,
             "capability_checked_at": self.capability_checked_at,
             "rendered_message_hash": self.rendered_message_hash,
+            "output_token_source": self.output_token_source,
         }
 
 
@@ -152,6 +154,7 @@ class EndpointTokenPreflight:
         maximum_output_tokens: int | None,
         reasoning_effort: str | None,
         api_key: str | None,
+        output_token_source: str | None = None,
     ) -> TokenPreflightResult:
         message_value = json_value(list(messages))
         message_hash = content_hash(message_value)
@@ -160,6 +163,7 @@ class EndpointTokenPreflight:
                 "output_limit_unknown",
                 message_hash,
                 maximum_output_tokens=maximum_output_tokens,
+                output_token_source=output_token_source,
             )
 
         capabilities = self._capabilities_for(
@@ -173,6 +177,7 @@ class EndpointTokenPreflight:
                 capabilities.reason or "context_unknown",
                 message_hash,
                 maximum_output_tokens=maximum_output_tokens,
+                output_token_source=output_token_source,
                 capabilities=capabilities,
             )
 
@@ -203,6 +208,7 @@ class EndpointTokenPreflight:
                     error.reason,
                     message_hash,
                     maximum_output_tokens=maximum_output_tokens,
+                    output_token_source=output_token_source,
                     capabilities=capabilities,
                 )
             with self._lock:
@@ -222,6 +228,7 @@ class EndpointTokenPreflight:
             capability_source=capabilities.context_source,
             capability_checked_at=capabilities.checked_at,
             rendered_message_hash=message_hash,
+            output_token_source=output_token_source,
         )
 
     def measure_text(
@@ -533,6 +540,7 @@ class EndpointTokenPreflight:
         message_hash: str,
         *,
         maximum_output_tokens: int | None,
+        output_token_source: str | None = None,
         capabilities: _EndpointCapabilities | None = None,
     ) -> TokenPreflightResult:
         return TokenPreflightResult(
@@ -551,6 +559,7 @@ class EndpointTokenPreflight:
             capability_source=(None if capabilities is None else capabilities.context_source),
             capability_checked_at=(None if capabilities is None else capabilities.checked_at),
             rendered_message_hash=message_hash,
+            output_token_source=output_token_source,
         )
 
 

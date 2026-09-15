@@ -669,6 +669,12 @@ binding, reconciliation searches for the tags
 `agent_eval.scope_id` before creating anything. A per-recorder/run file lock
 prevents concurrent local processes from creating duplicate roots.
 
+MLflow experiment deletion is soft deletion. When a durable binding references
+a matching experiment in the deleted lifecycle state, reconciliation restores
+that experiment before updating or restoring any bound run. This preserves the
+external identity and prevents every queued projection from repeatedly failing
+against the same tombstoned experiment.
+
 Trace creation has an unavoidable at-least-once edge when the external service
 accepts a request but neither returns an id nor exposes it immediately through
 search. The adapter minimizes this risk with canonical trace tags, search, and

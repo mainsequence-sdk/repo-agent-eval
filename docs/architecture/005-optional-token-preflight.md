@@ -164,8 +164,8 @@ For llama.cpp-compatible exact preflight, the coordinator uses this sequence:
 2. Send the returned prompt to `/tokenize` with special-token handling matching
    the generation endpoint.
 3. Count the returned token ids.
-4. Compare that input count plus the configured maximum output tokens against
-   the endpoint's advertised effective `n_ctx`.
+4. Compare that input count plus an explicit output reservation against the
+   endpoint's advertised effective `n_ctx`.
 
 If the coordinator cannot reproduce all template-relevant controls, the result
 is not exact and must not be used to reject a benchmark request. The framework
@@ -174,13 +174,22 @@ then skips preflight for that request and lets the provider decide.
 The admission equation is:
 
 ```text
-required_context = rendered_input_tokens + maximum_output_tokens
+required_context = rendered_input_tokens + reserved_output_tokens
 fits = required_context <= effective_context_window
 ```
 
 `max_tokens` is an output reservation, not the model's context size. An
 8192-token endpoint with `max_tokens: 4096` has at most 4096 tokens available
 for the fully rendered input.
+
+COPRO proposal output remains uncapped because every candidate must be a
+complete rewrite. For this stage only, the coordinator uses the endpoint's
+exact raw-text tokenizer to reserve the estimated size of all requested
+rewrites plus structured-output overhead. Provenance marks this as
+`estimated_copro_completion_reserve`. The value is used only in the admission
+equation and is never forwarded to the generation API as `max_tokens`. If exact
+tokenization is unavailable, preflight remains skipped rather than authorizing
+or rejecting the request from a character estimate.
 
 ## Pooled endpoint routing
 
@@ -195,6 +204,12 @@ When one endpoint is known to be too small, the scheduler may route the packet
 to another equivalent endpoint with sufficient context. A known-incompatible
 endpoint must not receive that packet merely because it has a free concurrency
 slot.
+
+A provider-side context rejection after skipped preflight is also local to that
+request and endpoint. The router tries the remaining eligible replicas without
+quarantining the endpoint as unhealthy. Only after all eligible replicas reject
+the request does the proposal coordinator consider its documented structural-
+delta fallback.
 
 If every endpoint with exact preflight support is too small and no endpoint has
 unknown capacity, the packet fails before inference with a normalized

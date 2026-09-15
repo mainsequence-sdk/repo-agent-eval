@@ -366,6 +366,9 @@ Projection is idempotent. Bindings preserve external experiment, run, scope,
 and trace identifiers; content-derived item ids prevent duplicate metrics,
 tables, artifacts, and traces. The worker cursor prevents reprocessing an
 acknowledged evidence range, and expired leases return to the queue.
+If the bound MLflow experiment was soft-deleted, the adapter restores that
+exact experiment before touching its bound runs. The durable binding therefore
+does not become a permanently failing pointer to a deleted container.
 
 Operational delivery state lives at:
 

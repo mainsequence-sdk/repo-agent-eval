@@ -32,10 +32,17 @@ scored history from one configured round initialize the next, while every
 candidate is compared on the same fixed validation cases.
 
 After selection, the coordinator materializes the winner once. Test and
-challenge prompts, expected responses, solver responses, judge feedback, and
-metrics never become optimizer, fitting, validation-selection, or fine-tuning
-inputs. COPRO's optimizer sees candidate wording and aggregate numeric
-validation history only; the separate judge alone sees correctness evidence.
+challenge evidence never becomes optimizer, fitting, validation-selection, or
+fine-tuning input. COPRO may consume feedback only from the fixed validation
+set: the next proposal receives complete prior candidate text plus the judge's
+per-case overall score, criterion scores, hard failures, and feedback. It never
+receives the expected response, artifacts, or raw rubric that produced those
+diagnostics.
+
+Complete history is the default. If exact admission or the backend proves it
+cannot fit any eligible model context, a new work node retains the complete
+winner and all validation diagnostics while representing losing text as
+deterministic structural deltas. It never falls back to scalar scores alone.
 
 See [ADR-011](../architecture/011-stateful-optimization-and-semantic-reuse.md)
 for the state and reuse invariants.

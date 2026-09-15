@@ -45,6 +45,7 @@ def test_exact_preflight_renders_then_tokenizes_and_caches() -> None:
         "maximum_output_tokens": 4,
         "reasoning_effort": "none",
         "api_key": None,
+        "output_token_source": "estimated_copro_completion_reserve",
     }
     first = preflight.evaluate(_endpoint(), **arguments)  # type: ignore[arg-type]
     second = preflight.evaluate(_endpoint(), **arguments)  # type: ignore[arg-type]
@@ -53,6 +54,8 @@ def test_exact_preflight_renders_then_tokenizes_and_caches() -> None:
     assert first.status == "fits"
     assert first.input_tokens == 6
     assert first.required_tokens == first.context_window == 10
+    assert first.output_token_source == "estimated_copro_completion_reserve"
+    assert first.as_dict()["output_token_source"] == "estimated_copro_completion_reserve"
     assert first.capability_source == "props"
     assert [url for url, _ in calls] == [
         "http://localhost:18080/props",

@@ -160,6 +160,8 @@ class MlflowRecorder:
                 experiment = self.client.get_experiment(binding.external_experiment_id)
                 if experiment is None or experiment.name != descriptor.name:
                     raise IntegrityError("bound MLflow experiment does not match the plan")
+                if experiment.lifecycle_stage == "deleted":
+                    self.client.restore_experiment(str(experiment.experiment_id))
                 return str(experiment.experiment_id)
             experiment = self.client.get_experiment_by_name(descriptor.name)
             if experiment is None:
@@ -172,6 +174,8 @@ class MlflowRecorder:
                     experiment_id = str(experiment.experiment_id)
             else:
                 experiment_id = str(experiment.experiment_id)
+                if experiment.lifecycle_stage == "deleted":
+                    self.client.restore_experiment(experiment_id)
             for key, value in sorted(descriptor.tags.items()):
                 if value is not None:
                     self.client.set_experiment_tag(experiment_id, key, _string_value(value))

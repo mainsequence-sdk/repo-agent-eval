@@ -35,3 +35,20 @@ def test_portable_adapter_accepts_single_output_json_array() -> None:
     assert _PortableStructuredAdapter().parse(CoproProposal, completion) == {
         "candidates": [_candidate()]
     }
+
+
+def test_portable_adapter_accepts_explanation_before_fenced_json_array() -> None:
+    candidate = {
+        "instruction": "Complete rewrite\n```yaml\nkey: value\n```",
+        "output_prefix": "",
+    }
+    completion = (
+        "I checked the constraints and prepared one complete candidate.\n\n"
+        "```json\n"
+        + json.dumps([candidate])
+        + "\n```"
+    )
+
+    assert _PortableStructuredAdapter().parse(CoproProposal, completion) == {
+        "candidates": [candidate]
+    }
