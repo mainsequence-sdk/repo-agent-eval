@@ -101,6 +101,70 @@ def _copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
 
 
+def _parallel_copro_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
+    repository = create_workspace(tmp_path / "workspace")
+    payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
+    payload["executors"]["remote-models"]["endpoints"][0]["max_concurrent_requests"] = 2
+    payload["experiments"]["optimize"]["optimizer"] = {
+        "strategy": "copro",
+        "targets": {"prompt": True, "skills": ["alpha", "beta"]},
+        "search": {"breadth": 2, "depth": 1, "init_temperature": 1.0},
+        "metric": {"name": "rubric_mean_score"},
+    }
+    payload["experiments"]["optimize"]["roles"]["optimizer"] = "optimizer"
+    payload["experiments"]["optimize"]["budget"] = {
+        "optimizer": {"model_calls": 20, "tokens": 100000},
+        "solver": {"model_calls": 500, "tokens": 500000},
+        "judge": {"model_calls": 500, "tokens": 500000},
+        "wall_seconds": 300,
+    }
+    repository.workspace_file.write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )
+    repository = WorkspaceRepository.from_file(repository.workspace_file)
+    lock, directory = create_snapshot(repository, create_checkout(tmp_path), tmp_path / "external")
+    authoring_hash = sha256_file(repository.case_authoring_path)
+    seed_cases_and_judge_validation(
+        repository,
+        authoring_instructions_hash=authoring_hash,
+        source_snapshot_hash=lock.content_hash,
+    )
+    splits = yaml.safe_load(repository.split_file.read_text(encoding="utf-8"))
+    for skill in ("alpha", "beta"):
+        created = 0
+        index = 0
+        while created < 4:
+            group = f"parallel-{skill}-{index}"
+            index += 1
+            if (
+                deterministic_group_split(
+                    group,
+                    seed="ms-agent-eval",
+                    train=0.7,
+                    test=0.2,
+                )
+                != "train"
+            ):
+                continue
+            created += 1
+            create_case(
+                repository.cases_root,
+                case_id=f"parallel-{skill}-{created}",
+                skill=skill,
+                group=group,
+                source_path=f"skills/{skill}/SKILL.md",
+                authoring_instructions_hash=authoring_hash,
+                source_snapshot_hash=lock.content_hash,
+            )
+            splits["groups"][group] = "train"
+    repository.split_file.write_text(
+        yaml.safe_dump(splits, sort_keys=False),
+        encoding="utf-8",
+    )
+    return compile_workspace(repository, snapshot=lock, snapshot_directory=directory)
+
+
 def _pilot_compiled(tmp_path: Path):  # type: ignore[no-untyped-def]
     repository = create_workspace(tmp_path / "workspace")
     catalog_file = repository.capability_catalog_path
@@ -397,6 +461,17 @@ def test_endpoint_pool_routes_a_real_run_with_bounded_parallelism(tmp_path: Path
     assert maximum["validation"] == 3
     assert calls["http://localhost:8000/v1"] > 0
     assert calls["http://localhost:8001/v1"] > 0
+    first_judge_start = next(
+        index
+        for index, event in enumerate(events)
+        if event.kind == "packet_started" and event.stage == "judge"
+    )
+    last_solve_completion = max(
+        index
+        for index, event in enumerate(events)
+        if event.kind == "packet_completed" and event.stage == "solve"
+    )
+    assert first_judge_start < last_solve_completion
     validation = next(
         status
         for status in runner.coordinator.ledger.list(run.run_id)
@@ -1292,6 +1367,100 @@ def test_copro_search_rewrites_prompt_and_skill_without_few_shot_demos(
         "copro-criterion-comparison",
         "expected-response-token-counts",
     } <= {item.name for item in projection.tables}
+
+
+def test_copro_freezes_prompt_then_schedules_skill_targets_together(tmp_path: Path) -> None:
+    compiled = _parallel_copro_compiled(tmp_path)
+    state_lock = Lock()
+    active_optimizer = 0
+    maximum_optimizer = 0
+
+    class ParallelCoproLM(FixedObservedLM):
+        def __init__(self, observer: ModelCallObserver, *, role: str) -> None:
+            super().__init__(observer, (), model=role)
+
+        def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal active_optimizer, maximum_optimizer
+            rendered = json.dumps(messages or prompt, ensure_ascii=False)
+            if self.model == "optimizer":
+                with state_lock:
+                    active_optimizer += 1
+                    maximum_optimizer = max(maximum_optimizer, active_optimizer)
+                try:
+                    time.sleep(0.03)
+                    response = (
+                        "[[ ## candidates ## ]]\n"
+                        '[{"instruction":"Optimized instruction.",'
+                        '"output_prefix":"Optimized response:"}]\n\n'
+                        "[[ ## completed ## ]]"
+                    )
+                finally:
+                    with state_lock:
+                        active_optimizer -= 1
+            elif self.model == "solver":
+                response = solver_response("optimized answer")
+            else:
+                score = 1.0 if "strong candidate" in rendered else 0.5
+                if any(
+                    marker in rendered
+                    for marker in (
+                        "incorrect candidate",
+                        "contradictory candidate",
+                        "adversarial candidate",
+                    )
+                ):
+                    score = 0.0
+                response = judge_response(score)
+            self.responses = [response]
+            return super().forward(prompt=prompt, messages=messages, **kwargs)
+
+    def factory(
+        model: ResolvedRoleModel,
+        observer: ModelCallObserver,
+        budget: BudgetLedger | None,
+        api_key: str | None,
+    ) -> FixedObservedLM:
+        assert api_key == "test-secret"
+        del budget
+        return ParallelCoproLM(observer, role=model.role)
+
+    runner = ExperimentRunner(compiled, lm_factory=factory)
+    run = runner.run("optimize", environment=_environment())
+
+    assert run.status == "completed", run.result
+    statuses = runner.coordinator.ledger.list(run.run_id)
+    skill_proposals = [
+        status.packet
+        for status in statuses
+        if status.packet.stage is StageKind.OPTIMIZE
+        and runner.coordinator._input(status.packet, "optimizer_context")["target_kind"] == "skill"
+        and runner.coordinator._input(status.packet, "optimizer_context")["scope"] == "final_search"
+    ]
+    assert len(skill_proposals) == 2
+    assert skill_proposals[0].dependencies == skill_proposals[1].dependencies
+    assert (
+        skill_proposals[0].work_spec["parent_bundle_hash"]
+        == skill_proposals[1].work_spec["parent_bundle_hash"]
+    )
+    assert maximum_optimizer == 2
+
+    skill_selections = {
+        status.packet.packet_id
+        for status in statuses
+        if status.packet.output_schema == "copro-selection-v1"
+        and runner.coordinator._input(status.packet, "candidate_selection")["target_kind"]
+        == "skill"
+        and runner.coordinator._input(status.packet, "candidate_selection")["scope"]
+        == "final_search"
+    }
+    final_fit = next(
+        status.packet
+        for status in statuses
+        if status.packet.stage is StageKind.FIT
+        and status.result is not None
+        and runner.coordinator.ledger.read_output(status.result)["phase"] == "final_fit"
+    )
+    assert skill_selections <= set(final_fit.dependencies)
 
 
 def test_optimization_rejects_judge_validation_on_held_out_case_before_lm_creation(

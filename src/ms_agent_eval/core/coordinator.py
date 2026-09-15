@@ -4,7 +4,7 @@ import json
 import random
 import tempfile
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
@@ -157,6 +157,19 @@ class _JudgeValidationVoteExecution:
     usage: Mapping[str, object]
     duration_seconds: float
     error: Exception | None
+
+
+@dataclass(frozen=True)
+class _CoproTargetPlan:
+    target_kind: str
+    target_id: str
+    training_cases: tuple[CaseDefinition, ...]
+    validation_cases: tuple[CaseDefinition, ...]
+    proposal: StagePacket
+    candidates: tuple[Mapping[str, object], ...]
+    current_candidate_id: str
+    fits: tuple[StagePacket, ...]
+    solves: tuple[StagePacket, ...]
 
 
 class _ExecutionSession:
@@ -1355,7 +1368,7 @@ class StageCoordinator:
                         else tuple(case for case in fitting_cases if case.skill == target_id)
                     ),
                     history=(),
-                    dependency=None,
+                    dependencies=(),
                 ),
             )
         if stage is StageKind.FIT:
@@ -1606,13 +1619,17 @@ class StageCoordinator:
                 cv_solves = self._cross_validation_solve_packets(
                     run_id, lock, judge_validation, cv_fits
                 )
-                pending = self._execute_all(cv_solves, lock, session)
-                if pending is not None:
-                    return self._blocked_progress(run_id, lock.configuration.id, pending)
                 if through == StageKind.SOLVE.value:
+                    pending = self._execute_all(cv_solves, lock, session)
+                    if pending is not None:
+                        return self._blocked_progress(run_id, lock.configuration.id, pending)
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.SOLVE)
-                cv_judges = self._judge_packets(run_id, lock, judge_validation, cv_solves)
-                pending = self._execute_all(cv_judges, lock, session)
+                cv_judges, pending = self._execute_solve_judge_pipeline(
+                    cv_solves,
+                    lock,
+                    session,
+                    judge_validation,
+                )
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
                 if through == StageKind.JUDGE.value:
@@ -1662,13 +1679,17 @@ class StageCoordinator:
                 evaluation_phase="pilot" if pilot else "test",
             )
 
-        pending = self._execute_all(solves, lock, session)
-        if pending is not None:
-            return self._blocked_progress(run_id, lock.configuration.id, pending)
         if through == StageKind.SOLVE.value:
+            pending = self._execute_all(solves, lock, session)
+            if pending is not None:
+                return self._blocked_progress(run_id, lock.configuration.id, pending)
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.SOLVE)
-        judges = self._judge_packets(run_id, lock, judge_validation, solves)
-        pending = self._execute_all(judges, lock, session)
+        judges, pending = self._execute_solve_judge_pipeline(
+            solves,
+            lock,
+            session,
+            judge_validation,
+        )
         if pending is not None:
             return self._blocked_progress(run_id, lock.configuration.id, pending)
         if through == StageKind.JUDGE.value:
@@ -1777,6 +1798,151 @@ class StageCoordinator:
         if failures:
             return min(failures, key=lambda item: item[0])[1]
         return None
+
+    def _execute_solve_judge_pipeline(
+        self,
+        solves: Sequence[StagePacket],
+        lock: ExperimentLock,
+        session: _ExecutionSession,
+        judge_validation: StagePacket,
+    ) -> tuple[tuple[StagePacket, ...], StagePacket | None]:
+        """Execute solve -> judge edges without a batch-wide barrier.
+
+        Endpoint pools remain the source of truth for capacity. This scheduler
+        limits each stage to its eligible capacity, gives newly-ready judgments
+        priority over additional solves, and creates a judgment only after its
+        individual solve has persisted.
+        """
+
+        if not solves:
+            return (), None
+        if any(packet.stage is not StageKind.SOLVE for packet in solves):
+            raise IntegrityError("solve/judge pipeline accepts only solve packets")
+
+        solve_executor = self._executor(solves[0])
+        if any(self._executor(packet).id != solve_executor.id for packet in solves):
+            raise IntegrityError("solve/judge pipeline requires one solve executor")
+        solve_capacity = self._stage_concurrency(
+            lock,
+            StageKind.SOLVE,
+            solve_executor,
+        )
+
+        judge_model = lock.models.get("judge") or resolve_stage_model(
+            self.workspace.repository.workspace,
+            StageKind.JUDGE.value,
+            experiment_id=lock.configuration.id,
+            role="judge",
+        )
+        if judge_model is None:
+            raise ConfigurationError("stage 'judge' has no model")
+        judge_executor = self.workspace.repository.workspace.executors[judge_model.executor_id]
+        judge_capacity = self._stage_concurrency(
+            lock,
+            StageKind.JUDGE,
+            judge_executor,
+        )
+        maximum_workers = min(
+            len(solves) * 2,
+            (
+                max(solve_capacity, judge_capacity)
+                if solve_executor.id == judge_executor.id
+                else solve_capacity + judge_capacity
+            ),
+        )
+        maximum_workers = max(1, maximum_workers)
+
+        total = len(solves)
+        next_solve = 0
+        active_solves = 0
+        active_judges = 0
+        ready_judges: deque[tuple[int, StagePacket]] = deque()
+        judges_by_position: dict[int, StagePacket] = {}
+        futures: dict[Future[bool], tuple[str, int, StagePacket]] = {}
+        failures: list[tuple[int, StagePacket]] = []
+        errors: list[tuple[int, Exception]] = []
+        stopped = False
+
+        def execute(
+            kind: str,
+            position: int,
+            packet: StagePacket,
+        ) -> bool:
+            worker_session = _ExecutionSession(self, lock, session.environment)
+            return self._ensure_executed(
+                packet,
+                lock,
+                worker_session,
+                position=position,
+                total=total,
+            )
+
+        def submit_ready(pool: ThreadPoolExecutor) -> None:
+            nonlocal next_solve, active_solves, active_judges
+            while (
+                not stopped
+                and ready_judges
+                and active_judges < judge_capacity
+                and len(futures) < maximum_workers
+            ):
+                position, packet = ready_judges.popleft()
+                future = pool.submit(execute, "judge", position, packet)
+                futures[future] = ("judge", position, packet)
+                active_judges += 1
+            while (
+                not stopped
+                and next_solve < total
+                and active_solves < solve_capacity
+                and len(futures) < maximum_workers
+            ):
+                position = next_solve + 1
+                packet = solves[next_solve]
+                next_solve += 1
+                future = pool.submit(execute, "solve", position, packet)
+                futures[future] = ("solve", position, packet)
+                active_solves += 1
+
+        with ThreadPoolExecutor(
+            max_workers=maximum_workers,
+            thread_name_prefix="ms-agent-eval-solve-judge",
+        ) as pool:
+            submit_ready(pool)
+            while futures:
+                completed, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    kind, position, packet = futures.pop(future)
+                    if kind == "solve":
+                        active_solves -= 1
+                    else:
+                        active_judges -= 1
+                    try:
+                        succeeded = future.result()
+                    except Exception as error:
+                        errors.append((position, error))
+                        stopped = True
+                        continue
+                    if not succeeded:
+                        failures.append((position, packet))
+                        stopped = True
+                        continue
+                    if kind == "solve" and not stopped:
+                        judge = self._judge_packets(
+                            packet.run_id,
+                            lock,
+                            judge_validation,
+                            (packet,),
+                        )[0]
+                        judges_by_position[position] = judge
+                        ready_judges.append((position, judge))
+                submit_ready(pool)
+
+        if errors:
+            raise min(errors, key=lambda item: item[0])[1]
+        if failures:
+            return (), min(failures, key=lambda item: item[0])[1]
+        if len(judges_by_position) != total:
+            raise IntegrityError("solve/judge pipeline did not materialize every judgment")
+        return tuple(judges_by_position[position] for position in range(1, total + 1)), None
 
     def _stage_concurrency(
         self,
@@ -3927,7 +4093,7 @@ class StageCoordinator:
         scope: str,
         fitting_cases: Sequence[object],
         history: Sequence[Mapping[str, object]],
-        dependency: StagePacket | None,
+        dependencies: Sequence[StagePacket],
     ) -> StagePacket:
         optimizer = lock.configuration.optimizer
         if not isinstance(optimizer, CoproConfiguration):
@@ -3977,10 +4143,10 @@ class StageCoordinator:
                 [(case.id, case.solver_view_hash) for case in fitting_cases]
             ),
         }
-        dependencies = [judge_validation.packet_id]
+        packet_dependencies = [judge_validation.packet_id]
         work_dependencies: list[str] = []
-        if dependency is not None:
-            dependencies.append(dependency.packet_id)
+        for dependency in dependencies:
+            packet_dependencies.append(dependency.packet_id)
             status = self.ledger.status(dependency.packet_id)
             if status.result is None:
                 raise IntegrityError("COPRO proposal dependency is not persisted")
@@ -4001,7 +4167,7 @@ class StageCoordinator:
                     "challenge",
                 ],
             },
-            dependencies=tuple(dependencies),
+            dependencies=tuple(packet_dependencies),
             output_schema="copro-proposal-v1",
             work_spec={
                 "strategy": "copro",
@@ -4202,100 +4368,217 @@ class StageCoordinator:
         if not isinstance(optimizer, CoproConfiguration):
             raise IntegrityError("COPRO search requires COPRO configuration")
         bundle: Mapping[str, object] = self._base_copro_bundle()
-        dependency = initial_dependency
+        dependencies: tuple[StagePacket, ...] = (
+            () if initial_dependency is None else (initial_dependency,)
+        )
         history_by_target: dict[str, list[Mapping[str, object]]] = {}
         for round_number in range(1, optimizer.depth + 1):
-            for target_kind, target_id in self._copro_targets(optimizer):
-                target_cases = (
-                    tuple(fitting_cases)
-                    if target_kind == "solver_prompt"
-                    else tuple(case for case in fitting_cases if case.skill == target_id)
-                )
-                if not target_cases:
-                    raise PreflightError(
-                        f"COPRO target {target_id!r} has no permitted training cases in {scope}"
+            targets = self._copro_targets(optimizer)
+            target_batches = (
+                tuple(target for target in targets if target[0] == "solver_prompt"),
+                tuple(target for target in targets if target[0] == "skill"),
+            )
+            for target_batch in target_batches:
+                if not target_batch:
+                    continue
+
+                # The prompt is selected first. All skills then start from the
+                # same frozen bundle and share the bounded execution queues.
+                frozen_bundle = bundle
+                target_inputs: list[tuple[str, str, tuple[CaseDefinition, ...], StagePacket]] = []
+                proposals: list[StagePacket] = []
+                for target_kind, target_id in target_batch:
+                    target_cases = (
+                        tuple(fitting_cases)
+                        if target_kind == "solver_prompt"
+                        else tuple(case for case in fitting_cases if case.skill == target_id)
                     )
-                proposal = self._copro_proposal_packet(
-                    run_id,
-                    lock,
-                    judge_validation,
-                    bundle=bundle,
-                    target_kind=target_kind,
-                    target_id=target_id,
-                    round_number=round_number,
-                    scope=scope,
-                    fitting_cases=target_cases,
-                    history=history_by_target.get(target_id, ()),
-                    dependency=dependency,
-                )
-                proposal = self._retry_legacy_copro_exhaustion(proposal)
-                if not self._ensure_executed(proposal, lock, session):
-                    return self._blocked_progress(run_id, lock.configuration.id, proposal)
-                candidates = self._copro_candidate_bundles(bundle, proposal)
-                current_id = _string(candidates[0].get("id"), "current candidate id")
-                fits = tuple(
-                    self._fit_packet(
+                    if not target_cases:
+                        raise PreflightError(
+                            f"COPRO target {target_id!r} has no permitted training cases in {scope}"
+                        )
+                    proposal = self._copro_proposal_packet(
                         run_id,
                         lock,
                         judge_validation,
-                        cases=target_cases,
-                        candidate=candidate,
-                        phase="copro_candidate",
-                        fold=fold,
-                        fold_assignment_hash=fold_assignment_hash,
-                        selection=proposal,
+                        bundle=frozen_bundle,
+                        target_kind=target_kind,
+                        target_id=target_id,
+                        round_number=round_number,
+                        scope=scope,
+                        fitting_cases=target_cases,
+                        history=history_by_target.get(target_id, ()),
+                        dependencies=dependencies,
                     )
-                    for candidate in candidates
-                )
-                pending = self._execute_all(fits, lock, session)
+                    proposal = self._retry_legacy_copro_exhaustion(proposal)
+                    proposals.append(proposal)
+                    target_inputs.append((target_kind, target_id, target_cases, proposal))
+
+                pending = self._execute_all(tuple(proposals), lock, session)
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
-                solves = tuple(
-                    solve
-                    for fit in fits
-                    for solve in self._solve_packets(
-                        run_id,
-                        lock,
-                        judge_validation,
-                        selected_case_ids=[case.id for case in target_cases],
-                        program_dependency=fit,
-                        evaluation_phase="copro_search",
-                        fold=fold,
+
+                prepared: list[
+                    tuple[
+                        str,
+                        str,
+                        tuple[CaseDefinition, ...],
+                        StagePacket,
+                        tuple[Mapping[str, object], ...],
+                        str,
+                        tuple[StagePacket, ...],
+                    ]
+                ] = []
+                all_fits: list[StagePacket] = []
+                for target_kind, target_id, target_cases, proposal in target_inputs:
+                    candidates = self._copro_candidate_bundles(frozen_bundle, proposal)
+                    current_id = _string(candidates[0].get("id"), "current candidate id")
+                    fits = tuple(
+                        self._fit_packet(
+                            run_id,
+                            lock,
+                            judge_validation,
+                            cases=target_cases,
+                            candidate=candidate,
+                            phase="copro_candidate",
+                            fold=fold,
+                            fold_assignment_hash=fold_assignment_hash,
+                            selection=proposal,
+                        )
+                        for candidate in candidates
                     )
-                )
-                pending = self._execute_all(solves, lock, session)
+                    all_fits.extend(fits)
+                    prepared.append(
+                        (
+                            target_kind,
+                            target_id,
+                            target_cases,
+                            proposal,
+                            candidates,
+                            current_id,
+                            fits,
+                        )
+                    )
+                pending = self._execute_all(tuple(all_fits), lock, session)
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
-                judges = self._judge_packets(run_id, lock, judge_validation, solves)
-                pending = self._execute_all(judges, lock, session)
-                if pending is not None:
-                    return self._blocked_progress(run_id, lock.configuration.id, pending)
-                selection = self._copro_selection_packet(
-                    run_id,
+
+                plans: list[_CoproTargetPlan] = []
+                all_solves: list[StagePacket] = []
+                for (
+                    target_kind,
+                    target_id,
+                    target_cases,
+                    proposal,
+                    candidates,
+                    current_id,
+                    fits,
+                ) in prepared:
+                    solves = tuple(
+                        solve
+                        for fit in fits
+                        for solve in self._solve_packets(
+                            run_id,
+                            lock,
+                            judge_validation,
+                            selected_case_ids=[case.id for case in target_cases],
+                            program_dependency=fit,
+                            evaluation_phase="copro_search",
+                            fold=fold,
+                        )
+                    )
+                    all_solves.extend(solves)
+                    plans.append(
+                        _CoproTargetPlan(
+                            target_kind=target_kind,
+                            target_id=target_id,
+                            training_cases=target_cases,
+                            validation_cases=target_cases,
+                            proposal=proposal,
+                            candidates=candidates,
+                            current_candidate_id=current_id,
+                            fits=fits,
+                            solves=solves,
+                        )
+                    )
+
+                all_judges, pending = self._execute_solve_judge_pipeline(
+                    tuple(all_solves),
                     lock,
+                    session,
                     judge_validation,
-                    proposal=proposal,
-                    judges=judges,
-                    candidates=candidates,
-                    expected_case_ids=[case.id for case in target_cases],
-                    target_kind=target_kind,
-                    target_id=target_id,
-                    round_number=round_number,
-                    scope=scope,
-                    current_candidate_id=current_id,
                 )
-                if not self._ensure_executed(selection, lock, session):
-                    return self._blocked_progress(run_id, lock.configuration.id, selection)
-                status = self.ledger.status(selection.packet_id)
-                assert status.result is not None
-                selected = _mapping(self.ledger.read_output(status.result), "COPRO selection")
-                bundle = _mapping(selected.get("selected_bundle"), "selected COPRO bundle")
-                history_by_target.setdefault(target_id, []).extend(
-                    _mapping(item, "COPRO candidate summary")
-                    for item in _list(selected.get("candidates"), "COPRO candidate summaries")
-                )
-                dependency = selection
-        if dependency is None:
+                if pending is not None:
+                    return self._blocked_progress(run_id, lock.configuration.id, pending)
+
+                selections: list[StagePacket] = []
+                judge_offset = 0
+                for plan in plans:
+                    target_judges = all_judges[judge_offset : judge_offset + len(plan.solves)]
+                    judge_offset += len(plan.solves)
+                    selections.append(
+                        self._copro_selection_packet(
+                            run_id,
+                            lock,
+                            judge_validation,
+                            proposal=plan.proposal,
+                            judges=target_judges,
+                            candidates=plan.candidates,
+                            expected_case_ids=[case.id for case in plan.validation_cases],
+                            target_kind=plan.target_kind,
+                            target_id=plan.target_id,
+                            round_number=round_number,
+                            scope=scope,
+                            current_candidate_id=plan.current_candidate_id,
+                        )
+                    )
+                pending = self._execute_all(tuple(selections), lock, session)
+                if pending is not None:
+                    return self._blocked_progress(run_id, lock.configuration.id, pending)
+
+                selected_by_target: dict[str, Mapping[str, object]] = {}
+                for plan, selection in zip(plans, selections, strict=True):
+                    status = self.ledger.status(selection.packet_id)
+                    assert status.result is not None
+                    selected = _mapping(
+                        self.ledger.read_output(status.result),
+                        "COPRO selection",
+                    )
+                    selected_by_target[plan.target_id] = _mapping(
+                        selected.get("selected_bundle"),
+                        "selected COPRO bundle",
+                    )
+                    history_by_target.setdefault(plan.target_id, []).extend(
+                        _mapping(item, "COPRO candidate summary")
+                        for item in _list(
+                            selected.get("candidates"),
+                            "COPRO candidate summaries",
+                        )
+                    )
+
+                if plans[0].target_kind == "solver_prompt":
+                    bundle = selected_by_target[plans[0].target_id]
+                else:
+                    merged_skills = dict(
+                        _mapping(frozen_bundle.get("skills", {}), "COPRO bundle skills")
+                    )
+                    for plan in plans:
+                        selected_skills = _mapping(
+                            selected_by_target[plan.target_id].get("skills", {}),
+                            "selected COPRO skills",
+                        )
+                        if plan.target_id in selected_skills:
+                            merged_skills[plan.target_id] = selected_skills[plan.target_id]
+                        else:
+                            merged_skills.pop(plan.target_id, None)
+                    bundle = {
+                        "instruction": frozen_bundle["instruction"],
+                        "output_prefix": frozen_bundle["output_prefix"],
+                        "skills": merged_skills,
+                    }
+                dependencies = tuple(selections)
+
+        if not dependencies:
             raise IntegrityError("COPRO search produced no selection")
         final_candidate = self._copro_candidate(bundle)
         final_fit = self._fit_packet(
@@ -4307,7 +4590,7 @@ class StageCoordinator:
             phase="final_fit" if fold is None else "cross_validation",
             fold=fold,
             fold_assignment_hash=fold_assignment_hash,
-            selection=dependency,
+            upstream_dependencies=dependencies,
         )
         if not self._ensure_executed(final_fit, lock, session):
             return self._blocked_progress(run_id, lock.configuration.id, final_fit)
@@ -4351,11 +4634,12 @@ class StageCoordinator:
                 evaluation_phase="cross_validation",
                 fold=fold,
             )
-            pending = self._execute_all(solves, lock, session)
-            if pending is not None:
-                return self._blocked_progress(run_id, lock.configuration.id, pending)
-            judges = self._judge_packets(run_id, lock, judge_validation, solves)
-            pending = self._execute_all(judges, lock, session)
+            judges, pending = self._execute_solve_judge_pipeline(
+                solves,
+                lock,
+                session,
+                judge_validation,
+            )
             if pending is not None:
                 return self._blocked_progress(run_id, lock.configuration.id, pending)
             held_out_judges.extend(judges)
@@ -4406,6 +4690,7 @@ class StageCoordinator:
         fold: int | None,
         fold_assignment_hash: str,
         selection: StagePacket | None = None,
+        upstream_dependencies: Sequence[StagePacket] = (),
     ) -> StagePacket:
         if isinstance(lock.configuration.optimizer, LabeledFewShotConfiguration):
             train = [
@@ -4433,12 +4718,17 @@ class StageCoordinator:
                 for case in cases
             ]
         dependencies = [judge_validation.packet_id]
-        work_dependencies: tuple[str, ...] = ()
+        work_dependencies: list[str] = []
         if selection is not None:
             dependencies.append(selection.packet_id)
             selection_status = self.ledger.status(selection.packet_id)
             assert selection_status.result is not None
-            work_dependencies = (selection_status.result.outputs[0].content_id,)
+            work_dependencies.append(selection_status.result.outputs[0].content_id)
+        for upstream in upstream_dependencies:
+            dependencies.append(upstream.packet_id)
+            upstream_status = self.ledger.status(upstream.packet_id)
+            assert upstream_status.result is not None
+            work_dependencies.append(upstream_status.result.outputs[0].content_id)
         return self._packet(
             run_id,
             lock,
@@ -4459,8 +4749,9 @@ class StageCoordinator:
                 "fold": fold,
                 "fold_assignment_hash": fold_assignment_hash,
                 "selection": work_dependencies[0] if work_dependencies else None,
+                "additional_selections": work_dependencies[1:],
             },
-            work_dependencies=work_dependencies,
+            work_dependencies=tuple(work_dependencies),
         )
 
     def _cross_validation_fit_packets(

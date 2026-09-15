@@ -36,6 +36,7 @@ the frozen original and optimized programs on the same untouched test cases.
 | Build coverage, validate the judge, or interpret a run | [Evaluation](evaluation/index.md) |
 | Configure an API endpoint or isolated Codex execution | [Execution](execution/index.md) |
 | Understand components, storage, and security boundaries | [Architecture](architecture/index.md) |
+| Review designs that are explicitly not implemented | [Proposed changes](proposed_changes/index.md) |
 | Look up stable rules and terminology | [Reference](reference/index.md) |
 
 ## Documentation sections

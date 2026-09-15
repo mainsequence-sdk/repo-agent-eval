@@ -39,6 +39,27 @@ stage nodes; deterministic selection feeds the next target or round. Skill
 rewrites become compiled overlays and never modify the source skill. The final
 program contains no demonstrations.
 
+Execution follows ready DAG edges rather than a solve-wide then judge-wide
+barrier. As soon as one candidate solve persists, its judge packet becomes
+eligible and receives priority in the shared endpoint-capacity scheduler; the
+coordinator does not wait for every candidate solve. The global prompt is
+selected first in each round. Its resulting bundle is frozen while all
+eligible skill targets propose, solve, and judge candidates through the same
+bounded work queues. Each skill winner contributes only its own overlay to the
+merged bundle, so independent skill selections cannot overwrite one another.
+
+```text
+global prompt proposal -> solve -> judge -> select -> frozen prompt
+                                                     |
+                   +---------------------------------+------------------+
+                   |                                 |                  |
+             skill A solve                     skill B solve      skill C solve
+                   |                                 |                  |
+             skill A judge                     skill B judge      skill C judge
+                   |                                 |                  |
+                   +---------------- merge selected overlays ----------+
+```
+
 COPRO proposal breadth is a maximum, not a reason to invalidate a run. Model
 output is normalized in return order: unchanged proposals, repeated proposals,
 and proposals beyond the configured breadth are removed. A round continues
