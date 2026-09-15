@@ -1,25 +1,29 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from threading import Lock
 from typing import Protocol
 
 from .errors import ConfigurationError, IntegrityError, RecordingError, ResolutionError
 from .hashing import canonical_json_bytes, content_hash, json_value
 from .lifecycle import RunLifecycleState
 from .models import ArtifactReference
+from .recorder_queue import (
+    ClaimedProjectionIntent,
+    FilesystemRecorderQueue,
+    ProjectionIntent,
+    ProjectionIntentKind,
+)
 from .storage import FilesystemArtifactStore
 from .workspace import (
     RecorderConfiguration,
+    RecorderQueueConfiguration,
     RecordingConfiguration,
 )
 
@@ -29,10 +33,9 @@ RECORDING_PLAN_SCHEMA_VERSION = 1
 
 class RecordingStatus(str, Enum):
     DISABLED = "disabled"
-    PENDING = "pending"
-    SYNCING = "syncing"
-    SYNCED = "synced"
-    PARTIALLY_SYNCED = "partially_synced"
+    QUEUED = "queued"
+    PROJECTING = "projecting"
+    PUBLISHED = "published"
     FAILED = "failed"
 
 
@@ -292,6 +295,70 @@ class RecordingPlan:
         return value
 
 
+@dataclass(frozen=True)
+class ProjectionBatch:
+    schema_version: int
+    batch_id: str
+    plan_id: str
+    source_sequence: int
+    recorder_config_hash: str
+    from_sequence_exclusive: int
+    through_sequence_inclusive: int
+    phase: str
+    experiment: ExperimentDescriptor
+    run: RunDescriptor
+    scopes: tuple[ScopeDescriptor, ...]
+    metrics: tuple[MetricPoint, ...]
+    tables: tuple[TableArtifact, ...]
+    artifacts: tuple[ArtifactDescriptor, ...]
+    traces: tuple[TraceDescriptor, ...]
+    omissions: tuple[Mapping[str, object], ...]
+
+    @classmethod
+    def from_plan(
+        cls,
+        plan: RecordingPlan,
+        *,
+        from_sequence_exclusive: int,
+        through_sequence_inclusive: int,
+        phase: str,
+        delivered_items: set[str],
+    ) -> ProjectionBatch:
+        metrics = tuple(item for item in plan.metrics if item.id not in delivered_items)
+        tables = tuple(item for item in plan.tables if item.id not in delivered_items)
+        artifacts = tuple(item for item in plan.artifacts if item.id not in delivered_items)
+        traces = tuple(item for item in plan.traces if item.id not in delivered_items)
+        identity = {
+            "schema_version": 1,
+            "plan_id": plan.plan_id,
+            "from_sequence_exclusive": from_sequence_exclusive,
+            "through_sequence_inclusive": through_sequence_inclusive,
+            "phase": phase,
+            "metrics": tuple(item.id for item in metrics),
+            "tables": tuple(item.id for item in tables),
+            "artifacts": tuple(item.id for item in artifacts),
+            "traces": tuple(item.id for item in traces),
+        }
+        return cls(
+            1,
+            content_hash(identity),
+            plan.plan_id,
+            plan.source_sequence,
+            plan.recorder_config_hash,
+            from_sequence_exclusive,
+            through_sequence_inclusive,
+            phase,
+            plan.experiment,
+            plan.run,
+            plan.scopes,
+            metrics,
+            tables,
+            artifacts,
+            traces,
+            plan.omissions,
+        )
+
+
 @dataclass
 class ExternalBinding:
     schema_version: int
@@ -383,7 +450,7 @@ class ExperimentRecorder(Protocol):
         binding: ExternalBinding,
     ) -> str: ...
 
-    def sync(self, plan: RecordingPlan, binding: ExternalBinding) -> Mapping[str, object]: ...
+    def apply(self, batch: ProjectionBatch, binding: ExternalBinding) -> Mapping[str, object]: ...
 
     def finalize(
         self,
@@ -396,14 +463,15 @@ class ExperimentRecorder(Protocol):
 RecorderFactory = Callable[[RecorderConfiguration, Mapping[str, str]], ExperimentRecorder]
 
 
-class RecorderService:
-    """Project canonical evidence through one retryable recorder destination."""
+class RecorderWorkerService:
+    """Queue recorder intents and project them only from an explicit worker."""
 
     def __init__(
         self,
         store: FilesystemArtifactStore,
         recording: RecordingConfiguration,
         configuration: RecorderConfiguration,
+        queue_configuration: RecorderQueueConfiguration,
         environment: Mapping[str, str],
         *,
         adapter_factory: RecorderFactory | None = None,
@@ -411,6 +479,7 @@ class RecorderService:
         self.store = store
         self.recording = recording
         self.configuration = configuration
+        self.queue_configuration = queue_configuration
         self.environment = environment
         self.adapter_factory = adapter_factory or _default_recorder_factory
         self.root = (
@@ -420,181 +489,302 @@ class RecorderService:
             / configuration.configuration_hash.removeprefix("sha256:")
         )
         self.root.mkdir(parents=True, exist_ok=True)
-        self._executor = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="ms-agent-eval-recorder")
-            if recording.enabled
-            else None
+        self.queue = FilesystemRecorderQueue(
+            store.data_root / queue_configuration.path / queue_configuration.id,
+            live_coalescing=queue_configuration.live_coalescing,
+            lease_seconds=queue_configuration.lease_seconds,
+            max_attempts=queue_configuration.max_attempts,
         )
-        self._state_lock = Lock()
-        self._dirty: set[str] = set()
-        self._futures: dict[str, Future[Mapping[str, object]]] = {}
 
-    def configure_environment(self, environment: Mapping[str, str]) -> None:
-        """Set process-local recorder credentials before scheduling delivery."""
+    def request_sync(self, run_id: str) -> Mapping[str, object] | None:
+        """Enqueue a coalescible live intent without building a recording plan."""
 
-        with self._state_lock:
-            if any(not future.done() for future in self._futures.values()):
-                raise RecordingError("recorder environment cannot change while delivery is active")
-            self.environment = environment
-
-    def request_sync(self, run_id: str) -> None:
-        """Coalesce live checkpoints onto one bounded recorder worker."""
-
-        if not self.recording.enabled or self._executor is None:
-            return
-        with self._state_lock:
-            self._dirty.add(run_id)
-            future = self._futures.get(run_id)
-            if future is None or future.done():
-                self._futures[run_id] = self._executor.submit(self._drain, run_id)
-
-    def flush(self, run_id: str) -> Mapping[str, object]:
         if not self.recording.enabled:
-            return self.status(run_id)
-        self.request_sync(run_id)
-        while True:
-            with self._state_lock:
-                future = self._futures.get(run_id)
-            if future is None:
-                return self.status(run_id)
-            future.result()
-            with self._state_lock:
-                if run_id not in self._dirty:
-                    return self.status(run_id)
+            return None
+        if not self.recording.projection.live.enabled:
+            return None
+        return self.enqueue(
+            run_id,
+            kind=ProjectionIntentKind.LIVE_PROGRESS,
+            minimum_interval_seconds=self.recording.projection.live.minimum_interval_seconds,
+        )
 
-    def _drain(self, run_id: str) -> Mapping[str, object]:
-        latest: Mapping[str, object] = {}
-        while True:
-            with self._state_lock:
-                if run_id not in self._dirty:
-                    self._futures.pop(run_id, None)
-                    return latest
-                self._dirty.remove(run_id)
-            latest = self.sync_run(run_id)
+    def enqueue_stage_boundary(
+        self, run_id: str, stage: str, boundary_id: str
+    ) -> Mapping[str, object]:
+        return self.enqueue(
+            run_id,
+            kind=ProjectionIntentKind.STAGE_BOUNDARY,
+            stage=stage,
+            boundary_id=boundary_id,
+        )
 
-    def sync_run(
+    def enqueue_finalization(self, run_id: str) -> Mapping[str, object]:
+        return self.enqueue(run_id, kind=ProjectionIntentKind.FINALIZATION)
+
+    def enqueue(
         self,
         run_id: str,
         *,
-        raise_on_error: bool = False,
+        kind: ProjectionIntentKind,
+        stage: str | None = None,
+        boundary_id: str | None = None,
+        minimum_interval_seconds: int = 0,
     ) -> Mapping[str, object]:
+        from .lifecycle import RunLifecycleLedger
+        from .stages import StageLedger
+
+        if not self.recording.enabled:
+            return self.status(run_id)
+        ledger = StageLedger(self.store)
+        run = ledger.load_run(run_id)
+        target_sequence = ledger.latest_transition_sequence(run_id) + RunLifecycleLedger(
+            self.store
+        ).latest_sequence(run_id)
+        priority = {
+            ProjectionIntentKind.LIVE_PROGRESS: 10,
+            ProjectionIntentKind.STAGE_BOUNDARY: 50,
+            ProjectionIntentKind.BACKFILL: 60,
+            ProjectionIntentKind.RECONCILE: 80,
+            ProjectionIntentKind.FINALIZATION: 100,
+        }[kind]
+        intent = ProjectionIntent.create(
+            recorder_id=self.configuration.id,
+            recorder_config_hash=self.configuration.configuration_hash,
+            workspace_id=_string(run.get("workspace_id"), "run workspace_id"),
+            run_id=run_id,
+            experiment_revision_id=_string(
+                run.get("experiment_revision_id"), "run experiment_revision_id"
+            ),
+            kind=kind,
+            target_sequence=target_sequence,
+            priority=priority,
+            stage=stage,
+            boundary_id=boundary_id,
+        )
+        return {
+            **dict(
+                self.queue.enqueue(
+                    intent,
+                    minimum_interval_seconds=minimum_interval_seconds,
+                )
+            ),
+            "kind": kind.value,
+            "recorder": self.configuration.id,
+        }
+
+    def project_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str = "one-shot-projector",
+        raise_on_error: bool = True,
+    ) -> Mapping[str, object]:
+        from .lifecycle import RunLifecycleLedger, RunLifecycleState
+
+        current = RunLifecycleLedger(self.store).current(run_id)
+        kind = (
+            ProjectionIntentKind.FINALIZATION
+            if current is not None
+            and current.state
+            in {
+                RunLifecycleState.COMPLETED,
+                RunLifecycleState.FAILED,
+                RunLifecycleState.CANCELLED,
+            }
+            else ProjectionIntentKind.BACKFILL
+        )
+        self.enqueue(run_id, kind=kind)
+        while True:
+            result = self.work_once(
+                worker_id=worker_id,
+                run_id=run_id,
+                raise_on_error=raise_on_error,
+            )
+            if result is None:
+                break
+        return self.status(run_id)
+
+    def work_once(
+        self,
+        *,
+        worker_id: str,
+        run_id: str | None = None,
+        raise_on_error: bool = False,
+    ) -> Mapping[str, object] | None:
+        claim = self.queue.claim(worker_id=worker_id, run_id=run_id)
+        if claim is None:
+            return None
+        try:
+            receipt = self._project_claim(claim)
+            self.queue.acknowledge(claim, receipt)
+            return receipt
+        except Exception as error:
+            message = self._redacted_error(error)
+            state = self.queue.retry(
+                claim,
+                error_kind=type(error).__name__.lower(),
+                message=message,
+                delay_seconds=min(60.0, float(2 ** min(claim.attempts - 1, 6))),
+            )
+            if raise_on_error:
+                if isinstance(error, RecordingError):
+                    raise
+                raise RecordingError(
+                    f"recorder {self.configuration.id!r} projection failed: {error}"
+                ) from error
+            return {
+                "status": state,
+                "run_id": claim.intent.run_id,
+                "intent_id": claim.intent.intent_id,
+                "error_kind": type(error).__name__.lower(),
+                "message": message,
+            }
+
+    def work_until_idle(
+        self,
+        *,
+        worker_id: str,
+        run_id: str | None = None,
+        maximum_items: int | None = None,
+        raise_on_error: bool = False,
+    ) -> tuple[Mapping[str, object], ...]:
+        results = []
+        while maximum_items is None or len(results) < maximum_items:
+            result = self.work_once(
+                worker_id=worker_id,
+                run_id=run_id,
+                raise_on_error=raise_on_error,
+            )
+            if result is None:
+                break
+            results.append(result)
+        return tuple(results)
+
+    def reconcile_queue(self) -> Mapping[str, object]:
+        """Repair evidence committed before its projection intent was published."""
+
+        from .lifecycle import RunLifecycleLedger, RunLifecycleState
+        from .reporting import list_run_ids
+        from .stages import StageLedger
+
+        if not self.recording.enabled:
+            return {"status": "disabled", "enqueued": 0}
+        ledger = StageLedger(self.store)
+        lifecycle = RunLifecycleLedger(self.store)
+        enqueued = []
+        for run_id in list_run_ids(ledger):
+            high_water = ledger.latest_transition_sequence(run_id) + lifecycle.latest_sequence(
+                run_id
+            )
+            cursor = self.queue.cursor(self.configuration.configuration_hash, run_id)
+            queue_status = self.queue.status(
+                recorder_config_hash=self.configuration.configuration_hash,
+                run_id=run_id,
+            )
+            current = lifecycle.current(run_id)
+            terminal = current is not None and current.state in {
+                RunLifecycleState.COMPLETED,
+                RunLifecycleState.FAILED,
+                RunLifecycleState.CANCELLED,
+            }
+            final_missing = terminal and (
+                cursor.finalized_through is None or cursor.finalized_through < high_water
+            )
+            delta_missing = cursor.projected_through < high_water
+            if not (final_missing or delta_missing):
+                continue
+            if int(queue_status["pending"]) or int(queue_status["leased"]):
+                continue
+            kind = (
+                ProjectionIntentKind.FINALIZATION
+                if terminal
+                else ProjectionIntentKind.RECONCILE
+            )
+            enqueued.append(self.enqueue(run_id, kind=kind))
+        return {"status": "reconciled", "enqueued": len(enqueued), "intents": enqueued}
+
+    def _project_claim(self, claim: ClaimedProjectionIntent) -> Mapping[str, object]:
+        from .lifecycle import RunLifecycleState
         from .recording_projection import RecorderProjector
 
-        run_root = self._run_root(run_id)
-        run_root.mkdir(parents=True, exist_ok=True)
-        lock_path = run_root / "sync.lock"
-        with lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            binding: ExternalBinding | None = None
-            adapter: ExperimentRecorder | None = None
-            event_id = content_hash(
-                {
-                    "run_id": run_id,
-                    "recorder_config_hash": self.configuration.configuration_hash,
-                    "operation": "project",
-                }
-            )
-            try:
-                try:
-                    projector = RecorderProjector(
-                        self.store,
-                        recorder=self.configuration,
-                        recording=self.recording,
-                    )
-                    plan = projector.build(run_id)
-                    event_id = plan.plan_id
-                    event_path = (
-                        run_root / "events" / f"{plan.plan_id.removeprefix('sha256:')}.json"
-                    )
-                    receipt_path = run_root / "receipts" / event_path.name
-                    self._write_event(event_path, plan)
-                    if receipt_path.is_file():
-                        return self.status(run_id)
+        intent = claim.intent
+        cursor = self.queue.cursor(intent.recorder_config_hash, intent.run_id)
+        finalized = (
+            intent.kind is ProjectionIntentKind.FINALIZATION
+            and cursor.finalized_through is not None
+            and cursor.finalized_through >= intent.target_sequence
+        )
+        if cursor.projected_through >= intent.target_sequence and (
+            intent.kind is not ProjectionIntentKind.FINALIZATION or finalized
+        ):
+            return {
+                "schema_version": 1,
+                "status": "already_projected",
+                "intent_id": intent.intent_id,
+                "run_id": intent.run_id,
+                "projected_through": cursor.projected_through,
+            }
 
-                    binding = self._load_binding(run_id)
-                    assert binding is not None
-                    adapter = self.adapter_factory(self.configuration, self.environment)
-                    bind_store = getattr(adapter, "bind_artifact_store", None)
-                    if callable(bind_store):
-                        bind_store(self.store)
-                    binding.external_experiment_id = adapter.ensure_experiment(
-                        plan.experiment, binding
-                    )
-                    self._write_binding(run_id, binding)
-                    binding.external_run_id = adapter.ensure_run(plan.run, binding)
-                    self._write_binding(run_id, binding)
-                    terminal_state = (
-                        RunLifecycleState(plan.run.status)
-                        if plan.run.status
-                        in {
-                            RunLifecycleState.COMPLETED.value,
-                            RunLifecycleState.FAILED.value,
-                            RunLifecycleState.CANCELLED.value,
-                        }
-                        else None
-                    )
-                    try:
-                        details = adapter.sync(plan, binding)
-                    except Exception:
-                        # Terminal lifecycle state is canonical and must reach the
-                        # external recorder even if a table, trace, or artifact
-                        # fails later in the same projection attempt.
-                        if terminal_state is not None:
-                            try:
-                                adapter.finalize(
-                                    binding,
-                                    terminal_state,
-                                    plan.run.end_time_ms or plan.run.start_time_ms,
-                                )
-                            except Exception:
-                                pass
-                        raise
-                    if terminal_state is not None:
-                        terminal = adapter.finalize(
-                            binding,
-                            terminal_state,
-                            plan.run.end_time_ms or plan.run.start_time_ms,
-                        )
-                        details = {**dict(details), "finalization": dict(terminal)}
-                    comparison_plan = projector.build_comparison(run_id)
-                    if comparison_plan is not None:
-                        details = {
-                            **dict(details),
-                            "model_comparison": self._sync_comparison(
-                                adapter,
-                                comparison_plan,
-                            ),
-                        }
-                    self._write_binding(run_id, binding)
-                    receipt = {
-                        "schema_version": 1,
-                        "event_id": plan.plan_id,
-                        "run_id": run_id,
-                        "recorder_id": self.configuration.id,
-                        "recorder_config_hash": self.configuration.configuration_hash,
-                        "status": "synced",
-                        "recorded_at": _timestamp(),
-                        "external_experiment_id": binding.external_experiment_id,
-                        "external_run_id": binding.external_run_id,
-                        "details": dict(details),
-                    }
-                    _atomic_json(receipt_path, receipt)
-                    self._supersede_older_events(run_root, plan.plan_id)
-                    return self.status(run_id)
-                except Exception as error:
-                    if binding is not None:
-                        self._write_binding(run_id, binding)
-                    self._write_error(run_root, event_id, error)
-                    if raise_on_error:
-                        if isinstance(error, RecordingError):
-                            raise
-                        raise RecordingError(
-                            f"recorder {self.configuration.id!r} sync failed: {error}"
-                        ) from error
-                    return self.status(run_id)
-            finally:
-                del adapter
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        projector = RecorderProjector(
+            self.store,
+            recorder=self.configuration,
+            recording=self.recording,
+        )
+        plan = projector.build(intent.run_id, phase=intent.kind.value)
+        binding = self._load_binding(intent.run_id)
+        assert binding is not None
+        adapter = self.adapter_factory(self.configuration, self.environment)
+        bind_store = getattr(adapter, "bind_artifact_store", None)
+        if callable(bind_store):
+            bind_store(self.store)
+        binding.external_experiment_id = adapter.ensure_experiment(plan.experiment, binding)
+        self._write_binding(intent.run_id, binding)
+        binding.external_run_id = adapter.ensure_run(plan.run, binding)
+        self._write_binding(intent.run_id, binding)
+        batch = ProjectionBatch.from_plan(
+            plan,
+            from_sequence_exclusive=cursor.projected_through,
+            through_sequence_inclusive=intent.target_sequence,
+            phase=intent.kind.value,
+            delivered_items=binding.delivered_items,
+        )
+        details = dict(adapter.apply(batch, binding))
+        if intent.kind is ProjectionIntentKind.FINALIZATION:
+            terminal_state = RunLifecycleState(plan.run.status)
+            if terminal_state not in {
+                RunLifecycleState.COMPLETED,
+                RunLifecycleState.FAILED,
+                RunLifecycleState.CANCELLED,
+            }:
+                raise RecordingError("finalization intent references a non-terminal run")
+            details["finalization"] = dict(
+                adapter.finalize(
+                    binding,
+                    terminal_state,
+                    plan.run.end_time_ms or plan.run.start_time_ms,
+                )
+            )
+            comparison_plan = projector.build_comparison(intent.run_id)
+            if comparison_plan is not None:
+                details["model_comparison"] = self._sync_comparison(adapter, comparison_plan)
+        self._write_binding(intent.run_id, binding)
+        advanced = cursor.advance(intent)
+        self.queue.write_cursor(advanced)
+        return {
+            "schema_version": 1,
+            "status": "projected",
+            "intent_id": intent.intent_id,
+            "kind": intent.kind.value,
+            "run_id": intent.run_id,
+            "plan_id": plan.plan_id,
+            "batch_id": batch.batch_id,
+            "from_sequence_exclusive": cursor.projected_through,
+            "through_sequence_inclusive": advanced.projected_through,
+            "external_experiment_id": binding.external_experiment_id,
+            "external_run_id": binding.external_run_id,
+            "details": details,
+        }
 
     def doctor(self, *, write_test: bool = True) -> Mapping[str, object]:
         try:
@@ -618,56 +808,68 @@ class RecorderService:
         }
 
     def status(self, run_id: str) -> Mapping[str, object]:
-        if not self.recording.enabled and not self._run_root(run_id).exists():
+        if not self.recording.enabled:
             return {
                 "schema_version": 1,
                 "run_id": run_id,
                 "recorder": self.configuration.id,
                 "recorder_config_hash": self.configuration.configuration_hash,
                 "status": RecordingStatus.DISABLED.value,
-                "pending_events": 0,
-                "synced_events": 0,
+                "queue": {
+                    "pending": 0,
+                    "leased": 0,
+                    "acknowledged": 0,
+                    "dead_letter": 0,
+                },
             }
-        root = self._run_root(run_id)
-        events = tuple(sorted((root / "events").glob("*.json"))) if root.exists() else ()
-        receipts = (
-            {path.name for path in (root / "receipts").glob("*.json")}
-            if (root / "receipts").is_dir()
-            else set()
+        from .lifecycle import RunLifecycleLedger
+        from .stages import StageLedger
+
+        ledger = StageLedger(self.store)
+        ledger.load_run(run_id)
+        high_water = ledger.latest_transition_sequence(run_id) + RunLifecycleLedger(
+            self.store
+        ).latest_sequence(run_id)
+        queue_status = self.queue.status(
+            recorder_config_hash=self.configuration.configuration_hash,
+            run_id=run_id,
         )
-        pending = [path for path in events if path.name not in receipts]
-        errors = tuple(sorted((root / "errors").glob("*.json"))) if root.exists() else ()
+        cursor = self.queue.cursor(self.configuration.configuration_hash, run_id)
         binding = self._load_binding(run_id, required=False)
-        latest_error: Mapping[str, object] | None = None
-        if errors:
-            try:
-                latest_error = _load_mapping(errors[-1], "recorder error")
-            except (IntegrityError, ResolutionError):
-                latest_error = {"message": "recorder error record is unreadable"}
-        if pending and receipts:
-            state = RecordingStatus.PARTIALLY_SYNCED
-        elif pending and latest_error is not None:
+        if int(queue_status["dead_letter"]) > 0:
             state = RecordingStatus.FAILED
-        elif pending:
-            state = RecordingStatus.PENDING
-        elif latest_error is not None and not events:
-            state = RecordingStatus.FAILED
-        elif events:
-            state = RecordingStatus.SYNCED
+        elif int(queue_status["leased"]) > 0:
+            state = RecordingStatus.PROJECTING
+        elif int(queue_status["pending"]) > 0 or cursor.projected_through < high_water:
+            state = RecordingStatus.QUEUED
+        elif cursor.finalized_through is not None:
+            state = RecordingStatus.PUBLISHED
         else:
-            state = RecordingStatus.PENDING
+            state = RecordingStatus.QUEUED
         return {
             "schema_version": 1,
             "run_id": run_id,
             "recorder": self.configuration.id,
             "recorder_config_hash": self.configuration.configuration_hash,
             "status": state.value,
-            "pending_events": len(pending),
-            "synced_events": len(receipts),
+            "canonical_high_water": high_water,
+            "projected_through": cursor.projected_through,
+            "finalized_through": cursor.finalized_through,
+            "projection_lag": max(0, high_water - cursor.projected_through),
+            "queue": dict(queue_status),
             "external_experiment_id": (None if binding is None else binding.external_experiment_id),
             "external_run_id": None if binding is None else binding.external_run_id,
-            "last_error": None if latest_error is None else dict(latest_error),
         }
+
+    def _redacted_error(self, error: Exception) -> str:
+        message = str(error)
+        for name, value in self.environment.items():
+            if (
+                any(marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+                and value
+            ):
+                message = message.replace(value, "[REDACTED]")
+        return message
 
     def _run_root(self, run_id: str) -> Path:
         return self.root / "runs" / _safe_component(run_id, "run id")
@@ -714,7 +916,14 @@ class RecorderService:
         _atomic_json(binding_path, binding.as_dict())
         binding.external_run_id = adapter.ensure_run(plan.run, binding)
         _atomic_json(binding_path, binding.as_dict())
-        details = adapter.sync(plan, binding)
+        batch = ProjectionBatch.from_plan(
+            plan,
+            from_sequence_exclusive=0,
+            through_sequence_inclusive=plan.source_sequence,
+            phase=ProjectionIntentKind.FINALIZATION.value,
+            delivered_items=binding.delivered_items,
+        )
+        details = adapter.apply(batch, binding)
         terminal = adapter.finalize(
             binding,
             RunLifecycleState.COMPLETED,
@@ -783,75 +992,33 @@ class RecorderService:
             return
         _atomic_json(path, payload, replace=False)
 
-    def _write_error(self, root: Path, event_id: str, error: Exception) -> None:
-        errors = root / "errors"
-        errors.mkdir(parents=True, exist_ok=True)
-        message = str(error)
-        for name, value in self.environment.items():
-            if (
-                any(marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
-                and value
-            ):
-                message = message.replace(value, "[REDACTED]")
-        identity = {
-            "schema_version": 1,
-            "event_id": event_id,
-            "kind": type(error).__name__.lower(),
-            "message": message,
-            "at": _timestamp(),
-        }
-        digest = content_hash(identity).removeprefix("sha256:")
-        _atomic_json(errors / f"{digest}.json", identity, replace=False)
 
-    @staticmethod
-    def _supersede_older_events(root: Path, current_event_id: str) -> None:
-        events = root / "events"
-        receipts = root / "receipts"
-        receipts.mkdir(parents=True, exist_ok=True)
-        for path in sorted(events.glob("*.json")):
-            event = _load_mapping(path, "recorder event")
-            event_id = event.get("event_id")
-            if event_id == current_event_id or (receipts / path.name).exists():
-                continue
-            _atomic_json(
-                receipts / path.name,
-                {
-                    "schema_version": 1,
-                    "event_id": event_id,
-                    "status": "superseded",
-                    "superseded_by": current_event_id,
-                    "recorded_at": _timestamp(),
-                },
-                replace=False,
-            )
-
-
-def load_recording_plan_event(path: Path) -> RecordingPlan:
-    event = _load_mapping(path, "recorder event")
-    plan = RecordingPlan.from_mapping(_mapping(event.get("plan"), "recorder event plan"))
-    if event.get("event_id") != plan.plan_id:
-        raise IntegrityError("recorder event and plan identities disagree")
-    return plan
-
-
-def recorder_service(
+def recorder_worker_service(
     store: FilesystemArtifactStore,
     *,
     recording: RecordingConfiguration,
     recorders: Mapping[str, RecorderConfiguration],
+    recorder_queues: Mapping[str, RecorderQueueConfiguration],
     environment: Mapping[str, str],
     adapter_factory: RecorderFactory | None = None,
-) -> RecorderService:
+) -> RecorderWorkerService:
     try:
         configuration = recorders[recording.recorder]
     except KeyError as error:
         raise ConfigurationError(
             f"recording references unknown recorder {recording.recorder!r}"
         ) from error
-    return RecorderService(
+    try:
+        queue_configuration = recorder_queues[recording.queue]
+    except KeyError as error:
+        raise ConfigurationError(
+            f"recording references unknown recorder queue {recording.queue!r}"
+        ) from error
+    return RecorderWorkerService(
         store,
         recording,
         configuration,
+        queue_configuration,
         environment,
         adapter_factory=adapter_factory,
     )

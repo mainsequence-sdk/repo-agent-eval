@@ -171,6 +171,12 @@ class RunLifecycleLedger:
         events = self.list(run_id)
         return events[-1] if events else None
 
+    def latest_sequence(self, run_id: str) -> int:
+        """Return the current lifecycle high-water mark."""
+
+        current = self.current(run_id)
+        return 0 if current is None else current.sequence
+
     def _require_run(self, run_id: str) -> None:
         path = self.store.manifest_root / "runs" / run_id / "run.json"
         if not path.is_file() or path.is_symlink():

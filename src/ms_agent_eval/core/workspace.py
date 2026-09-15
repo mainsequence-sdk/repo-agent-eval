@@ -28,7 +28,7 @@ from .models import (
 )
 
 
-WORKSPACE_SCHEMA_VERSION = 15
+WORKSPACE_SCHEMA_VERSION = 16
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ENVIRONMENT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -222,11 +222,6 @@ class ExperimentMode(str, Enum):
     OPTIMIZE = "optimize"
 
 
-class RecordingMode(str, Enum):
-    FINALIZE_ONLY = "finalize_only"
-    LIVE_AND_FINALIZE = "live_and_finalize"
-
-
 class RecordingFailurePolicy(str, Enum):
     CONTINUE = "continue"
 
@@ -240,6 +235,197 @@ class RecordingContentPolicy(str, Enum):
     HASHES_ONLY = "hashes_only"
     SUMMARY = "summary"
     FULL = "full"
+
+
+class OptimizationTracePolicy(str, Enum):
+    WINNERS_FAILURES_AND_SAMPLE = "winners_failures_and_sample"
+    FULL = "full"
+    METADATA_ONLY = "metadata_only"
+
+
+@dataclass(frozen=True)
+class LiveProjectionConfiguration:
+    enabled: bool
+    minimum_interval_seconds: int
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> LiveProjectionConfiguration:
+        _reject_unknown(payload, {"enabled", "minimum_interval_seconds"}, "recording.projection.live")
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ConfigurationError("recording.projection.live.enabled must be a boolean")
+        return cls(
+            enabled,
+            _positive_int(
+                payload.get("minimum_interval_seconds"),
+                "recording.projection.live.minimum_interval_seconds",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class StageBoundaryProjectionConfiguration:
+    tables: str
+    summaries: bool
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object]
+    ) -> StageBoundaryProjectionConfiguration:
+        _reject_unknown(payload, {"tables", "summaries"}, "recording.projection.stage_boundary")
+        tables = _identifier(
+            payload.get("tables"), "recording.projection.stage_boundary.tables"
+        )
+        if tables not in {"incremental", "disabled"}:
+            raise ConfigurationError(
+                "recording.projection.stage_boundary.tables must be incremental or disabled"
+            )
+        summaries = payload.get("summaries")
+        if not isinstance(summaries, bool):
+            raise ConfigurationError(
+                "recording.projection.stage_boundary.summaries must be a boolean"
+            )
+        return cls(tables, summaries)
+
+
+@dataclass(frozen=True)
+class FinalProjectionConfiguration:
+    reports: bool
+    plotly: bool
+    evidence: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> FinalProjectionConfiguration:
+        _reject_unknown(
+            payload,
+            {"reports", "plotly", "evidence"},
+            "recording.projection.finalization",
+        )
+        values = []
+        for key in ("reports", "plotly", "evidence"):
+            value = payload.get(key)
+            if not isinstance(value, bool):
+                raise ConfigurationError(
+                    f"recording.projection.finalization.{key} must be a boolean"
+                )
+            values.append(value)
+        return cls(*values)
+
+
+@dataclass(frozen=True)
+class TraceProjectionConfiguration:
+    optimization_policy: OptimizationTracePolicy
+    optimization_sample_rate: float
+    validation_policy: str
+    test_policy: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> TraceProjectionConfiguration:
+        _reject_unknown(payload, {"optimization", "validation", "test"}, "recording.projection.traces")
+        optimization = _mapping(
+            payload.get("optimization"), "recording.projection.traces.optimization"
+        )
+        _reject_unknown(
+            optimization,
+            {"policy", "sample_rate"},
+            "recording.projection.traces.optimization",
+        )
+        try:
+            optimization_policy = OptimizationTracePolicy(optimization.get("policy"))
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError(
+                "recording.projection.traces.optimization.policy is invalid"
+            ) from error
+        sample_rate = optimization.get("sample_rate", 0.0)
+        if (
+            not isinstance(sample_rate, (int, float))
+            or isinstance(sample_rate, bool)
+            or not 0.0 <= float(sample_rate) <= 1.0
+        ):
+            raise ConfigurationError(
+                "recording.projection.traces.optimization.sample_rate must be between 0 and 1"
+            )
+        policies = []
+        for key in ("validation", "test"):
+            item = _mapping(payload.get(key), f"recording.projection.traces.{key}")
+            _reject_unknown(item, {"policy"}, f"recording.projection.traces.{key}")
+            policy = _identifier(item.get("policy"), f"recording.projection.traces.{key}.policy")
+            if policy != "full":
+                raise ConfigurationError(
+                    f"recording.projection.traces.{key}.policy must be full"
+                )
+            policies.append(policy)
+        return cls(optimization_policy, float(sample_rate), policies[0], policies[1])
+
+
+@dataclass(frozen=True)
+class RecordingProjectionConfiguration:
+    live: LiveProjectionConfiguration
+    stage_boundary: StageBoundaryProjectionConfiguration
+    finalization: FinalProjectionConfiguration
+    traces: TraceProjectionConfiguration
+
+    @classmethod
+    def from_mapping(
+        cls, payload: Mapping[str, object]
+    ) -> RecordingProjectionConfiguration:
+        _reject_unknown(
+            payload,
+            {"live", "stage_boundary", "finalization", "traces"},
+            "recording.projection",
+        )
+        return cls(
+            LiveProjectionConfiguration.from_mapping(
+                _mapping(payload.get("live"), "recording.projection.live")
+            ),
+            StageBoundaryProjectionConfiguration.from_mapping(
+                _mapping(
+                    payload.get("stage_boundary"),
+                    "recording.projection.stage_boundary",
+                )
+            ),
+            FinalProjectionConfiguration.from_mapping(
+                _mapping(payload.get("finalization"), "recording.projection.finalization")
+            ),
+            TraceProjectionConfiguration.from_mapping(
+                _mapping(payload.get("traces"), "recording.projection.traces")
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RecorderQueueConfiguration:
+    id: str
+    type: str
+    path: str
+    live_coalescing: bool
+    lease_seconds: int
+    max_attempts: int
+
+    @classmethod
+    def from_mapping(
+        cls, queue_id: str, payload: Mapping[str, object]
+    ) -> RecorderQueueConfiguration:
+        field = f"recorder_queues.{queue_id}"
+        _reject_unknown(
+            payload,
+            {"type", "path", "live_coalescing", "lease_seconds", "max_attempts"},
+            field,
+        )
+        queue_type = _identifier(payload.get("type"), f"{field}.type")
+        if queue_type != "filesystem":
+            raise ConfigurationError(f"{field}.type must be filesystem")
+        live_coalescing = payload.get("live_coalescing")
+        if not isinstance(live_coalescing, bool):
+            raise ConfigurationError(f"{field}.live_coalescing must be a boolean")
+        return cls(
+            _identifier(queue_id, "recorder queue id"),
+            queue_type,
+            _relative_path(payload.get("path"), f"{field}.path"),
+            live_coalescing,
+            _positive_int(payload.get("lease_seconds"), f"{field}.lease_seconds"),
+            _positive_int(payload.get("max_attempts"), f"{field}.max_attempts"),
+        )
 
 
 @dataclass(frozen=True)
@@ -363,10 +549,12 @@ class RecorderConfiguration:
 class RecordingConfiguration:
     enabled: bool
     recorder: str
-    mode: RecordingMode
+    queue: str
     failure_policy: RecordingFailurePolicy
+    wait_on_run_exit: bool
     artifact_policy: RecordingArtifactPolicy
     content_policy: RecordingContentPolicy
+    projection: RecordingProjectionConfiguration
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> RecordingConfiguration:
@@ -375,22 +563,21 @@ class RecordingConfiguration:
             {
                 "enabled",
                 "recorder",
-                "mode",
+                "queue",
                 "failure_policy",
+                "wait_on_run_exit",
                 "artifact_policy",
                 "content_policy",
+                "projection",
             },
             "recording",
         )
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise ConfigurationError("recording.enabled must be a boolean")
-        try:
-            mode = RecordingMode(payload.get("mode"))
-        except (TypeError, ValueError) as error:
-            raise ConfigurationError(
-                "recording.mode must be finalize_only or live_and_finalize"
-            ) from error
+        wait_on_run_exit = payload.get("wait_on_run_exit")
+        if not isinstance(wait_on_run_exit, bool):
+            raise ConfigurationError("recording.wait_on_run_exit must be a boolean")
         try:
             failure_policy = RecordingFailurePolicy(payload.get("failure_policy"))
         except (TypeError, ValueError) as error:
@@ -410,10 +597,14 @@ class RecordingConfiguration:
         return cls(
             enabled,
             _identifier(payload.get("recorder"), "recording.recorder"),
-            mode,
+            _identifier(payload.get("queue"), "recording.queue"),
             failure_policy,
+            wait_on_run_exit,
             artifact_policy,
             content_policy,
+            RecordingProjectionConfiguration.from_mapping(
+                _mapping(payload.get("projection"), "recording.projection")
+            ),
         )
 
 
@@ -1684,7 +1875,7 @@ class ComparisonConfiguration:
         )
         if primary_metric != "score.mean":
             raise ConfigurationError(
-                f"{field}.primary_metric supports only score.mean in schema 15"
+                f"{field}.primary_metric supports only score.mean in schema 16"
             )
         return cls(
             _identifier(comparison_id, "comparison id"),
@@ -1702,6 +1893,7 @@ class WorkspaceConfiguration:
     data_root: str | None
     recording: RecordingConfiguration
     recorders: Mapping[str, RecorderConfiguration]
+    recorder_queues: Mapping[str, RecorderQueueConfiguration]
     executors: Mapping[str, ExecutorConfiguration]
     deployments: Mapping[str, DeploymentConfiguration]
     models: Mapping[str, ModelConfiguration]
@@ -1719,6 +1911,7 @@ class WorkspaceConfiguration:
                 "workspace",
                 "recording",
                 "recorders",
+                "recorder_queues",
                 "executors",
                 "deployments",
                 "models",
@@ -1752,6 +1945,17 @@ class WorkspaceConfiguration:
         if recording.recorder not in recorders:
             raise ConfigurationError(
                 f"recording references unknown recorder {recording.recorder!r}"
+            )
+        queues_payload = _mapping(payload.get("recorder_queues"), "recorder_queues")
+        recorder_queues = {
+            queue_id: RecorderQueueConfiguration.from_mapping(
+                queue_id, _mapping(item, f"recorder_queues.{queue_id}")
+            )
+            for queue_id, item in queues_payload.items()
+        }
+        if recording.queue not in recorder_queues:
+            raise ConfigurationError(
+                f"recording references unknown recorder queue {recording.queue!r}"
             )
         experiments_payload = _mapping(payload.get("experiments"), "experiments")
         experiments = {
@@ -1942,7 +2146,7 @@ class WorkspaceConfiguration:
         )
         if duplicated_memberships:
             raise ConfigurationError(
-                "an experiment may belong to only one comparison in schema 15: "
+                "an experiment may belong to only one comparison in schema 16: "
                 f"{duplicated_memberships}"
             )
         result = cls(
@@ -1951,6 +2155,7 @@ class WorkspaceConfiguration:
             data_root,
             recording,
             MappingProxyType(recorders),
+            MappingProxyType(recorder_queues),
             MappingProxyType(executors),
             MappingProxyType(deployments),
             MappingProxyType(models),

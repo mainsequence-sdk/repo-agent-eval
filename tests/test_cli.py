@@ -53,7 +53,7 @@ def test_init_creates_one_manifest_and_external_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data_root"].endswith("ms_agent_eval/example-evaluation")
     repository = WorkspaceRepository.from_file(workspace)
-    assert repository.workspace.schema_version == 15
+    assert repository.workspace.schema_version == 16
     assert repository.workspace.models["solver"].reasoning_effort == "high"
     assert repository.workspace.models["judge"].reasoning_effort == "none"
     assert repository.workspace.executors["remote-models"].total_concurrency == 10
@@ -120,14 +120,19 @@ def test_cli_exposes_deterministic_report_backfill() -> None:
     assert arguments.all is False
 
 
-def test_cli_exposes_recorder_health_status_and_backfill() -> None:
+def test_cli_exposes_recorder_health_status_projector_and_worker() -> None:
     doctor = _parser().parse_args(
         ["recorder", "doctor", "--read-only", "--workspace", "workspace.yaml"]
     )
     status = _parser().parse_args(
         ["recorder", "status", "--run", "run-1", "--workspace", "workspace.yaml"]
     )
-    sync = _parser().parse_args(["recorder", "sync", "--all", "--workspace", "workspace.yaml"])
+    project = _parser().parse_args(
+        ["recorder", "project", "--run", "run-1", "--workspace", "workspace.yaml"]
+    )
+    worker = _parser().parse_args(
+        ["recorder", "worker", "--once", "--workspace", "workspace.yaml"]
+    )
 
     assert (doctor.command, doctor.recorder_command, doctor.read_only) == (
         "recorder",
@@ -135,7 +140,8 @@ def test_cli_exposes_recorder_health_status_and_backfill() -> None:
         True,
     )
     assert (status.recorder_command, status.run) == ("status", "run-1")
-    assert (sync.recorder_command, sync.all) == ("sync", True)
+    assert (project.recorder_command, project.run) == ("project", "run-1")
+    assert (worker.recorder_command, worker.once) == ("worker", True)
 
 
 def test_cli_exposes_generation_free_token_preflight() -> None:

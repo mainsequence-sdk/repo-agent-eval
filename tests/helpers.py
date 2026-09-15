@@ -26,15 +26,29 @@ Write schema-v6 packages and design rubrics for semantic evaluation by the LLM j
 
 def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str, object]:
     return {
-        "schema_version": 15,
+        "schema_version": 16,
         "workspace": {"id": "synthetic-evaluation"},
         "recording": {
             "enabled": False,
             "recorder": "local-mlflow",
-            "mode": "live_and_finalize",
+            "queue": "local-recorder-queue",
             "failure_policy": "continue",
+            "wait_on_run_exit": False,
             "artifact_policy": "full",
             "content_policy": "full",
+            "projection": {
+                "live": {"enabled": True, "minimum_interval_seconds": 15},
+                "stage_boundary": {"tables": "incremental", "summaries": True},
+                "finalization": {"reports": True, "plotly": True, "evidence": True},
+                "traces": {
+                    "optimization": {
+                        "policy": "winners_failures_and_sample",
+                        "sample_rate": 0.05,
+                    },
+                    "validation": {"policy": "full"},
+                    "test": {"policy": "full"},
+                },
+            },
         },
         "recorders": {
             "local-mlflow": {
@@ -42,6 +56,15 @@ def workspace_payload(*, skills: Mapping[str, object] | None = None) -> dict[str
                 "tracking_uri": "http://127.0.0.1:5000",
                 "experiment_name": "ms-agent-eval/{workspace_id}",
                 "authentication": {"type": "none"},
+            }
+        },
+        "recorder_queues": {
+            "local-recorder-queue": {
+                "type": "filesystem",
+                "path": "operations/recorder-queue",
+                "live_coalescing": True,
+                "lease_seconds": 300,
+                "max_attempts": 12,
             }
         },
         "executors": {

@@ -269,15 +269,16 @@ class TerminalRunReporter:
         status = str(event.details.get("status", "unknown"))
         recorder = str(event.details.get("recorder", "recorder"))
         external = event.details.get("external_run_id")
-        if status == "synced":
+        if status == "published":
             suffix = f" · run {external}" if isinstance(external, str) else ""
             self.console.print(f"[green]Recorded in {recorder}{suffix}[/green]")
             return
-        error = event.details.get("last_error")
-        message = error.get("message") if isinstance(error, Mapping) else None
-        suffix = f": {message}" if isinstance(message, str) and message else ""
+        queue = event.details.get("queue", {})
+        pending = queue.get("pending") if isinstance(queue, Mapping) else None
+        suffix = f" · {pending} queued" if isinstance(pending, int) else ""
         self.console.print(
-            f"[yellow]Recording {status} in {recorder}{suffix}; retry with recorder sync[/yellow]"
+            f"[yellow]Recording {status} in {recorder}{suffix}; "
+            "run recorder project or recorder worker[/yellow]"
         )
 
     def _recording_sync_started(self, event: ProgressEvent) -> None:

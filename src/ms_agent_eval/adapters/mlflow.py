@@ -16,7 +16,7 @@ from ms_agent_eval.core.recorder import (
     ExperimentDescriptor,
     ExternalBinding,
     RecorderCapabilities,
-    RecordingPlan,
+    ProjectionBatch,
     RunDescriptor,
     ScopeDescriptor,
     TableArtifact,
@@ -215,9 +215,9 @@ class MlflowRecorder:
             )
             return str(run.info.run_id)
 
-    def sync(
+    def apply(
         self,
-        plan: RecordingPlan,
+        plan: ProjectionBatch,
         binding: ExternalBinding,
     ) -> Mapping[str, object]:
         with self._authenticated():

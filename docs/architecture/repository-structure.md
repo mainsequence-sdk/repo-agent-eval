@@ -6,7 +6,7 @@
 
 ```text
 core/
-  workspace.py             schema-v15 deployments, arms, recorder, reuse, and stage manifest
+  workspace.py             schema-v16 deployments, arms, recorder queues, reuse, and stages
   sources.py               GitHub tag/commit resolution
   snapshots.py             immutable external instruction snapshots
   authoring.py              immutable evidence context for Codex authoring
@@ -14,7 +14,8 @@ core/
   planning.py              generated indexes and experiment locks
   stages.py                immutable packets/results and append-only lifecycle
   lifecycle.py             canonical run-level lifecycle events
-  recorder.py              recorder-neutral plans, outbox, bindings, and receipts
+  recorder.py              recorder-neutral batches, adapters, workers, and bindings
+  recorder_queue.py        durable intents, coalescing, leases, retries, and cursors
   recording_projection.py deterministic evidence-to-recorder projection
   endpoint_pool.py         threaded replica permits and cross-process slot locks
   coordinator.py           resumable staged evaluate/optimize orchestration

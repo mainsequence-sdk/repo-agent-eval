@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 
 workspace:
   id: mainsequence-sdk-evaluation
@@ -7,10 +7,28 @@ workspace:
 recording:
   enabled: true
   recorder: local-mlflow
-  mode: live_and_finalize
+  queue: local-recorder-queue
   failure_policy: continue
+  wait_on_run_exit: false
   artifact_policy: full
   content_policy: full
+  projection:
+    live:
+      enabled: true
+      minimum_interval_seconds: 15
+    stage_boundary:
+      tables: incremental
+      summaries: true
+    finalization:
+      reports: true
+      plotly: true
+      evidence: true
+    traces:
+      optimization:
+        policy: winners_failures_and_sample
+        sample_rate: 0.05
+      validation: {policy: full}
+      test: {policy: full}
 
 recorders:
   local-mlflow:
@@ -19,6 +37,14 @@ recorders:
     experiment_name: ms-agent-eval/{workspace_id}/{experiment_id}
     authentication:
       type: none
+
+recorder_queues:
+  local-recorder-queue:
+    type: filesystem
+    path: operations/recorder-queue
+    live_coalescing: true
+    lease_seconds: 300
+    max_attempts: 12
 
 executors:
   lan-inference:

@@ -146,7 +146,8 @@ serve the deployment named by the shared Qwen deployment revision. For an
 authenticated provider, configure
 `api_key_env` on the applicable endpoint item and keep only the credential
 value in `.env`.
-The workspace enables `live_and_finalize` MLflow recording with full evidence.
+The workspace queues full-evidence recorder projection for independent MLflow
+workers. The experiment command never renders or uploads reports itself.
 Install it with `uv sync --extra mlflow`, start the tracking server outside Git,
 and run `ms-agent-eval recorder doctor` before inference. An unavailable MLflow
 server leaves retryable pending delivery and does not fail the benchmark. See

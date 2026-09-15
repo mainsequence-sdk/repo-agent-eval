@@ -171,10 +171,10 @@ uv run ms-agent-eval init \
   --recording-content-policy full
 ```
 
-The generated schema-v15 `workspace.yaml` has these top-level concerns:
+The generated schema-v16 `workspace.yaml` has these top-level concerns:
 
-1. `recording` and `recorders`: optional, retryable experiment projection and
-   its MLflow destination.
+1. `recording`, `recorders`, and `recorder_queues`: optional projection policy,
+   external destinations, and durable independent-worker delivery.
 2. `executors`, `deployments`, and `models`: transport routes, immutable served
    model revisions, and role-specific inference profiles.
 3. `stages`: portable reuse and budget policies; experiment arms select models.
@@ -381,11 +381,12 @@ For an external harness, prepare or claim a packet and submit a JSON result with
 `stage prepare`, `stage claim`, and `stage submit`. Packet, result, transition,
 model, executor, and usage evidence is append-only under the external data root.
 
-When `recording.enabled` is true, each durable stage checkpoint is projected to
-MLflow and terminal state is flushed automatically. A tracking outage leaves a
-local pending event but never invalidates the evaluation. Retry without model
-calls using `ms-agent-eval recorder sync --run <run-id> --workspace
-workspace.yaml`; see [Experiment recording with MLflow](docs/execution/experiment-recording.md).
+When `recording.enabled` is true, each durable checkpoint appends a small queue
+intent. The experiment process never renders reports or calls MLflow. Run
+`ms-agent-eval recorder worker --workspace workspace.yaml` independently, or
+project one run with `ms-agent-eval recorder project --run <run-id> --workspace
+workspace.yaml`. A tracking outage never invalidates the evaluation; see
+[Experiment recording with MLflow](docs/execution/experiment-recording.md).
 
 Generated snapshots, solver calls, judge calls, compiled
 state, results, and reports remain outside Git. Only `workspace.yaml`, reviewed

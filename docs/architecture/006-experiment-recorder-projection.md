@@ -17,6 +17,10 @@
 > Schema note: ADR-009 refines the MLflow mapping to one Experiment per
 > workspace and adds immutable cross-arm `model_comparison` runs. Historical
 > per-experiment naming examples below document ADR-006's original decision.
+>
+> Execution note: ADR-013 supersedes coordinator-owned background projection
+> and terminal flushing. Recorder work now executes only through durable queue
+> intents claimed by independent workers.
 
 ## Context
 
@@ -677,6 +681,10 @@ retention policy, normal artifact garbage collection may reclaim otherwise
 unreferenced projection intermediates.
 
 ## Automatic synchronization
+
+> Superseded by
+> [ADR-013: Queued Recorder Workers and Incremental Projection](013-queued-recorder-workers.md).
+> This section records ADR-006's original behavior.
 
 When recording is enabled, normal execution requests a sync after these durable
 checkpoints:

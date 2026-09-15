@@ -1,6 +1,6 @@
 # Workspace Schema Reference
 
-The current manifest schema is version 14. Unknown fields, legacy schemas,
+The current manifest schema is version 15. Unknown fields, legacy schemas,
 ambiguous instruction selection, unsafe paths, and invalid cross-references fail
 closed.
 
@@ -15,8 +15,9 @@ without adopting later workspace edits. See
 | --- | --- |
 | `workspace.id` | Stable workspace identifier. |
 | `workspace.data_root` | Optional external storage root. |
-| `recording` | Boolean enablement, recorder id, `live_and_finalize` or `finalize_only` mode, `continue` failure policy, artifact policy, and content policy. |
+| `recording` | Boolean enablement, recorder and queue ids, projection phases, `continue` failure policy, artifact policy, content policy, and optional exit waiting. |
 | `recorders.<id>` | MLflow HTTP(S) tracking URI, experiment-name template, and non-secret authentication references. |
+| `recorder_queues.<id>` | Filesystem queue path, live coalescing, lease duration, and retry limit. |
 | `executors.<id>` | Executor `type`, `adapter`, and adapter-specific options; endpoint executors require a non-empty `endpoints` list. |
 | `executors.<id>.endpoints[]` | Unique endpoint `id`, HTTP(S) `base_url`, positive physical `max_concurrent_requests`, optional `api_key_env`, and non-empty deployment `routes`. |
 | `executors.<id>.endpoints[].routes[]` | Deployment id eligible on this endpoint and exact request `model` sent to its API. |

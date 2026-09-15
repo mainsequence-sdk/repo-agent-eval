@@ -75,7 +75,7 @@ from .optimization import (
 from .planning import CompiledWorkspace, ExperimentLock, lock_as_dict
 from .progress import ProgressEvent, ProgressSink
 from .providers import ModelCallObserver, failure_kind
-from .recorder import RecorderFactory, RecorderService, recorder_service
+from .recorder import RecorderFactory, RecorderWorkerService, recorder_worker_service
 from .reporting import PublishedReport, build_and_publish_run_report
 from .stage_executors import (
     AutomaticExecutionFailed,
@@ -110,7 +110,6 @@ from .workspace import (
     LabeledFewShotConfiguration,
     ResolvedRoleModel,
     RoleBudget,
-    RecordingMode,
     WORKSPACE_SCHEMA_VERSION,
     WorkspaceRepository,
     load_yaml,
@@ -572,10 +571,11 @@ class StageCoordinator:
             for executor in repository.workspace.executors.values()
             if executor.type is ExecutorType.ENDPOINT
         }
-        self.recorder_service: RecorderService = recorder_service(
+        self.recorder_service: RecorderWorkerService = recorder_worker_service(
             self.artifacts,
             recording=repository.workspace.recording,
             recorders=repository.workspace.recorders,
+            recorder_queues=repository.workspace.recorder_queues,
             environment=repository.environment(),
             adapter_factory=recorder_factory,
         )
@@ -623,7 +623,6 @@ class StageCoordinator:
         resolved_environment = (
             environment if environment is not None else self.workspace.repository.environment()
         )
-        self.recorder_service.configure_environment(resolved_environment)
         lock = self.workspace.experiment_lock(experiment_id, environment=resolved_environment)
         if pilot and lock.configuration.mode is not ExperimentMode.EVALUATE:
             raise PreflightError("pilot execution supports evaluate experiments only")
@@ -861,6 +860,7 @@ class StageCoordinator:
         # edit from changing or colliding with the experiment revision bundle.
         payload.pop("recording", None)
         payload.pop("recorders", None)
+        payload.pop("recorder_queues", None)
         workspace = dict(_mapping(payload.get("workspace"), "workspace configuration"))
         workspace["data_root"] = self.artifacts.data_root.as_posix()
         payload["workspace"] = workspace
@@ -971,7 +971,40 @@ class StageCoordinator:
                 if isinstance(self.workspace, WorkspaceRepository)
                 else self.workspace.repository
             )
-            workspace_payload["recording"] = json_value(active_repository.workspace.recording)
+            active_recording = active_repository.workspace.recording
+            trace_projection = active_recording.projection.traces
+            workspace_payload["recording"] = {
+                "enabled": active_recording.enabled,
+                "recorder": active_recording.recorder,
+                "queue": active_recording.queue,
+                "failure_policy": active_recording.failure_policy.value,
+                "wait_on_run_exit": active_recording.wait_on_run_exit,
+                "artifact_policy": active_recording.artifact_policy.value,
+                "content_policy": active_recording.content_policy.value,
+                "projection": {
+                    "live": {
+                        "enabled": active_recording.projection.live.enabled,
+                        "minimum_interval_seconds": active_recording.projection.live.minimum_interval_seconds,
+                    },
+                    "stage_boundary": {
+                        "tables": active_recording.projection.stage_boundary.tables,
+                        "summaries": active_recording.projection.stage_boundary.summaries,
+                    },
+                    "finalization": {
+                        "reports": active_recording.projection.finalization.reports,
+                        "plotly": active_recording.projection.finalization.plotly,
+                        "evidence": active_recording.projection.finalization.evidence,
+                    },
+                    "traces": {
+                        "optimization": {
+                            "policy": trace_projection.optimization_policy.value,
+                            "sample_rate": trace_projection.optimization_sample_rate,
+                        },
+                        "validation": {"policy": trace_projection.validation_policy},
+                        "test": {"policy": trace_projection.test_policy},
+                    },
+                },
+            }
             # Recorder IDs are mapping keys in workspace.yaml, not fields in
             # the recorder payload.  Serializing the dataclass directly would
             # leak its normalized ``id`` back into the external schema.
@@ -983,6 +1016,16 @@ class StageCoordinator:
                     "authentication": json_value(recorder.authentication),
                 }
                 for recorder_id, recorder in active_repository.workspace.recorders.items()
+            }
+            workspace_payload["recorder_queues"] = {
+                queue_id: {
+                    "type": queue.type,
+                    "path": queue.path,
+                    "live_coalescing": queue.live_coalescing,
+                    "lease_seconds": queue.lease_seconds,
+                    "max_attempts": queue.max_attempts,
+                }
+                for queue_id, queue in active_repository.workspace.recorder_queues.items()
             }
             (root / "workspace.yaml").write_text(
                 canonical_json_bytes(workspace_payload).decode("utf-8"),
@@ -1266,7 +1309,6 @@ class StageCoordinator:
         resolved_environment = (
             environment if environment is not None else self.workspace.repository.environment()
         )
-        self.recorder_service.configure_environment(resolved_environment)
         if not self._is_active_revision(run, resolved_environment):
             with self._frozen_coordinator(run, resolved_environment) as coordinator:
                 return coordinator.resume(
@@ -1489,7 +1531,6 @@ class StageCoordinator:
         resolved_environment = (
             environment if environment is not None else self.workspace.repository.environment()
         )
-        self.recorder_service.configure_environment(resolved_environment)
         if not self._is_active_revision(run, resolved_environment):
             with self._frozen_coordinator(run, resolved_environment) as coordinator:
                 return coordinator.execute_packet(
@@ -1612,6 +1653,12 @@ class StageCoordinator:
                 "judge_validation_failed",
                 judge_validation,
             )
+        self._recording_checkpoint(
+            run_id,
+            force=True,
+            stage=StageKind.VALIDATE_JUDGE.value,
+            boundary_id="judge-validation-completed",
+        )
         if through == StageKind.VALIDATE_JUDGE.value:
             return self._progress(run_id, lock.configuration.id, "paused", judge_validation.stage)
 
@@ -1635,6 +1682,12 @@ class StageCoordinator:
                 pending = self._execute_all(validation_fits, lock, session)
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
+                self._recording_checkpoint(
+                    run_id,
+                    force=True,
+                    stage=StageKind.FIT.value,
+                    boundary_id="cross-validation-fit-completed",
+                )
                 if through == StageKind.FIT.value:
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.FIT)
                 validation_solves = self._validation_solve_packets(
@@ -1653,6 +1706,18 @@ class StageCoordinator:
                 )
                 if pending is not None:
                     return self._blocked_progress(run_id, lock.configuration.id, pending)
+                self._recording_checkpoint(
+                    run_id,
+                    force=True,
+                    stage=StageKind.SOLVE.value,
+                    boundary_id="cross-validation-solve-completed",
+                )
+                self._recording_checkpoint(
+                    run_id,
+                    force=True,
+                    stage=StageKind.JUDGE.value,
+                    boundary_id="cross-validation-judge-completed",
+                )
                 if through == StageKind.JUDGE.value:
                     return self._progress(run_id, lock.configuration.id, "paused", StageKind.JUDGE)
                 selection = self._selection_packet(
@@ -1660,11 +1725,23 @@ class StageCoordinator:
                 )
                 if not self._ensure_executed(selection, lock, session):
                     return self._blocked_progress(run_id, lock.configuration.id, selection)
+                self._recording_checkpoint(
+                    run_id,
+                    force=True,
+                    stage=StageKind.SELECT.value,
+                    boundary_id="selection-completed",
+                )
                 if through == StageKind.SELECT.value:
                     return self._progress(run_id, lock.configuration.id, "paused", selection.stage)
                 final_fit = self._final_fit_packet(run_id, lock, judge_validation, selection)
                 if not self._ensure_executed(final_fit, lock, session):
                     return self._blocked_progress(run_id, lock.configuration.id, final_fit)
+            self._recording_checkpoint(
+                run_id,
+                force=True,
+                stage=StageKind.FIT.value,
+                boundary_id="final-program-completed",
+            )
             if isinstance(lock.configuration.optimizer, CoproConfiguration):
                 baseline_solves = self._solve_packets(
                     run_id,
@@ -1715,6 +1792,18 @@ class StageCoordinator:
         )
         if pending is not None:
             return self._blocked_progress(run_id, lock.configuration.id, pending)
+        self._recording_checkpoint(
+            run_id,
+            force=True,
+            stage=StageKind.SOLVE.value,
+            boundary_id="test-solve-completed",
+        )
+        self._recording_checkpoint(
+            run_id,
+            force=True,
+            stage=StageKind.JUDGE.value,
+            boundary_id="test-judge-completed",
+        )
         if through == StageKind.JUDGE.value:
             return self._progress(run_id, lock.configuration.id, "paused", StageKind.JUDGE)
         aggregate = self._aggregate_packet(
@@ -1726,6 +1815,12 @@ class StageCoordinator:
         )
         if not self._ensure_executed(aggregate, lock, session):
             return self._blocked_progress(run_id, lock.configuration.id, aggregate)
+        self._recording_checkpoint(
+            run_id,
+            force=True,
+            stage=StageKind.AGGREGATE.value,
+            boundary_id="aggregate-completed",
+        )
         if through == StageKind.AGGREGATE.value:
             return self._progress(run_id, lock.configuration.id, "paused", aggregate.stage)
         aggregate_status = self.ledger.status(aggregate.packet_id)
@@ -5935,15 +6030,17 @@ class StageCoordinator:
             },
         )
         if lifecycle_state is not None:
+            terminal_recording = lifecycle_state in {
+                RunLifecycleState.COMPLETED,
+                RunLifecycleState.FAILED,
+                RunLifecycleState.CANCELLED,
+            }
             self._recording_checkpoint(
                 run_id,
-                force=lifecycle_state
-                in {
-                    RunLifecycleState.COMPLETED,
-                    RunLifecycleState.FAILED,
-                    RunLifecycleState.CANCELLED,
-                },
-                flush=True,
+                force=True,
+                flush=terminal_recording,
+                stage=None if stage is None else stage.value,
+                boundary_id=status,
             )
         return progress
 
@@ -5953,6 +6050,8 @@ class StageCoordinator:
         *,
         force: bool = False,
         flush: bool = False,
+        stage: str | None = None,
+        boundary_id: str | None = None,
     ) -> Mapping[str, object] | None:
         repository = (
             self.workspace
@@ -5962,19 +6061,9 @@ class StageCoordinator:
         recording = repository.workspace.recording
         if not recording.enabled:
             return None
-        if recording.mode is RecordingMode.FINALIZE_ONLY and not force:
-            return None
         if flush:
-            self._emit(
-                "recording_sync_started",
-                run_id,
-                _string(
-                    self.ledger.load_run(run_id).get("experiment_id"),
-                    "run experiment_id",
-                ),
-                details={"recorder": recording.recorder},
-            )
-            status = self.recorder_service.flush(run_id)
+            queued = self.recorder_service.enqueue_finalization(run_id)
+            status = self.recorder_service.status(run_id)
             self._emit(
                 "recording_status",
                 run_id,
@@ -5982,11 +6071,16 @@ class StageCoordinator:
                     self.ledger.load_run(run_id).get("experiment_id"),
                     "run experiment_id",
                 ),
-                details=dict(status),
+                details={**dict(status), "enqueue": dict(queued)},
             )
             return status
-        self.recorder_service.request_sync(run_id)
-        return None
+        if force:
+            return self.recorder_service.enqueue_stage_boundary(
+                run_id,
+                stage=stage or "run",
+                boundary_id=boundary_id or "forced-checkpoint",
+            )
+        return self.recorder_service.request_sync(run_id)
 
     def _validate_judge_validation_split(
         self, lock: ExperimentLock, *, pilot: bool = False
@@ -6028,13 +6122,15 @@ def _upgrade_frozen_workspace_payload(
     version = payload.get("schema_version")
     if version == WORKSPACE_SCHEMA_VERSION:
         return json.loads(canonical_json_bytes(payload))
-    if WORKSPACE_SCHEMA_VERSION != 15 or version not in {13, 14}:
+    if WORKSPACE_SCHEMA_VERSION != 16 or version not in {13, 14, 15}:
         raise IntegrityError(
             f"frozen workspace schema_version {version!r} cannot be rehydrated by "
             f"schema {WORKSPACE_SCHEMA_VERSION}"
         )
 
     upgraded = json.loads(canonical_json_bytes(payload))
+    if version == 15:
+        return _upgrade_frozen_recording_payload(upgraded)
     if version == 14:
         experiments = _mapping(upgraded.get("experiments"), "frozen workspace experiments")
         upgraded_experiments: dict[str, object] = {}
@@ -6071,9 +6167,8 @@ def _upgrade_frozen_workspace_payload(
                     "seed": legacy_validation.get("seed", 0),
                 }
             upgraded_experiments[experiment_id] = experiment
-        upgraded["schema_version"] = WORKSPACE_SCHEMA_VERSION
         upgraded["experiments"] = upgraded_experiments
-        return upgraded
+        return _upgrade_frozen_recording_payload(upgraded)
 
     stages = _mapping(upgraded.get("stages"), "frozen workspace stages")
     models = _mapping(upgraded.get("models"), "frozen workspace models")
@@ -6214,6 +6309,46 @@ def _upgrade_frozen_workspace_payload(
     upgraded["stages"] = upgraded_stages
     upgraded["experiments"] = upgraded_experiments
     upgraded.setdefault("comparisons", {})
+    return _upgrade_frozen_recording_payload(upgraded)
+
+
+def _upgrade_frozen_recording_payload(upgraded: dict[str, object]) -> dict[str, object]:
+    """Add the queue-backed recorder contract to a historical frozen workspace."""
+
+    raw_recording = upgraded.get("recording")
+    if isinstance(raw_recording, Mapping):
+        recording = dict(raw_recording)
+        recording.pop("mode", None)
+        recording.update(
+            {
+                "queue": "local-recorder-queue",
+                "wait_on_run_exit": False,
+                "projection": {
+                    "live": {"enabled": True, "minimum_interval_seconds": 15},
+                    "stage_boundary": {"tables": "incremental", "summaries": True},
+                    "finalization": {"reports": True, "plotly": True, "evidence": True},
+                    "traces": {
+                        "optimization": {
+                            "policy": "winners_failures_and_sample",
+                            "sample_rate": 0.05,
+                        },
+                        "validation": {"policy": "full"},
+                        "test": {"policy": "full"},
+                    },
+                },
+            }
+        )
+        upgraded["recording"] = recording
+    upgraded["recorder_queues"] = {
+        "local-recorder-queue": {
+            "type": "filesystem",
+            "path": "operations/recorder-queue",
+            "live_coalescing": True,
+            "lease_seconds": 300,
+            "max_attempts": 12,
+        }
+    }
+    upgraded["schema_version"] = WORKSPACE_SCHEMA_VERSION
     return upgraded
 
 

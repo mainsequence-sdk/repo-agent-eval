@@ -1049,6 +1049,27 @@ class StageLedger:
             raise
         return sequence
 
+    def latest_transition_sequence(self, run_id: str) -> int:
+        """Read the run transition high-water mark without loading packet history."""
+
+        state_root = self.store.operations_root / "run-state" / run_id
+        counter = state_root / "stage-transition-sequence"
+        if counter.is_file() and not counter.is_symlink():
+            try:
+                return int(counter.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise IntegrityError("stage transition sequence counter is invalid") from error
+        root = self.store.manifest_root / "runs" / run_id / "transitions"
+        if not root.is_dir():
+            return 0
+        return max(
+            (
+                int(self._load_mapping(path, "stage transition").get("sequence", 0))
+                for path in root.glob("*.json")
+            ),
+            default=0,
+        )
+
     @staticmethod
     def _load_mapping(path: Path, label: str) -> Mapping[str, object]:
         if not path.is_file() or path.is_symlink():

@@ -36,6 +36,7 @@ from .stages import StageArtifact, StageKind, StageLedger, StageState, StageStat
 from .storage import FilesystemArtifactStore
 from .workspace import (
     WORKSPACE_SCHEMA_VERSION,
+    OptimizationTracePolicy,
     RecorderConfiguration,
     RecordingArtifactPolicy,
     RecordingConfiguration,
@@ -68,7 +69,17 @@ class RecorderProjector:
         self.recorder = recorder
         self.recording = recording
 
-    def build(self, run_id: str) -> RecordingPlan:
+    def build(self, run_id: str, *, phase: str | None = None) -> RecordingPlan:
+        if phase is not None and phase not in {
+            "live_progress",
+            "stage_boundary",
+            "finalization",
+            "reconcile",
+            "backfill",
+        }:
+            raise RecordingError(f"unknown recording projection phase: {phase}")
+        live_projection = phase == "live_progress"
+        final_projection = phase is None or phase in {"finalization", "reconcile", "backfill"}
         run = self.ledger.load_run(run_id)
         statuses = self.ledger.list(run_id)
         lifecycle = self.lifecycle.list(run_id)
@@ -111,10 +122,15 @@ class RecorderProjector:
             report,
             start_time_ms,
         )
-        available_tables = self._tables(statuses, model_calls, report, scope_by_packet)
+        available_tables = (
+            ()
+            if live_projection
+            else self._tables(statuses, model_calls, report, scope_by_packet)
+        )
         tables = (
             available_tables
-            if status
+            if phase is not None
+            or status
             in {
                 RunLifecycleState.COMPLETED,
                 RunLifecycleState.FAILED,
@@ -122,105 +138,89 @@ class RecorderProjector:
             }
             else ()
         )
-        traces = self._traces(statuses, model_calls, scope_by_packet)
+        traces = (
+            () if live_projection else self._traces(statuses, model_calls, scope_by_packet)
+        )
         artifacts: list[ArtifactDescriptor] = []
         omissions: list[Mapping[str, object]] = []
-
-        dag = self._dag(statuses, scope_by_packet)
-        graph_artifacts = {
-            "graphs/execution-dag.json": (
-                canonical_json_bytes(dag),
+        if final_projection:
+            dag = self._dag(statuses, scope_by_packet)
+            graph_artifacts = {
+                "graphs/execution-dag.json": (
+                    canonical_json_bytes(dag),
+                    "application/json",
+                ),
+                "graphs/execution-dag.svg": (
+                    _dag_svg(dag),
+                    "image/svg+xml",
+                ),
+            }
+            charts, chart_omissions = self._charts(report, statuses, model_calls)
+            graph_artifacts.update(charts)
+            omissions.extend(chart_omissions)
+            chart_manifest = _chart_manifest(graph_artifacts, omissions)
+            graph_artifacts["graphs/manifest.json"] = (
+                canonical_json_bytes(chart_manifest),
                 "application/json",
-            ),
-            "graphs/execution-dag.svg": (
-                _dag_svg(dag),
-                "image/svg+xml",
-            ),
-        }
-        charts, chart_omissions = self._charts(report, statuses, model_calls)
-        graph_artifacts.update(charts)
-        omissions.extend(chart_omissions)
-        chart_manifest = _chart_manifest(graph_artifacts, omissions)
-        graph_artifacts["graphs/manifest.json"] = (
-            canonical_json_bytes(chart_manifest),
-            "application/json",
-        )
-        graph_artifacts["graphs/index.html"] = (
-            _chart_index_html(
-                chart_manifest,
-                dag,
-                tuple(self._stage_row(item) for item in statuses),
-                tuple(self._model_call_row(item) for item in model_calls),
-                self._endpoint_rows(statuses),
-            ),
-            "text/html",
-        )
-
-        if self.recording.artifact_policy is RecordingArtifactPolicy.FULL:
-            for path, (payload, media_type) in sorted(graph_artifacts.items()):
-                artifacts.append(self._artifact(path, payload, media_type))
+            )
+            graph_artifacts["graphs/index.html"] = (
+                _chart_index_html(
+                    chart_manifest,
+                    dag,
+                    tuple(self._stage_row(item) for item in statuses),
+                    tuple(self._model_call_row(item) for item in model_calls),
+                    self._endpoint_rows(statuses),
+                ),
+                "text/html",
+            )
             table_index = _table_index_html(available_tables)
             recording_index = _recording_index_html(
                 run_descriptor, chart_manifest, available_tables
             )
+            if self.recording.artifact_policy is RecordingArtifactPolicy.FULL:
+                for path, (payload, media_type) in sorted(graph_artifacts.items()):
+                    artifacts.append(self._artifact(path, payload, media_type))
+                artifacts.append(
+                    self._artifact("tables/index.html", table_index, "text/html")
+                )
+                artifacts.append(self._artifact("index.html", recording_index, "text/html"))
+                artifacts.extend(self._identity_artifacts(run))
+                artifacts.extend(self._report_artifacts(run_id))
+                if self.recording.content_policy is RecordingContentPolicy.FULL:
+                    artifacts.extend(self._full_evidence_artifacts(statuses, model_calls))
+            self._materialize_local_run_assets(
+                run_id,
+                {
+                    **graph_artifacts,
+                    "tables/index.html": (table_index, "text/html"),
+                    "index.html": (recording_index, "text/html"),
+                },
+            )
+            artifact_index = self._artifact_index(run_id, statuses, model_calls, artifacts)
             artifacts.append(
                 self._artifact(
-                    "tables/index.html",
-                    table_index,
-                    "text/html",
+                    "evidence/artifact-index.json",
+                    canonical_json_bytes(artifact_index),
+                    "application/json",
                 )
             )
+            recorder_manifest = {
+                "schema_version": 1,
+                "recorder": self.recorder.id,
+                "recorder_type": self.recorder.type,
+                "recorder_config_hash": self.recorder.configuration_hash,
+                "content_policy": self.recording.content_policy.value,
+                "artifact_policy": self.recording.artifact_policy.value,
+                "canonical_run_id": run_id,
+                "canonical_experiment_revision_id": revision,
+            }
             artifacts.append(
                 self._artifact(
-                    "index.html",
-                    recording_index,
-                    "text/html",
+                    "identity/recorder-manifest.json",
+                    canonical_json_bytes(recorder_manifest),
+                    "application/json",
                 )
             )
-            artifacts.extend(self._identity_artifacts(run))
-            artifacts.extend(self._report_artifacts(run_id))
-            if self.recording.content_policy is RecordingContentPolicy.FULL:
-                artifacts.extend(self._full_evidence_artifacts(statuses, model_calls))
-        else:
-            table_index = _table_index_html(available_tables)
-            recording_index = _recording_index_html(
-                run_descriptor, chart_manifest, available_tables
-            )
-
-        self._materialize_local_run_assets(
-            run_id,
-            {
-                **graph_artifacts,
-                "tables/index.html": (table_index, "text/html"),
-                "index.html": (recording_index, "text/html"),
-            },
-        )
-
-        artifact_index = self._artifact_index(run_id, statuses, model_calls, artifacts)
-        artifacts.append(
-            self._artifact(
-                "evidence/artifact-index.json",
-                canonical_json_bytes(artifact_index),
-                "application/json",
-            )
-        )
-        recorder_manifest = {
-            "schema_version": 1,
-            "recorder": self.recorder.id,
-            "recorder_type": self.recorder.type,
-            "recorder_config_hash": self.recorder.configuration_hash,
-            "content_policy": self.recording.content_policy.value,
-            "artifact_policy": self.recording.artifact_policy.value,
-            "canonical_run_id": run_id,
-            "canonical_experiment_revision_id": revision,
-        }
-        artifacts.append(
-            self._artifact(
-                "identity/recorder-manifest.json",
-                canonical_json_bytes(recorder_manifest),
-                "application/json",
-            )
-        )
 
         source_sequence = (
             len(lifecycle)
@@ -1510,10 +1510,24 @@ class RecorderProjector:
             attempt_id = call.get("attempt_id")
             if isinstance(attempt_id, str):
                 calls_by_attempt[attempt_id].append(call)
+        winner_ids: set[str] = set()
+        for status in statuses:
+            if status.packet.stage is not StageKind.SELECT or status.result is None:
+                continue
+            try:
+                output = _mapping(self.ledger.read_output(status.result), "selection output")
+            except (IntegrityError, OSError, ValueError):
+                continue
+            selected = output.get("selected_candidate_id")
+            if isinstance(selected, str):
+                winner_ids.add(selected)
         traces: list[TraceDescriptor] = []
         for status in statuses:
             result = status.result
             if result is None:
+                continue
+            trace_mode = self._trace_mode(status, winner_ids)
+            if trace_mode == "omit":
                 continue
             packet = status.packet
             calls = sorted(
@@ -1522,7 +1536,11 @@ class RecorderProjector:
             )
             inputs = self._trace_inputs(status)
             outputs = self._trace_outputs(status)
-            spans = tuple(self._span(call, index) for index, call in enumerate(calls, start=1))
+            spans = (
+                ()
+                if trace_mode == "metadata"
+                else tuple(self._span(call, index) for index, call in enumerate(calls, start=1))
+            )
             links: list[Mapping[str, object]] = [
                 {"type": "dependency", "packet_id": dependency}
                 for dependency in packet.dependencies
@@ -1563,14 +1581,57 @@ class RecorderProjector:
                     name=f"{packet.stage.value}:{packet.attempt_id.removeprefix('sha256:')[:12]}",
                     scope_id=scope_by_packet[packet.packet_id],
                     status=result.status,
-                    inputs=inputs,
-                    outputs=outputs,
+                    inputs={} if trace_mode == "metadata" else inputs,
+                    outputs={} if trace_mode == "metadata" else outputs,
                     attributes=attributes,
                     spans=spans,
                     links=tuple(links),
                 )
             )
         return _topological_traces(tuple(traces))
+
+    def _trace_mode(self, status: StageStatus, winner_ids: set[str]) -> str:
+        """Select full, metadata-only, or omitted optimization traces deterministically."""
+
+        result = status.result
+        assert result is not None
+        packet = status.packet
+        phase, candidate, _ = self._stage_coordinates(status)
+        if result.error is not None or packet.stage is StageKind.VALIDATE_JUDGE:
+            return "full"
+        if phase in {"test", "pilot"}:
+            return "full"
+        is_optimization = packet.stage in {
+            StageKind.OPTIMIZE,
+            StageKind.FIT,
+            StageKind.SELECT,
+        } or phase in {
+            "validation",
+            "cross_validation",
+            "copro_search",
+            "copro_candidate",
+            "optimization_partition",
+            "final_fit",
+        }
+        if not is_optimization:
+            return "full"
+        policy = self.recording.projection.traces.optimization_policy
+        if policy is OptimizationTracePolicy.FULL:
+            return "full"
+        if policy is OptimizationTracePolicy.METADATA_ONLY:
+            return "metadata"
+        if packet.stage is StageKind.SELECT or candidate in winner_ids or phase in {
+            "optimization_partition",
+            "final_fit",
+        }:
+            return "full"
+        digest = packet.work_id.removeprefix("sha256:")
+        bucket = int(digest[:16], 16) / float(2**64)
+        return (
+            "full"
+            if bucket < self.recording.projection.traces.optimization_sample_rate
+            else "omit"
+        )
 
     def _trace_inputs(self, status: StageStatus) -> object:
         packet = status.packet
@@ -2544,7 +2605,7 @@ def _table(name: str, rows: Sequence[Mapping[str, object]]) -> TableArtifact:
     # Version 2 distinguishes MLflow tables produced after fixing the artifact
     # path collision that overwrote MLflow's split-orient table payload with a
     # recorder-neutral {"rows": ...} document. A new id causes an existing run
-    # to publish a repaired table on its next recorder sync.
+    # to publish a repaired table in the next queued recorder projection.
     return TableArtifact(
         content_hash({"schema_version": 2, "name": name, "rows": normalized}),
         name,

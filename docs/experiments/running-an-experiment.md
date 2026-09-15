@@ -88,7 +88,7 @@ retry it without model calls:
 ```bash
 uv run --extra mlflow ms-agent-eval recorder status --run <run-id> \
   --workspace workspace.yaml
-uv run --extra mlflow ms-agent-eval recorder sync --run <run-id> \
+uv run --extra mlflow ms-agent-eval recorder project --run <run-id> \
   --workspace workspace.yaml
 ```
 

@@ -100,7 +100,7 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
                 "seed": validation["seed"],
             }
 
-    with pytest.raises(ConfigurationError, match="schema_version must be 15"):
+    with pytest.raises(ConfigurationError, match="schema_version must be 16"):
         WorkspaceConfiguration.from_mapping(legacy)
 
     upgraded = _upgrade_frozen_workspace_payload(legacy)
@@ -109,7 +109,7 @@ def test_schema_v13_is_upgraded_only_for_an_immutable_frozen_run() -> None:
     upgraded["recorders"] = current["recorders"]
     parsed = WorkspaceConfiguration.from_mapping(upgraded)
 
-    assert parsed.schema_version == 15
+    assert parsed.schema_version == 16
     assert parsed.experiments["baseline"].roles.solver == "solver"
     assert parsed.models["solver"].deployment == "frozen-solver"
     assert {
@@ -137,13 +137,13 @@ def test_schema_v14_is_upgraded_only_for_an_immutable_frozen_run() -> None:
         "seed": validation["seed"],
     }
 
-    with pytest.raises(ConfigurationError, match="schema_version must be 15"):
+    with pytest.raises(ConfigurationError, match="schema_version must be 16"):
         WorkspaceConfiguration.from_mapping(frozen)
 
     upgraded = _upgrade_frozen_workspace_payload(frozen)
     parsed = WorkspaceConfiguration.from_mapping(upgraded)
 
-    assert parsed.schema_version == 15
+    assert parsed.schema_version == 16
     assert parsed.experiments["optimize"].validation is not None
     assert parsed.experiments["optimize"].validation.seed == 0
     optimizer = parsed.experiments["optimize"].optimizer

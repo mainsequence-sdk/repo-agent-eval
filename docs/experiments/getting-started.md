@@ -49,7 +49,7 @@ uv run --project /path/to/ms-agent-eval ms-agent-eval init \
 Use repeated `--skill-file path/to/SKILL.md` arguments instead of
 `--skills-directory` for an exact list. The forms are mutually exclusive.
 
-The command creates a schema-v15 `workspace.yaml`, `case-authoring.md`, a local
+The command creates a schema-v16 `workspace.yaml`, `case-authoring.md`, a local
 `cases/README.md`, a draft `cases/coverage.yaml` capability catalog, an empty
 case bank, grouped split manifest, and judge-validation manifest. It does not
 copy the target repository into the workspace. When `workspace.data_root` is
@@ -180,7 +180,7 @@ uv run --extra mlflow ms-agent-eval recorder doctor \
 ```
 
 The experiment still runs when MLflow is unavailable; recorder state remains
-pending for a later `recorder sync`. Read
+pending for a later `recorder project` or `recorder worker`. Read
 [Experiment recording](../execution/experiment-recording.md) for server setup,
 privacy policies, authentication, status, and backfill.
 

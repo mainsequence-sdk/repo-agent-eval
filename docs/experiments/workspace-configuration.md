@@ -1,8 +1,9 @@
 # Workspace Configuration
 
 `workspace.yaml` is the only framework configuration file in an experiment
-workspace. Schema version 15 separates transport executors, semantic model
-deployments, role profiles, experiment arms, comparisons, and recorder projection.
+workspace. Schema version 16 separates transport executors, semantic model
+deployments, role profiles, experiment arms, comparisons, recorder projection,
+and recorder queue execution.
 
 ## Top-level structure
 
@@ -10,8 +11,9 @@ deployments, role profiles, experiment arms, comparisons, and recorder projectio
 | --- | --- |
 | `schema_version` | Exact workspace schema; legacy schemas are rejected. |
 | `workspace` | Workspace id and optional external `data_root`. |
-| `recording` | Selected recorder, checkpoint mode, failure, artifact, and content policies. |
+| `recording` | Selected recorder and queue plus projection, failure, artifact, and content policies. |
 | `recorders` | External experiment-tracking destinations and credential references. |
+| `recorder_queues` | Durable projection-intent queues, leases, retries, and coalescing. |
 | `executors` | Endpoint, harness, or local-process transport configuration and endpoint routes. |
 | `deployments` | Semantic model identity, immutable revision, and serving executor. |
 | `models` | Role-specific profile referencing a deployment, with reasoning effort, parameters, and configured cost. |
@@ -21,7 +23,7 @@ deployments, role profiles, experiment arms, comparisons, and recorder projectio
 | `comparisons` | Explicit baseline/optimization arm sets for compatible cross-model reports. |
 
 ```yaml
-schema_version: 15
+schema_version: 16
 
 workspace:
   id: example-evaluation
@@ -29,10 +31,19 @@ workspace:
 recording:
   enabled: true
   recorder: local-mlflow
-  mode: live_and_finalize
+  queue: local-recorder-queue
   failure_policy: continue
+  wait_on_run_exit: false
   artifact_policy: full
   content_policy: full
+  projection:
+    live: {enabled: true, minimum_interval_seconds: 15}
+    stage_boundary: {tables: incremental, summaries: true}
+    finalization: {reports: true, plotly: true, evidence: true}
+    traces:
+      optimization: {policy: winners_failures_and_sample, sample_rate: 0.05}
+      validation: {policy: full}
+      test: {policy: full}
 
 recorders:
   local-mlflow:
@@ -40,6 +51,14 @@ recorders:
     tracking_uri: http://127.0.0.1:5000
     experiment_name: ms-agent-eval/{workspace_id}
     authentication: {type: none}
+
+recorder_queues:
+  local-recorder-queue:
+    type: filesystem
+    path: operations/recorder-queue
+    live_coalescing: true
+    lease_seconds: 300
+    max_attempts: 12
 
 executors: {}
 deployments: {}
@@ -93,18 +112,27 @@ and [Execution](../execution/index.md) for executor configuration.
 
 ## Recording and recorder destinations
 
-`recording` selects one configured destination and controls when and how much
-is projected. `recorders` defines reusable destinations independently from
-solver/judge endpoint executors:
+`recording` selects one destination and queue and controls what workers
+project. `recorders` defines reusable destinations independently from
+solver/judge endpoint executors. `recorder_queues` controls durable scheduling:
 
 ```yaml
 recording:
   enabled: true
   recorder: shared-mlflow
-  mode: live_and_finalize       # or finalize_only
+  queue: local-recorder-queue
   failure_policy: continue
+  wait_on_run_exit: false
   artifact_policy: full         # or index_only
   content_policy: summary       # hashes_only, summary, or full
+  projection:
+    live: {enabled: true, minimum_interval_seconds: 15}
+    stage_boundary: {tables: incremental, summaries: true}
+    finalization: {reports: true, plotly: true, evidence: true}
+    traces:
+      optimization: {policy: winners_failures_and_sample, sample_rate: 0.05}
+      validation: {policy: full}
+      test: {policy: full}
 
 recorders:
   shared-mlflow:
@@ -114,13 +142,22 @@ recorders:
     authentication:
       type: bearer
       token_env: MLFLOW_TRACKING_TOKEN
+
+recorder_queues:
+  local-recorder-queue:
+    type: filesystem
+    path: operations/recorder-queue
+    live_coalescing: true
+    lease_seconds: 300
+    max_attempts: 12
 ```
 
 The experiment-name template accepts `{workspace_id}` and `{experiment_id}`, but
 the standard layout deliberately uses only `{workspace_id}` so every arm is
 visible in one MLflow Experiment. URLs, policies, and secret environment-variable names are
-versioned configuration; credential values are not. Recorder failure remains
-visible and retryable but does not change the semantic outcome of a run.
+versioned configuration; credential values are not. The experiment process
+only appends pointer-only intents. Recorder failure remains visible and
+retryable but does not change the semantic outcome of a run.
 
 ## Endpoint executor pools
 
@@ -345,13 +382,13 @@ comparisons:
     grouping: [solver, optimizer]
 ```
 
-One experiment may belong to one named comparison in schema 15. A completed
+One experiment may belong to one named comparison in schema 16. A completed
 valid arm automatically refreshes an immutable `model_comparison` projection in
 the workspace-level MLflow Experiment. The manifest selects the latest completed
 report for each `arm_id` and refuses to mix benchmark revisions, comparison
 groups, or judge identities.
 
-Schema 15 supports `score.mean` as the primary comparison metric. Grouping is a
+Schema 16 supports `score.mean` as the primary comparison metric. Grouping is a
 unique subset of `solver` and `optimizer`; every optimization arm must name one
 of the comparison's listed baselines through `based_on`; and every listed arm
 must use the same judge profile.

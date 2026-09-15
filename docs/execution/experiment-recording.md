@@ -1,26 +1,32 @@
 # Experiment Recording with MLflow
 
-MS Agent Eval records each run in MLflow automatically while retaining the
-external filesystem artifact store as the source of truth. MLflow is a
-retryable inspection and comparison projection: a recorder outage cannot alter
-scores, invalidate cache reuse, or fail an otherwise valid experiment.
+MS Agent Eval records runs through a recorder-neutral durable queue while
+retaining the external filesystem artifact store as the source of truth.
+MLflow is the first adapter, not part of the experiment process. Recorder
+workers perform projection independently, so recorder CPU, rendering, uploads,
+or outages cannot delay model execution, alter scores, or invalidate reuse.
 
 ## Data flow
 
 ```mermaid
 flowchart LR
     Stages[Solver, judge, and optimizer stages] --> Canonical[Canonical local evidence]
-    Canonical --> Report[Human-readable report bundle]
-    Canonical --> Plan[Deterministic RecordingPlan]
-    Plan --> Outbox[Durable recorder outbox]
-    Outbox --> MLflow[MLflow experiment and runs]
+    Canonical --> Intent[Small pointer-only projection intent]
+    Intent --> Queue[Durable recorder queue]
+    Queue --> Worker[Independent recorder worker]
+    Canonical --> Worker
+    Worker --> Report[Human-readable report bundle]
+    Worker --> MLflow[MLflow experiment and runs]
     MLflow --> Receipt[Local binding and receipt]
 ```
 
-Every stage result is committed locally before recording is requested. A
-background worker coalesces live checkpoints, and terminal runs synchronously
-flush the latest state. Historical synchronization reads the same canonical
-evidence and makes zero author, solver, judge, or optimizer calls.
+Every stage result is committed locally before a projection intent is queued.
+The coordinator never imports MLflow, builds tables, renders charts, constructs
+a complete recording plan, or waits for a recorder. Live intents coalesce by
+run and recorder. Stage and finalization intents remain durable. Historical
+projection reads canonical evidence and makes zero author, solver, judge, or
+optimizer calls. See
+[ADR-013](../architecture/013-queued-recorder-workers.md).
 
 ## Install and run MLflow
 
@@ -51,15 +57,24 @@ Recorder settings are durable workspace configuration, not environment
 variables:
 
 ```yaml
-schema_version: 15
+schema_version: 16
 
 recording:
   enabled: true
   recorder: local-mlflow
-  mode: live_and_finalize
+  queue: local-recorder-queue
   failure_policy: continue
+  wait_on_run_exit: false
   artifact_policy: full
   content_policy: full
+  projection:
+    live: {enabled: true, minimum_interval_seconds: 15}
+    stage_boundary: {tables: incremental, summaries: true}
+    finalization: {reports: true, plotly: true, evidence: true}
+    traces:
+      optimization: {policy: winners_failures_and_sample, sample_rate: 0.05}
+      validation: {policy: full}
+      test: {policy: full}
 
 recorders:
   local-mlflow:
@@ -68,12 +83,21 @@ recorders:
     experiment_name: ms-agent-eval/{workspace_id}
     authentication:
       type: none
+
+recorder_queues:
+  local-recorder-queue:
+    type: filesystem
+    path: operations/recorder-queue
+    live_coalescing: true
+    lease_seconds: 300
+    max_attempts: 12
 ```
 
-`mode: live_and_finalize` updates MLflow throughout the run and flushes the
-terminal state. `finalize_only` records only terminal, failed, or cancelled
-runs. The only supported failure policy is `continue`: a failed delivery leaves
-a durable pending event and visible error for retry.
+`projection` controls what workers produce. `recorder_queues` controls durable
+delivery and retry. `wait_on_run_exit` defaults to `false`; the experiment
+finishes when semantic execution finishes, not when external projection
+finishes. The only supported failure policy is `continue`: failed delivery is
+visible and retryable but cannot change the experiment result.
 
 Live checkpoints record progress metrics, compact traces, and current graph
 artifacts. Complete result tables are terminal assets: uploading a new
@@ -140,11 +164,36 @@ uv run --extra mlflow ms-agent-eval recorder doctor --read-only \
 
 ## Run and inspect
 
-No recorder-specific flag is required:
+The experiment command only queues recording work:
 
 ```bash
 uv run --extra mlflow ms-agent-eval run baseline \
   --workspace experiments/mainsequence-sdk/workspace.yaml
+```
+
+Run a continuously polling worker in another process or on another machine
+with shared storage:
+
+```bash
+uv run --extra mlflow ms-agent-eval recorder worker \
+  --workspace experiments/mainsequence-sdk/workspace.yaml
+```
+
+For a bounded job that projects one run and exits:
+
+```bash
+uv run --extra mlflow ms-agent-eval recorder project \
+  --workspace experiments/mainsequence-sdk/workspace.yaml \
+  --run <run-id>
+```
+
+`recorder worker --once` drains currently available work and exits. Queue
+status is separate from experiment status:
+
+```bash
+uv run ms-agent-eval recorder status \
+  --workspace experiments/mainsequence-sdk/workspace.yaml \
+  --run <run-id>
 ```
 
 Open the parent run's **Artifacts** tab and select `index.html`. That is the
@@ -302,38 +351,36 @@ uv run --extra mlflow ms-agent-eval recorder status \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-Retry one run or backfill all retained runs without inference:
+Project or backfill one run without inference:
 
 ```bash
-uv run --extra mlflow ms-agent-eval recorder sync \
+uv run --extra mlflow ms-agent-eval recorder project \
   --run <run-id> \
-  --workspace experiments/mainsequence-sdk/workspace.yaml
-
-uv run --extra mlflow ms-agent-eval recorder sync \
-  --all \
   --workspace experiments/mainsequence-sdk/workspace.yaml
 ```
 
-Synchronization is idempotent. Bindings preserve external experiment, run,
-scope, and trace identifiers; content-derived item ids prevent duplicate
-metrics, tables, artifacts, and traces. A newer successful event marks older
-pending snapshots as superseded.
+Projection is idempotent. Bindings preserve external experiment, run, scope,
+and trace identifiers; content-derived item ids prevent duplicate metrics,
+tables, artifacts, and traces. The worker cursor prevents reprocessing an
+acknowledged evidence range, and expired leases return to the queue.
 
 Operational delivery state lives at:
 
 ```text
-<data-root>/operations/recorders/
-└── <recorder-id>/<recorder-config-hash>/runs/<run-id>/
-    ├── binding.json
-    ├── events/
-    ├── receipts/
-    ├── errors/
-    └── sync.lock
+<data-root>/operations/
+├── recorder-queue/<queue-id>/
+│   ├── pending/
+│   ├── leased/
+│   ├── acknowledged/
+│   ├── dead-letter/
+│   └── state/<recorder-config-hash>/<run-id>/cursor.json
+└── recorders/<recorder-id>/<recorder-config-hash>/runs/<run-id>/
+    └── binding.json
 ```
 
-Pending outbox artifacts remain garbage-collection roots. Once a matching
-receipt exists, normal automatic cleanup may remove recorder-only local blobs;
-the canonical run evidence remains governed by its own manifests.
+Pending, leased, and dead-letter required intents remain garbage-collection
+roots. Acknowledged live intents may be compacted after the cursor and receipt
+are durable; canonical run evidence remains governed by its manifests.
 
 Changing a tracking URL, experiment-name template, authentication reference,
 or recording policy creates a different `recorder_config_hash`. It does not
@@ -341,4 +388,6 @@ change the experiment revision or any model work id, so the same completed run
 can be projected to a new destination without spending inference tokens.
 
 See [ADR-006](../architecture/006-experiment-recorder-projection.md) for the
-identity, failure, privacy, and adapter boundaries.
+identity, privacy, and adapter mappings, and
+[ADR-013](../architecture/013-queued-recorder-workers.md) for queue and worker
+execution semantics.

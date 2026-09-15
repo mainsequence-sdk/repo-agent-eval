@@ -28,8 +28,8 @@ flowchart TB
         Packets[Portable stage packets]
         Views[Stage-specific read-only views]
         Results[Validated stage results]
-        Recording[Recorder-neutral projection]
-        Lock --> Packets --> Views --> Results --> Recording
+        Queue[Pointer-only recorder intent]
+        Lock --> Packets --> Views --> Results --> Queue
     end
 
     subgraph Models[Model roles]
@@ -49,7 +49,9 @@ flowchart TB
     Views --> Judge
     Solver --> Results
     Judge --> Results
-    Recording --> MLflow[MLflow comparison and traces]
+    Queue --> Worker[Independent recorder worker]
+    Results --> Worker
+    Worker --> MLflow[MLflow comparison and traces]
 ```
 
 The author receives locked authoring evidence and writes reviewable experiment
@@ -76,6 +78,7 @@ flowchart LR
             BlobStore[blobs/sha256/]
             Manifests[manifests/]
             Recorders[recorders/]
+            RecorderQueue[recorder-queue/]
             Temporary[tmp/]
         end
         Summary[summary/runs/&lt;run-id&gt;/ readable reports]
@@ -87,6 +90,7 @@ flowchart LR
     BlobStore --> Manifests
     Temporary --> BlobStore
     Manifests --> Recorders
+    Manifests --> RecorderQueue
 ```
 
 | Versioned in Git | Stored externally |
@@ -138,6 +142,10 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
   independent K-fold searches with one fixed validation holdout and a stateful
   COPRO partition chain, and makes stage reuse depend on semantic model inputs
   rather than orchestration coordinates.
+- [ADR-013](013-queued-recorder-workers.md) moves all recorder adapters and
+  projection phases behind a durable queue, adds worker leases and cursors,
+  coalesces live updates, and keeps final report generation off the experiment
+  hot path.
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 

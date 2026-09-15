@@ -7,7 +7,7 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval setup` | Interactively create or inspect a workspace. |
 | `ms-agent-eval models refresh` | Upsert the OpenRouter model list into the static catalog without deleting existing rows. |
 | `ms-agent-eval models match <name>` | Rank catalog models for a local or deployment model name. |
-| `ms-agent-eval init` | Create an explicit schema-v15 workspace and supporting files. |
+| `ms-agent-eval init` | Create an explicit schema-v16 workspace and supporting files. |
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
 | `ms-agent-eval preflight <experiment>` | Expand the complete workload, then calculate endpoint-native token fit and usable concurrency without generation. |
@@ -22,9 +22,10 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval report build --run <run-id>` | Build or verify deterministic Markdown, CSV, JSON, and per-case reports without model calls. |
 | `ms-agent-eval report build --all` | Render every retained run for one workspace. |
 | `ms-agent-eval recorder doctor` | Verify recorder connectivity and, by default, perform a temporary artifact/table/trace write probe. |
-| `ms-agent-eval recorder status --run <run-id>` | Show pending/synced delivery state and external ids. |
-| `ms-agent-eval recorder sync --run <run-id>` | Retry or backfill one run without model calls. |
-| `ms-agent-eval recorder sync --all` | Backfill every retained run without model calls. |
+| `ms-agent-eval recorder status --run <run-id>` | Show queue counts, cursor lag, publication state, and external ids. |
+| `ms-agent-eval recorder project --run <run-id>` | Project or backfill one run without model calls. |
+| `ms-agent-eval recorder worker` | Continuously consume durable recorder-queue work. |
+| `ms-agent-eval recorder worker --once` | Drain currently available queue work and exit. |
 | `ms-agent-eval codex login` | Provision dedicated subscription authentication. |
 | `ms-agent-eval codex status` | Inspect the safe authentication identity. |
 | `ms-agent-eval codex preflight` | Validate image, network, CLI, Python, and authentication without inference. |
@@ -101,7 +102,7 @@ canonical and are never rewritten by this command. Reporting resolves cases,
 models, and provenance from the run's frozen experiment definition, so later
 workspace edits cannot reinterpret an older run.
 
-`recorder doctor --read-only` skips its temporary write probe. `recorder sync`
+`recorder doctor --read-only` skips its temporary write probe. `recorder project`
 is idempotent and makes no inference calls; it rebuilds a deterministic
 projection from canonical local evidence. Recorder operations require the
 optional dependency installed by `uv sync --extra mlflow`. See

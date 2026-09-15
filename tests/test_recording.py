@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 from collections import Counter
 from pathlib import Path
@@ -16,10 +17,9 @@ from ms_agent_eval.core.planning import compile_workspace
 from ms_agent_eval.core.providers import ModelCallObserver
 from ms_agent_eval.core.recorder import (
     ExternalBinding,
+    ProjectionBatch,
     RecorderCapabilities,
-    RecorderService,
-    RecordingPlan,
-    load_recording_plan_event,
+    RecorderWorkerService,
 )
 from ms_agent_eval.core.recording_projection import (
     RecorderProjector,
@@ -63,7 +63,7 @@ class FakeRecorder:
     def __init__(self) -> None:
         self.experiments = 0
         self.runs = 0
-        self.plans: list[RecordingPlan] = []
+        self.plans: list[ProjectionBatch] = []
         self.finalized: list[RunLifecycleState] = []
         self.failures_remaining = 0
 
@@ -84,7 +84,7 @@ class FakeRecorder:
         self.runs += 1
         return "run-remote-1"
 
-    def sync(self, plan: RecordingPlan, binding: ExternalBinding):  # type: ignore[no-untyped-def]
+    def apply(self, plan: ProjectionBatch, binding: ExternalBinding):  # type: ignore[no-untyped-def]
         del binding
         if self.failures_remaining:
             self.failures_remaining -= 1
@@ -622,37 +622,39 @@ def test_recorder_delivery_is_retryable_idempotent_and_redacts_errors(
     lifecycle = RunLifecycleLedger(store)
     lifecycle.append("run-1", RunLifecycleState.CREATED, reason="run_created")
     lifecycle.append("run-1", RunLifecycleState.COMPLETED, reason="run_completed")
-    configuration = _configuration()
+    payload = workspace_payload()
+    payload["recording"]["enabled"] = True
+    configuration = WorkspaceConfiguration.from_mapping(payload)
     fake = FakeRecorder()
     fake.failures_remaining = 1
-    service = RecorderService(
+    service = RecorderWorkerService(
         store,
         configuration.recording,
         configuration.recorders[configuration.recording.recorder],
+        configuration.recorder_queues[configuration.recording.queue],
         {"RECORDER_TOKEN": "TOP_SECRET_TOKEN"},
         adapter_factory=lambda _configuration, _environment: fake,
     )
 
-    failed = service.sync_run("run-1")
-    assert failed["status"] == "failed"
-    assert "TOP_SECRET_TOKEN" not in str(failed["last_error"])
+    service.enqueue_finalization("run-1")
+    failed = service.work_once(worker_id="test-worker")
+    assert failed is not None
+    assert failed["status"] == "retrying"
+    assert "TOP_SECRET_TOKEN" not in str(failed["message"])
 
-    synced = service.sync_run("run-1", raise_on_error=True)
-    repeated = service.sync_run("run-1", raise_on_error=True)
+    time.sleep(1.01)
+    projected = service.work_once(worker_id="test-worker", raise_on_error=True)
+    repeated = service.project_run("run-1", raise_on_error=True)
 
-    assert synced["status"] == "synced"
-    assert repeated["status"] == "synced"
+    assert projected is not None
+    assert projected["status"] == "projected"
+    assert repeated["status"] == "published"
     assert len(fake.plans) == 1
-    assert fake.finalized == [
-        RunLifecycleState.COMPLETED,
-        RunLifecycleState.COMPLETED,
-    ]
-    assert synced["external_run_id"] == "run-remote-1"
-    event = next((service._run_root("run-1") / "events").glob("*.json"))
-    assert load_recording_plan_event(event).plan_id == fake.plans[0].plan_id
+    assert fake.finalized == [RunLifecycleState.COMPLETED]
+    assert repeated["external_run_id"] == "run-remote-1"
 
 
-def test_completed_run_automatically_flushes_the_recorder(tmp_path: Path) -> None:
+def test_completed_run_queues_recorder_work_without_calling_adapter(tmp_path: Path) -> None:
     repository = create_workspace(tmp_path / "workspace")
     payload = yaml.safe_load(repository.workspace_file.read_text(encoding="utf-8"))
     payload["recording"]["enabled"] = True
@@ -698,10 +700,6 @@ def test_completed_run_automatically_flushes_the_recorder(tmp_path: Path) -> Non
         return FixedObservedLM(observer, responses[model.role], model=model.role)
 
     fake = FakeRecorder()
-    # The first background projection fails, but recorder availability must
-    # not affect model work or the canonical run outcome. A later checkpoint
-    # retries the same durable projection.
-    fake.failures_remaining = 1
     from ms_agent_eval.core.runner import ExperimentRunner
 
     runner = ExperimentRunner(
@@ -713,10 +711,17 @@ def test_completed_run_automatically_flushes_the_recorder(tmp_path: Path) -> Non
     run = runner.run("baseline", environment={"TEST_API_KEY": "test-secret"})
 
     assert run.status == "completed"
+    assert not fake.plans
+    queued = runner.coordinator.recorder_service.status(run.run_id)
+    assert queued["status"] == "queued"
+    assert queued["queue"]["pending"] >= 1
+
+    projected = runner.coordinator.recorder_service.project_run(run.run_id)
+
+    assert projected["status"] == "published"
     assert fake.plans
     assert fake.plans[-1].run.status == RunLifecycleState.COMPLETED.value
     assert fake.finalized[-1] is RunLifecycleState.COMPLETED
-    assert runner.coordinator.recorder_service.status(run.run_id)["status"] == "synced"
     states = [event.state for event in runner.coordinator.lifecycle.list(run.run_id)]
     assert RunLifecycleState.REPORT_PUBLISHED in states
     assert states[-1] is RunLifecycleState.COMPLETED
@@ -871,7 +876,9 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
         "ms-agent-eval/{workspace_id}/{experiment_id}",
         RecorderAuthenticationConfiguration("none", None, None, None),
     )
-    configuration = _configuration()
+    payload = workspace_payload()
+    payload["recording"]["enabled"] = True  # type: ignore[index]
+    configuration = WorkspaceConfiguration.from_mapping(payload)
     plan = RecorderProjector(
         store,
         recorder=recorder,
@@ -946,16 +953,17 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     ).build("run-1")
     assert repeated_plan.plan_id == plan.plan_id
     assert not stale_chart.exists()
-    service = RecorderService(
+    service = RecorderWorkerService(
         store,
         configuration.recording,
         recorder,
+        configuration.recorder_queues[configuration.recording.queue],
         {},
     )
 
-    status = service.sync_run("run-1", raise_on_error=True)
+    status = service.project_run("run-1", raise_on_error=True)
 
-    assert status["status"] == "synced"
+    assert status["status"] == "published"
     client = MlflowClient(tracking_uri=recorder.tracking_uri)
     root = client.get_run(str(status["external_run_id"]))
     assert root.data.tags["agent_eval.local_run_id"] == "run-1"
@@ -981,7 +989,7 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert traces[0].info.tags["agent_eval.local_run_id"] == "run-1"
 
     lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_resumed")
-    resumed = service.sync_run("run-1", raise_on_error=True)
+    resumed = service.project_run("run-1", raise_on_error=True)
 
     assert resumed["external_run_id"] == status["external_run_id"]
     resumed_root = client.get_run(str(resumed["external_run_id"]))
@@ -994,7 +1002,7 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     assert all(item.info.status == "RUNNING" for item in scoped_runs)
 
     lifecycle.append("run-1", RunLifecycleState.CANCELLED, reason="keyboard_interrupt")
-    cancelled = service.sync_run("run-1", raise_on_error=True)
+    cancelled = service.project_run("run-1", raise_on_error=True)
 
     cancelled_root = client.get_run(str(cancelled["external_run_id"]))
     assert cancelled_root.info.status == "KILLED"
@@ -1006,7 +1014,7 @@ def test_mlflow_adapter_projects_a_stage_with_artifacts_and_trace(
     )
 
     lifecycle.append("run-1", RunLifecycleState.RUNNING, reason="run_resumed")
-    restored = service.sync_run("run-1", raise_on_error=True)
+    restored = service.project_run("run-1", raise_on_error=True)
 
     assert restored["external_run_id"] == status["external_run_id"]
     restored_root = client.get_run(str(restored["external_run_id"]))

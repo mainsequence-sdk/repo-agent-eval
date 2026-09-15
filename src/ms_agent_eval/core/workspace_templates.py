@@ -166,15 +166,29 @@ def build_workspace_template(
     if data_root is not None:
         workspace["data_root"] = data_root
     payload: dict[str, object] = {
-        "schema_version": 15,
+        "schema_version": 16,
         "workspace": workspace,
         "recording": {
             "enabled": recording_enabled,
             "recorder": "local-mlflow",
-            "mode": "live_and_finalize",
+            "queue": "local-recorder-queue",
             "failure_policy": "continue",
+            "wait_on_run_exit": False,
             "artifact_policy": "full",
             "content_policy": recording_content_policy,
+            "projection": {
+                "live": {"enabled": True, "minimum_interval_seconds": 15},
+                "stage_boundary": {"tables": "incremental", "summaries": True},
+                "finalization": {"reports": True, "plotly": True, "evidence": True},
+                "traces": {
+                    "optimization": {
+                        "policy": "winners_failures_and_sample",
+                        "sample_rate": 0.05,
+                    },
+                    "validation": {"policy": "full"},
+                    "test": {"policy": "full"},
+                },
+            },
         },
         "recorders": {
             "local-mlflow": {
@@ -182,6 +196,15 @@ def build_workspace_template(
                 "tracking_uri": mlflow_tracking_uri,
                 "experiment_name": "ms-agent-eval/{workspace_id}",
                 "authentication": {"type": "none"},
+            }
+        },
+        "recorder_queues": {
+            "local-recorder-queue": {
+                "type": "filesystem",
+                "path": "operations/recorder-queue",
+                "live_coalescing": True,
+                "lease_seconds": 300,
+                "max_attempts": 12,
             }
         },
         "executors": {

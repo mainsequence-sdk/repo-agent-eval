@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Include non-OpenRouter rows in the candidate set.",
     )
 
-    init = commands.add_parser("init", help="Create a schema-v15 incremental DSPy workspace.")
+    init = commands.add_parser("init", help="Create a schema-v16 incremental DSPy workspace.")
     init.add_argument("--id", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--ref", required=True)
@@ -305,15 +306,31 @@ def _parser() -> argparse.ArgumentParser:
     )
     recorder_status.add_argument("--run", required=True)
     _workspace_argument(recorder_status)
-    recorder_sync = recorder_commands.add_parser(
-        "sync", help="Retry or backfill recorder projection without model calls."
+    recorder_project = recorder_commands.add_parser(
+        "project", help="Consume queued recorder work for one run without model calls."
     )
-    recorder_selection = recorder_sync.add_mutually_exclusive_group(required=True)
-    recorder_selection.add_argument("--run", help="Run id to synchronize.")
-    recorder_selection.add_argument(
-        "--all", action="store_true", help="Synchronize every retained run."
+    recorder_project.add_argument("--run", required=True, help="Run id to project.")
+    _workspace_argument(recorder_project)
+    recorder_worker = recorder_commands.add_parser(
+        "worker", help="Run the independent recorder queue worker."
     )
-    _workspace_argument(recorder_sync)
+    recorder_worker.add_argument(
+        "--once",
+        action="store_true",
+        help="Drain currently available work and exit instead of polling.",
+    )
+    recorder_worker.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=2.0,
+        help="Idle polling interval for a long-running worker (default: 2).",
+    )
+    recorder_worker.add_argument(
+        "--max-items",
+        type=int,
+        help="Optional maximum number of intents to process before exiting.",
+    )
+    _workspace_argument(recorder_worker)
 
     return parser
 
@@ -515,8 +532,9 @@ def _run(
     repository = WorkspaceRepository.from_file(arguments.workspace)
     environment = repository.environment()
     if arguments.command == "recorder":
-        from .recorder import recorder_service
-        from .reporting import list_run_ids
+        from uuid import uuid4
+
+        from .recorder import recorder_worker_service
         from .stages import StageLedger
         from .storage import FilesystemArtifactStore
 
@@ -524,10 +542,11 @@ def _run(
             repository.data_root,
             workspace_root=repository.root,
         )
-        service = recorder_service(
+        service = recorder_worker_service(
             store,
             recording=repository.workspace.recording,
             recorders=repository.workspace.recorders,
+            recorder_queues=repository.workspace.recorder_queues,
             environment=environment,
         )
         if arguments.recorder_command == "doctor":
@@ -535,16 +554,32 @@ def _run(
         if arguments.recorder_command == "status":
             StageLedger(store).load_run(arguments.run)
             return service.status(arguments.run)
-        ledger = StageLedger(store)
-        run_ids = list_run_ids(ledger) if arguments.all else (arguments.run,)
-        if not run_ids:
-            raise ConfigurationError("the workspace has no retained runs")
-        statuses = [service.sync_run(run_id, raise_on_error=True) for run_id in run_ids]
+        if arguments.recorder_command == "project":
+            StageLedger(store).load_run(arguments.run)
+            return service.project_run(arguments.run, raise_on_error=True)
+        if arguments.poll_seconds <= 0:
+            raise ConfigurationError("--poll-seconds must be positive")
+        if arguments.max_items is not None and arguments.max_items < 1:
+            raise ConfigurationError("--max-items must be positive")
+        worker_id = f"recorder-worker-{uuid4()}"
+        processed: list[Mapping[str, object]] = []
+        while arguments.max_items is None or len(processed) < arguments.max_items:
+            result = service.work_once(worker_id=worker_id)
+            if result is not None:
+                processed.append(result)
+                continue
+            repaired = service.reconcile_queue()
+            if int(repaired["enqueued"]) > 0:
+                continue
+            if arguments.once:
+                break
+            time.sleep(arguments.poll_seconds)
         return {
             "schema_version": 1,
-            "status": "synced",
-            "count": len(statuses),
-            "runs": statuses,
+            "status": "idle",
+            "worker_id": worker_id,
+            "processed": len(processed),
+            "results": processed,
         }
     if arguments.command in {"validate", "inspect"}:
         from .planning import inspect_workspace

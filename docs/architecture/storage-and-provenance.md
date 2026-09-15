@@ -13,7 +13,8 @@ flowchart TB
     Packets --> Calls[Model calls or local execution]
     Calls --> Results[Validated results]
     Results --> Aggregate[Summary and regression evidence]
-    Results --> Recorder[Retryable recorder projection]
+    Results --> Queue[Durable recorder queue intent]
+    Queue --> Recorder[Independent recorder worker]
     Recorder --> MLflow[MLflow]
 
     Snapshots --> External[(External data root)]
@@ -35,7 +36,8 @@ flowchart TB
 │   ├── manifests/              revisions, work graph, attempts, runs, and results
 │   ├── locks/work/             bounded single-flight work lock buckets
 │   ├── locks/executors/        per-pool, per-endpoint request slots
-│   ├── recorders/              outbox, bindings, receipts, and delivery errors
+│   ├── recorder-queue/         intents, leases, acknowledgements, and cursors
+│   ├── recorders/              external bindings and comparison receipts
 │   └── tmp/                    atomic staging and disposable attempts
 └── summary/
     └── runs/<run-id>/          derived Markdown, CSV, JSON, and case reports
@@ -48,10 +50,11 @@ finalization. `summary.md`, `results.csv`, `results.json`, and `cases/*.md` are
 deterministic projections over retained evidence; reporting never calls an LLM.
 These files are derived and can be deleted and rebuilt.
 
-Recorder state is also derived, but its outbox is durable so an unavailable
-tracking server can be retried without inference. Pending recorder events are
-garbage-collection roots until delivery or supersession has a receipt. MLflow
-never replaces the canonical local manifests and blobs.
+Recorder state is also derived, but pointer-only queue intents are durable so
+an unavailable tracking server can be retried without inference. Independent
+workers own projection CPU, rendering, and uploads. Pending, leased, and dead-
+letter required intents remain operational retention roots. MLflow never
+replaces the canonical local manifests and blobs.
 
 Within `operations/manifests/`, selected experiment definitions live under
 `experiments/<family>/<revision>/`, reusable computations under `graph/work/`,
