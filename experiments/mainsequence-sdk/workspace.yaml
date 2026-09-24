@@ -85,6 +85,10 @@ deployments:
     executor: lan-inference
     model: qwen3.6:27b-coding
     revision: qwen3.6-27b-coding-local-2026-09-13
+  codex-spark-optimizer:
+    executor: artifact-harness
+    model: gpt-5.3-codex-spark
+    revision: gpt-5.3-codex-spark-subscription-2026-09-16
 
 models:
   author:
@@ -111,6 +115,9 @@ models:
     parameters:
       temperature: 0.7
       timeout: 600
+  optimizer-spark:
+    deployment: codex-spark-optimizer
+    reasoning_effort: low
 
 stages:
   author:
@@ -337,6 +344,36 @@ experiments:
       judge:
         model_calls: 100000
       wall_seconds: 14400
+  optimize-solver-spark:
+    mode: optimize
+    based_on: baseline
+    roles:
+      solver: solver
+      optimizer: optimizer-spark
+      judge: judge
+    optimizer:
+      strategy: copro
+      search_space:
+        type: skills
+        include: all
+      search:
+        breadth: 3
+        depth: 2
+        init_temperature: 1.4
+      metric:
+        name: rubric_mean_score
+    validation:
+      strategy: holdout
+      fraction: 0.2
+      seed: 0
+    budget:
+      optimizer:
+        model_calls: 500
+      solver:
+        model_calls: 30000
+      judge:
+        model_calls: 100000
+      wall_seconds: 14400
 
 comparisons:
   solver-and-copro-models:
@@ -344,6 +381,7 @@ comparisons:
       - baseline
     optimization_experiments:
       - optimize-solver
+      - optimize-solver-spark
     primary_metric: score.mean
     grouping:
       - solver
