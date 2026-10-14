@@ -153,6 +153,10 @@ The default external root is `~/ms_agent_eval/<workspace-id>`. An explicit
 - [DSPy feasibility report](dspy-feasibility-report.md) records the evidence
   behind the DSPy-only program architecture.
 
+- [ADR-014: Case similarity audit](014-case-similarity-audit.md) defines the
+  offline authoring audit for exact duplicates and TF-IDF cosine similarity
+  within skills, including reporting, caching, and held-out-data boundaries.
+
 Operational instructions belong under [Experiments](../experiments/index.md),
 [Training](../training/index.md), [Evaluation](../evaluation/index.md), and
 [Execution](../execution/index.md), rather than in architecture decisions.

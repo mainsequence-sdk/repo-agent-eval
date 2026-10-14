@@ -62,6 +62,7 @@ and optimized programs on the same untouched test cases.
 
 - [Evaluation workflow](evaluation/index.md)
 - [Capability coverage contract](evaluation/capability-coverage.md)
+- [Case similarity audit](evaluation/case-similarity.md)
 - [Judging and judge validation](evaluation/judging-and-validation.md)
 - [Pilot versus scored runs](evaluation/pilot-vs-scored-runs.md)
 - [Interpreting results](evaluation/interpreting-results.md)

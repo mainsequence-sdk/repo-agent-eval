@@ -34,6 +34,7 @@ relevant identities. They contain no framework-defined case verdict or pass
 rate.
 
 See [Capability coverage](capability-coverage.md),
+[case similarity audits](case-similarity.md),
 [judging and judge validation](judging-and-validation.md),
 [pilot versus scored runs](pilot-vs-scored-runs.md), and
 [interpreting results](interpreting-results.md). COPRO output details and the

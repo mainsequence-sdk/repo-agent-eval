@@ -51,6 +51,26 @@ def _parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup", help="Interactively create or inspect a workspace.")
     setup.add_argument("--workspace", type=Path)
 
+    cases = commands.add_parser("cases", help="Audit local authored case content.")
+    case_commands = cases.add_subparsers(dest="cases_command", required=True)
+    similarity = case_commands.add_parser(
+        "similarity", help="Compare all case pairs within selected skills without model calls."
+    )
+    selection = similarity.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--skill", action="append", help="Exact skill ID; repeat as needed.")
+    selection.add_argument("--all-skills", action="store_true")
+    similarity.add_argument("--representation", choices=("tfidf",), default="tfidf")
+    similarity.add_argument("--view", choices=("solver", "expected", "both"), default="solver")
+    similarity.add_argument("--top-k", type=int, default=10)
+    similarity.add_argument("--block-size", type=int, default=256)
+    similarity.add_argument(
+        "--export-pairs",
+        action="store_true",
+        help="Also stream every unique pair to CSV; can be very large.",
+    )
+    _workspace_argument(similarity)
+    _json_argument(similarity)
+
     models = commands.add_parser(
         "models",
         help="Refresh and query the static OpenRouter model catalog.",
@@ -535,6 +555,18 @@ def _run(
             "auth_root": auth.root.as_posix(),
         }
     repository = WorkspaceRepository.from_file(arguments.workspace)
+    if arguments.command == "cases":
+        from .case_similarity import audit_case_similarity
+
+        return audit_case_similarity(
+            repository,
+            skills=arguments.skill,
+            view=arguments.view,
+            top_k=arguments.top_k,
+            block_size=arguments.block_size,
+            export_pairs=arguments.export_pairs,
+            progress=None if arguments.json else lambda message: print(message, file=sys.stderr),
+        )
     environment = repository.environment()
     if arguments.command == "recorder":
         from uuid import uuid4

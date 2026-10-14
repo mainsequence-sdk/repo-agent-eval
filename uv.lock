@@ -1668,10 +1668,12 @@ source = { editable = "." }
 dependencies = [
     { name = "dspy" },
     { name = "matplotlib" },
+    { name = "numpy" },
     { name = "plotly" },
     { name = "pyyaml" },
     { name = "questionary" },
     { name = "rich" },
+    { name = "scipy" },
 ]
 
 [package.optional-dependencies]
@@ -1690,10 +1692,12 @@ requires-dist = [
     { name = "dspy", specifier = "==3.2.1" },
     { name = "matplotlib", specifier = "==3.11.2" },
     { name = "mlflow", marker = "extra == 'mlflow'", specifier = "==3.16.0" },
+    { name = "numpy", specifier = "==2.4.6" },
     { name = "plotly", specifier = "==7.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "questionary", specifier = ">=2.1,<3" },
     { name = "rich", specifier = ">=13,<16" },
+    { name = "scipy", specifier = "==1.18.1" },
 ]
 provides-extras = ["mlflow"]
 

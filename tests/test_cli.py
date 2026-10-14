@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from ms_agent_eval.core.cli import _parser, main
 from ms_agent_eval.core import planning
 from ms_agent_eval.core.planning import inspect_workspace as inspect_workspace_real
@@ -106,7 +108,12 @@ def test_no_arguments_in_noninteractive_terminal_prints_help(monkeypatch, capsys
 
 
 def test_cli_has_no_backend_case_builder_command() -> None:
-    assert "cases" not in _parser().format_help()
+    parser = _parser()
+    arguments = parser.parse_args(["cases", "similarity", "--skill", "alpha"])
+    assert arguments.cases_command == "similarity"
+    for unsupported in ("build", "generate"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["cases", unsupported])
 
 
 def test_run_defaults_to_resume_and_requires_fresh_for_a_new_run() -> None:

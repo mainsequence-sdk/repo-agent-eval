@@ -10,6 +10,7 @@ All commands accept `--workspace` when they operate on a workspace file.
 | `ms-agent-eval init` | Create an explicit schema-v17 workspace and supporting files. |
 | `ms-agent-eval validate` | Resolve and validate the complete static workspace contract. |
 | `ms-agent-eval inspect` | Display resolved identities, readiness, budgets, and blockers. |
+| `ms-agent-eval cases similarity --skill <id>` | Audit exact duplicates and TF-IDF cosine within a skill, without model calls; `--all-skills` audits the catalog. |
 | `ms-agent-eval preflight <experiment>` | Expand the complete workload, then calculate endpoint-native token fit and usable concurrency without generation. |
 | `ms-agent-eval run <experiment>` | Resume the latest unfinished matching revision, or start it when none exists; automatically manages recording when enabled. |
 | `ms-agent-eval run <experiment> --fresh` | Intentionally create another run for the current revision. |
@@ -47,6 +48,12 @@ The `models` commands do not load `workspace.yaml`. They default to
 `models/openrouter.json`; use `--catalog <path>` to select another file. See
 [OpenRouter model catalog](openrouter-model-catalog.md) for the stored fields,
 upsert behavior, and matching semantics.
+
+`cases similarity` compares every pair within each selected skill. Use
+`--view both` for separate solver-input and expected-response scores, `--top-k`
+to bound nearest-neighbor reports, and `--export-pairs` only when the full
+quadratic CSV is needed. Reports and vector caches use the external workspace
+data root. See [Case similarity audit](../evaluation/case-similarity.md).
 
 Run the endpoint diagnostic before spending inference capacity:
 
