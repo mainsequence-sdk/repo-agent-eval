@@ -8,6 +8,29 @@ The framework has no built-in target repository. Each experiment workspace
 independently selects its repository, immutable revision, instruction sources,
 cases, rubrics, and models.
 
+Versioned experiment workspaces:
+
+- [MainSequence SDK](experiments/mainsequence-sdk/README.md): authored SDK
+  evaluation bank and optimization experiments.
+- [Command Center SDK](experiments/command-center-sdk/README.md): frontend SDK
+  experiment scaffold.
+
+The MetaTables workspace is stored outside Git at
+`/Users/jose/Library/CloudStorage/GoogleDrive-jose@main-sequence.io/My Drive/admin/jarvis_project/metatables`.
+It includes 25,000 drafted cases (5,000 per skill), their catalog and splits,
+the authoring metadata, and the sixteen-project context pack for MetaTables
+0.1.35. Independent acceptance remains separate from generation.
+
+Create an ignored local link to use the existing MetaTables commands:
+
+```bash
+ln -s "/Users/jose/Library/CloudStorage/GoogleDrive-jose@main-sequence.io/My Drive/admin/jarvis_project/metatables" experiments/metatables
+```
+
+The local [MetaTables README](experiments/metatables/README.md) describes the
+workspace. Similarity reports continue to use
+`~/ms_agent_eval/metatables-evaluation`, independently of the case-bank location.
+
 ## Technology at a glance
 
 | Technology | How it is used |

@@ -12,3 +12,6 @@ __pycache__/
 /mlflow.db
 /mlruns/
 /.implementation_tasks/
+
+# Local link to the externally stored MetaTables workspace.
+/experiments/metatables
